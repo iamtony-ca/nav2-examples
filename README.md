@@ -1,7 +1,9 @@
 # nav2_custom_bt_node
+this is cusom bt decorator node for nav2.
+whenn flag is true, then navigation works, or, navigation doesn't work.
+
 
 ros2 jazzy version
-
 
 ref, 250511: https://github.com/ros-navigation/navigation2/tree/jazzy
 
