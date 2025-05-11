@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<library path="libamr_bt_nodes">
+  <class name="amr_bt_nodes::RunIfFlagTrueDecorator"
+         type="amr_bt_nodes::RunIfFlagTrueDecorator"
+         base_class_type="BT::DecoratorNode"/>
+</library>
