@@ -1,11 +1,11 @@
 # nav2_custom_bt_node
-this is custom bt decorator node for nav2.
+This is custom bt decorator node for nav2.
 when flag(topic) is true, then navigation works, or, navigation doesn't work.
 
-this is nav2 action pause/resume codes. when controller subscribes pause_flag(true), then motion gets paused, and then, when controller subscribes pause_flag(false), then motion resumes and heads to the goal. 
+This is nav2 action pause/resume codes. when controller subscribes pause_flag(true), then motion gets paused, and then, when controller subscribes pause_flag(false), then motion resumes and heads to the goal. 
 
 
-ros2 jazzy version
+ros2 jazzy version.
 
 ref, 250511: https://github.com/ros-navigation/navigation2/tree/jazzy
 
@@ -68,5 +68,5 @@ controller_server.hpp/cpp/main.cpp
 
 
 # to do
-.. planner_server.hpp/cpp : if pause and want to not publish /plan, then need to modify in planner_server.hpp/cpp.
-.. controller_ser.hpp/cpp : in order to assure if pause_flag topic gets subscribed in coontroller, then topic structure should be like service structure. That is, add topic response(publisher) from controller to pause flag's publisher node.
+.. planner_server.hpp/cpp : if pause and want to not publish /plan, then need to modify in planner_server.hpp/cpp.  
+.. controller_ser.hpp/cpp : in order to assure if pause_flag topic gets subscribed in coontroller, then topic structure should be like service structure. That is, add topic response(publisher) from controller to pause flag's publisher node.  
