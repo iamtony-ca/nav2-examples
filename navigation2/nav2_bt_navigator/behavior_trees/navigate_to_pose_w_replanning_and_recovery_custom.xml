@@ -1,9 +1,3 @@
-
-<!--
-  This Behavior Tree replans the global path periodically at 1 Hz and it also has
-  recovery actions specific to planning / control as well as general system issues.
-  This will be continuous if a kinematically valid planner is selected.
--->
 <root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
     <RecoveryNode number_of_retries="6" name="NavigateRecovery">
@@ -19,8 +13,14 @@
             </Sequence>
           </RecoveryNode>
         </RateController>
+
+        <!-- FollowPath 전에 tag_detected 조건을 확인하는 데코레이터 삽입 -->
         <RecoveryNode number_of_retries="1" name="FollowPath">
-          <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
+
+          <RunIfFlagTrueDecorator name="CheckFlag" node="{node}" flag_topic="/mission_flag">
+
+            <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
+          </RunIfFlagTrueDecorator>
           <Sequence>
             <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
             <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>

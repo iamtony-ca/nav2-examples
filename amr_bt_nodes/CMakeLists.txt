@@ -9,6 +9,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(behaviortree_cpp REQUIRED)
 find_package(pluginlib REQUIRED)
 
@@ -20,6 +21,7 @@ add_library(run_if_flag_true_decorator SHARED
 ament_target_dependencies(run_if_flag_true_decorator
   rclcpp
   std_msgs
+  geometry_msgs
   behaviortree_cpp
   pluginlib)
 
