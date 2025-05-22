@@ -1,6 +1,16 @@
 <?xml version="1.0"?>
-<library path="libamr_bt_nodes">
+<library path="run_if_flag_true_decorator">
   <class name="amr_bt_nodes::RunIfFlagTrueDecorator"
          type="amr_bt_nodes::RunIfFlagTrueDecorator"
-         base_class_type="BT::DecoratorNode"/>
+         base_class_type="BT::DecoratorNode">
+    <description>Run child only if flag is true</description>
+  </class>
+</library>
+
+<library path="check_flag_condition">
+  <class name="amr_bt_nodes::CheckFlagCondition"
+         type="amr_bt_nodes::CheckFlagCondition"
+         base_class_type="BT::ConditionNode">
+    <description>Return SUCCESS if flag is true, otherwise FAILURE</description>
+  </class>
 </library>

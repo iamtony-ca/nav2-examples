@@ -14,7 +14,6 @@ find_package(pluginlib REQUIRED)
 
 include_directories(include)
 
-# ───── Build run_if_flag_true_decorator ─────
 add_library(run_if_flag_true_decorator SHARED
   src/run_if_flag_true_decorator.cpp)
 
@@ -28,36 +27,16 @@ target_include_directories(run_if_flag_true_decorator PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 
-# ───── Build check_flag_condition ─────
-add_library(check_flag_condition SHARED
-  src/check_flag_condition.cpp)
-
-ament_target_dependencies(check_flag_condition
-  rclcpp
-  std_msgs
-  behaviortree_cpp
-  pluginlib)
-
-target_include_directories(check_flag_condition PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>)
-
-# ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
 
-# ───── Install Targets ─────
-install(TARGETS
-  run_if_flag_true_decorator
-  check_flag_condition
+install(TARGETS run_if_flag_true_decorator
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
 
-# ───── Install Headers ─────
 install(DIRECTORY include/
   DESTINATION include)
 
-# ───── Install Plugin Description ─────
 install(FILES plugin.xml
   DESTINATION share/${PROJECT_NAME})
 

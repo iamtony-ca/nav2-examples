@@ -60,7 +60,9 @@ bt_navigator:
     # plugin_lib_names is used to add custom BT plugins to the executor (vector of strings).
     # Built-in plugins are added automatically
     plugin_lib_names:
-      - "run_if_flag_true_decorator"
+      # - "run_if_flag_true_decorator"
+      - "check_flag_condition"
+
 
     error_code_names:
       - compute_path_error_code
