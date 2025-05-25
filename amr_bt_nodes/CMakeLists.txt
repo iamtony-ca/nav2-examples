@@ -9,6 +9,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(behaviortree_cpp REQUIRED)
 find_package(pluginlib REQUIRED)
 
@@ -35,12 +36,29 @@ add_library(check_flag_condition SHARED
 ament_target_dependencies(check_flag_condition
   rclcpp
   std_msgs
+  geometry_msgs
   behaviortree_cpp
   pluginlib)
 
 target_include_directories(check_flag_condition PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
+
+
+# ───── Build trigger_planner_decorator ─────
+add_library(trigger_planner_decorator SHARED
+  src/trigger_planner_decorator.cpp)
+
+ament_target_dependencies(trigger_planner_decorator
+  rclcpp
+  std_msgs
+  geometry_msgs
+  behaviortree_cpp
+  pluginlib)
+
+target_include_directories(trigger_planner_decorator PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
 
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
@@ -49,6 +67,7 @@ pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
 install(TARGETS
   run_if_flag_true_decorator
   check_flag_condition
+  trigger_planner_decorator
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)

@@ -6,7 +6,7 @@ namespace amr_bt_nodes
 CheckFlagCondition::CheckFlagCondition(
   const std::string & name,
   const BT::NodeConfiguration & config)
-: BT::ConditionNode(name, config), flag_ok_(false)
+: BT::ConditionNode(name, config), flag_ok_(true)
 {
   if (!getInput("node", node_)) {
     throw BT::RuntimeError("[CheckFlagCondition] Missing required input [node]");
@@ -34,17 +34,24 @@ CheckFlagCondition::~CheckFlagCondition()
 
 void CheckFlagCondition::flagCallback(const std_msgs::msg::Bool::SharedPtr msg)
 {
-  std::lock_guard<std::mutex> lock(flag_mutex_);
-  flag_ok_ = msg->data;
+  {
+    std::lock_guard<std::mutex> lock(flag_mutex_);
+    flag_ok_ = msg->data;
+  }
+  RCLCPP_INFO(node_->get_logger(), "[CheckFlagCondition] Received flag: %s", msg->data ? "true" : "false");
+
 }
 
 BT::NodeStatus CheckFlagCondition::tick()
 {
-  bool current_flag = false;
+  current_flag = false;
+  // bool current_flag = false;
   {
     std::lock_guard<std::mutex> lock(flag_mutex_);
     current_flag = flag_ok_;
+    flag_ok_ = false;
   }
+  
 
   RCLCPP_DEBUG(node_->get_logger(), "[CheckFlagCondition] Flag: %s", current_flag ? "true" : "false");
 

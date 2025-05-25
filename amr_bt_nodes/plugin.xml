@@ -14,3 +14,11 @@
     <description>Return SUCCESS if flag is true, otherwise FAILURE</description>
   </class>
 </library>
+
+<library path="trigger_planner_decorator">
+  <class name="amr_bt_nodes::TriggerPlannerDecorator"
+         type="amr_bt_nodes::TriggerPlannerDecorator"
+         base_class_type="BT::DecoratorNode">
+    <description>Trigger child node when flag is true</description>
+  </class>
+</library>

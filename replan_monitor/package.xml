@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>amr_bt_nodes</name>
+  <name>replan_monitor</name>
   <version>0.1.0</version>
-  <description>Custom Behavior Tree Nodes for AMR in Nav2</description>
+  <description>Global path replan monitor based on local costmap analysis</description>
 
   <maintainer email="you@example.com">Your Name</maintainer>
   <license>Apache-2.0</license>
@@ -11,13 +11,14 @@
 
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
+  <depend>nav_msgs</depend>
   <depend>geometry_msgs</depend>
-  <depend>pluginlib</depend>
-  <depend>behaviortree_cpp</depend>
+  <depend>nav2_costmap_2d</depend>
+  <depend>nav2_common</depend>
 
   <export>
     <build_type>ament_cmake</build_type>
-    <pluginlib plugin_manifest="plugin.xml" />
+    <!-- <pluginlib plugin_manifest="plugin.xml" /> -->
   </export>
 </package>
 

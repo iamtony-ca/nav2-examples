@@ -43,7 +43,7 @@ ros2 topic pub -r 2 /nav_pause_flag std_msgs/msg/Bool "{data: true}" \
 
 
 
-ros2 topic pub -r 2 /mission_flag std_msgs/msg/Bool "{data: true}" \
+ros2 topic pub --once /decor_flag std_msgs/msg/Bool "{data: true}" \
   --qos-reliability best_effort \
   --qos-history keep_last \
   --qos-depth 10
