@@ -85,7 +85,7 @@ TriggerPlannerDecorator::TriggerPlannerDecorator(
     flag_topic_ = "/decor_flag";
   }
 
-  callback_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+  callback_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
 
   rclcpp::QoS qos(10);
   qos.best_effort();
