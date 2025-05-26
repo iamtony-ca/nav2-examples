@@ -30,11 +30,11 @@ public:
 
 private:
   void flagCallback(const std_msgs::msg::Bool::SharedPtr msg);
+  void ensureSharedExecutor(rclcpp::Node::SharedPtr node);
 
   rclcpp::Node::SharedPtr node_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr flag_sub_;
   rclcpp::CallbackGroup::SharedPtr callback_group_;
-  rclcpp::executors::SingleThreadedExecutor callback_group_executor_;
 
   std::string flag_topic_;
 
@@ -43,6 +43,23 @@ private:
   bool triggered_ = true;  // 최초 1회는 실행
   bool has_last_goal_ = false;
   geometry_msgs::msg::PoseStamped last_goal_;
+};
+
+class SharedExecutor
+{
+public:
+  static void start(rclcpp::Node::SharedPtr node)
+  {
+    static std::shared_ptr<rclcpp::executors::MultiThreadedExecutor> executor;
+    static std::once_flag flag;
+    std::call_once(flag, [&]() {
+      executor = std::make_shared<rclcpp::executors::MultiThreadedExecutor>();
+      executor->add_node(node);
+      std::thread([executor]() {
+        executor->spin();
+      }).detach();
+    });
+  }
 };
 
 }  // namespace amr_bt_nodes
@@ -80,10 +97,14 @@ TriggerPlannerDecorator::TriggerPlannerDecorator(
     std::bind(&TriggerPlannerDecorator::flagCallback, this, std::placeholders::_1),
     sub_options);
 
-  callback_group_executor_.add_callback_group(callback_group_, node_->get_node_base_interface());
-  callback_group_executor_.spin_all(std::chrono::milliseconds(1));
+  ensureSharedExecutor(node_);
 
   RCLCPP_INFO(node_->get_logger(), "[TriggerPlannerDecorator] Subscribed to: %s", flag_topic_.c_str());
+}
+
+void TriggerPlannerDecorator::ensureSharedExecutor(rclcpp::Node::SharedPtr node)
+{
+  SharedExecutor::start(node);
 }
 
 void TriggerPlannerDecorator::flagCallback(const std_msgs::msg::Bool::SharedPtr msg)
