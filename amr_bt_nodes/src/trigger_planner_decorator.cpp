@@ -1,4 +1,3 @@
-
 // trigger_planner_decorator.cpp
 #include "amr_bt_nodes/trigger_planner_decorator.hpp"
 
@@ -16,35 +15,40 @@ TriggerPlannerDecorator::TriggerPlannerDecorator(
     throw BT::RuntimeError("[TriggerPlannerDecorator] Missing input [node]");
   }
   if (!getInput("flag_topic", flag_topic_)) {
-    flag_topic_ = "/decor_flag";
+    flag_topic_ = "/replan_flag";
   }
+
+  callback_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
 
   rclcpp::QoS qos(10);
   qos.best_effort();
+
+  rclcpp::SubscriptionOptions sub_options;
+  sub_options.callback_group = callback_group_;
   flag_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
     flag_topic_, qos,
-    std::bind(&TriggerPlannerDecorator::flagCallback, this, std::placeholders::_1));
+    std::bind(&TriggerPlannerDecorator::flagCallback, this, std::placeholders::_1),
+    sub_options);
 
-  SharedExecutor::ensureExecutorStarted(node_);
+  ensureSharedExecutor(node_);
+
   RCLCPP_INFO(node_->get_logger(), "[TriggerPlannerDecorator] Subscribed to: %s", flag_topic_.c_str());
+}
+
+void TriggerPlannerDecorator::ensureSharedExecutor(rclcpp::Node::SharedPtr node)
+{
+  SharedExecutor::start(node);
 }
 
 void TriggerPlannerDecorator::flagCallback(const std_msgs::msg::Bool::SharedPtr msg)
 {
   std::lock_guard<std::mutex> lock(mutex_);
-  // if (!last_flag_ && msg->data) {
-  //   triggered_ = true;
-  //   flag_triggered_ = true;
-  // }
-
   if (msg->data) {
     triggered_ = true;
-    // flag_triggered_ = true;  
   }
-
   last_flag_ = msg->data;
+  RCLCPP_INFO(node_->get_logger(), "[TriggerPlannerDecorator] Triggered by flag");
 
-  RCLCPP_INFO(node_->get_logger(), "[TriggerPlannerDecorator] last_flag_ = msg->data;");
 }
 
 BT::NodeStatus TriggerPlannerDecorator::tick()
@@ -71,7 +75,6 @@ BT::NodeStatus TriggerPlannerDecorator::tick()
     auto status = child_node_->executeTick();
     if (status == BT::NodeStatus::SUCCESS || status == BT::NodeStatus::FAILURE) {
       triggered_ = false;
-      // flag_triggered_ = false;
     }
     return status;
   }
@@ -85,14 +88,6 @@ void TriggerPlannerDecorator::halt()
 }
 
 }  // namespace amr_bt_nodes
-
-// #include "behaviortree_cpp/bt_factory.h"
-
-// BT_REGISTER_NODES(factory)
-// {
-//   factory.registerNodeType<amr_bt_nodes::TriggerPlannerDecorator>("TriggerPlannerDecorator");
-// }
-
 
 #include "behaviortree_cpp/bt_factory.h"
 

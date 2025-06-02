@@ -21,15 +21,31 @@ ReplanMonitorNode::ReplanMonitorNode()
     std::chrono::milliseconds(500),
     std::bind(&ReplanMonitorNode::evaluateReplanCondition, this));
 
-
-  RCLCPP_INFO(this->get_logger(), "ReplanMonitorNode initialized");  
+  last_replan_time_ = this->now();    // added
+  RCLCPP_INFO(this->get_logger(), "ReplanMonitorNode initialized"); 
 }
 
 void ReplanMonitorNode::pathCallback(const nav_msgs::msg::Path::SharedPtr msg) {
   std::lock_guard<std::mutex> lock(data_mutex_);
   current_path_ = *msg;
-  last_checked_index_ = 0;
+  closest_index = 0;
+
+    // testing....
+  obstacle_seen_time_.clear();
+  obstacle_distance_history_.clear();
 }
+
+// to do 특정 flag를 sub 하면 로직이 안 돌게 하기. 특정 flag 는 로봇이 움직이지 않는 상태(succeed, abort, cancel, pause et al.)
+// void ReplanMonitorNode::pathCallback(const nav_msgs::msg::Path::SharedPtr msg) {
+//   std::lock_guard<std::mutex> lock(data_mutex_);
+//   current_path_ = *msg;
+//   stop_ = 0;
+
+//     // testing....
+//   obstacle_seen_time_.clear();
+//   obstacle_distance_history_.clear();
+// }
+
 
 void ReplanMonitorNode::costmapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
   std::lock_guard<std::mutex> lock(data_mutex_);
@@ -54,9 +70,15 @@ bool ReplanMonitorNode::getCurrentPoseFromTF(geometry_msgs::msg::Pose &pose_out)
 
 void ReplanMonitorNode::evaluateReplanCondition() {
   std::lock_guard<std::mutex> lock(data_mutex_);
-
+  std_msgs::msg::Bool flag_msg;
+  flag_msg.data = false;
+  // std_msgs::msg::Bool flag_msg;
+  // flag_msg.data = false;
+  // replan_pub_->publish(flag_msg);
+  // if (current_path_.poses.size() < 2 || current_costmap_.data.empty()) {
+  //   return;
+  // }
   if (current_path_.poses.empty() || current_costmap_.data.empty()) return;
-
   geometry_msgs::msg::Pose current_pose;
   if (!getCurrentPoseFromTF(current_pose)) return;
 
@@ -67,18 +89,46 @@ void ReplanMonitorNode::evaluateReplanCondition() {
   unsigned int width = info.width;
   unsigned int height = info.height;
 
+
+
+  size_t closest_index_start = 0;
+  double min_dist = std::numeric_limits<double>::max();
+ 
+  if (closest_index <= 5) {
+    closest_index_start = closest_index;
+  }
+  else if (closest_index > 5) {
+    closest_index_start = closest_index -5;
+  }
+
+  for (size_t i = closest_index_start; i < current_path_.poses.size(); ++i) {
+    const auto &p = current_path_.poses[i].pose;
+    double dx = p.position.x - current_pose.position.x;
+    double dy = p.position.y - current_pose.position.y;
+    double dist = std::hypot(dx, dy);
+    if (dist < min_dist) {
+      min_dist = dist;
+      closest_index = i;
+    }
+  }
+
+
   rclcpp::Time now = this->now();
   double lookahead_distance = max_speed_ * lookahead_time_sec_;
   const auto &goal_pose = current_path_.poses.back().pose;
   if (!std::isfinite(goal_pose.position.x) || !std::isfinite(goal_pose.position.y)) return;
-
   size_t checked = 0, blocked = 0;
-  for (size_t i = last_checked_index_; i < current_path_.poses.size(); ++i) {
+
+
+
+ 
+  for (size_t i = closest_index; i < current_path_.poses.size(); ++i) {
+  // for (size_t i = 0; i < current_path_.poses.size(); ++i) {
+
     const auto &pose = current_path_.poses[i].pose;
     double dx = pose.position.x - current_pose.position.x;
     double dy = pose.position.y - current_pose.position.y;
     double dist = std::hypot(dx, dy);
-
     if (dist < passed_pose_ignore_dist_ || dist > lookahead_distance) continue;
 
     double goal_dist = std::hypot(pose.position.x - goal_pose.position.x,
@@ -88,11 +138,17 @@ void ReplanMonitorNode::evaluateReplanCondition() {
     int mx = static_cast<int>(std::floor((pose.position.x - origin_x) / resolution));
     int my = static_cast<int>(std::floor((pose.position.y - origin_y) / resolution));
     if (mx < 0 || my < 0 || mx >= static_cast<int>(width) || my >= static_cast<int>(height)) continue;
+   
+
+
 
     int index = my * width + mx;
     int cost = current_costmap_.data[index];
-
+    RCLCPP_INFO(this->get_logger(), "pose (%.2f, %.2%) -> grid (%f, %f), cost=%d", pose.position.x, pose.position.y, my, my, cost);
     if (cost >= cost_threshold_) {
+      if (dist < immediate_block_dist_) {
+        immediate_replan = true;
+      }
       auto it = obstacle_seen_time_.find(index);
       if (it == obstacle_seen_time_.end()) {
         obstacle_seen_time_[index] = now;
@@ -107,29 +163,46 @@ void ReplanMonitorNode::evaluateReplanCondition() {
         if (prev_dist - dist > approach_threshold_dist_) is_approaching = true;
         obstacle_distance_history_[index] = dist;
       }
-
+     
+      RCLCPP_INFO(this->get_logger(), "[DEBUG] duration.seconds()=%f ", duration.seconds());
+      // if (duration.seconds() >= obstacle_duration_threshold_sec_) { // tempp
       if (duration.seconds() >= obstacle_duration_threshold_sec_ && is_approaching) {
         blocked++;
       }
-    } else {
+    } else {  // is_approaching 관련 로직에서 global path가 update 되면서 closest_index 가 초기화 되면 아래껏들도 초기화를 해줘야될까?
       obstacle_seen_time_.erase(index);
       obstacle_distance_history_.erase(index);
     }
 
     checked++;
+
+    if (immediate_replan) {
+      flag_msg.data = true;
+      last_replan_time_ = now;
+      // RCLCPP_WARN(this->get_logger(), "Triggering replan: blocked ratio %.2f", blocked_ratio);
+      RCLCPP_WARN(this->get_logger(), "Triggering replan: immediate %.2f", immediate_block_dist_);
+      replan_pub_->publish(flag_msg);
+      RCLCPP_INFO(this->get_logger(), "immediate_replan triggered True:");
+      return;
+
+    }
+ 
+
   }
 
-  double blocked_ratio = checked > 0 ? static_cast<double>(blocked) / checked : 0.0;
 
-  std_msgs::msg::Bool flag_msg;
-  flag_msg.data = false;
-
-  if (blocked_ratio > blocked_ratio_threshold_ &&
-      (now - last_replan_time_).seconds() > cooldown_sec_) {
+  if (blocked >= blocked_threshold_ && (now - last_replan_time_).seconds() > cooldown_sec_) {
     flag_msg.data = true;
     last_replan_time_ = now;
-    RCLCPP_WARN(this->get_logger(), "Triggering replan: blocked ratio %.2f", blocked_ratio);
+    // RCLCPP_WARN(this->get_logger(), "Triggering replan: blocked ratio %.2f", blocked_ratio);
+    RCLCPP_WARN(this->get_logger(), "Triggering replan: blocked ratio %ld", blocked);
   }
 
-  replan_pub_->publish(flag_msg);
+
+  if (flag_msg.data) {
+    replan_pub_->publish(flag_msg);
+
+    RCLCPP_INFO(this->get_logger(), "Replan triggered True:");
+  }
+
 }

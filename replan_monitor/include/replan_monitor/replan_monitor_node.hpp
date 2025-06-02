@@ -38,23 +38,28 @@ private:
   std::unordered_map<int, rclcpp::Time> obstacle_seen_time_;
   std::unordered_map<int, double> obstacle_distance_history_;
   std::mutex data_mutex_;
-  size_t last_checked_index_ = 0;
+  // size_t last_checked_index_ = 0;
+  size_t closest_index = 0;
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
   std::string target_frame_ = "base_link";
-  std::string source_frame_ = "map";
+  std::string source_frame_ = "map"; //map
 
   // Parameters
   double cooldown_sec_ = 1.0;
-  double blocked_ratio_threshold_ = 0.3;
+  double blocked_ratio_threshold_ = 0.15;
+  size_t blocked_threshold_ = 2;
   double passed_pose_ignore_dist_ = 0.3;
-  double obstacle_duration_threshold_sec_ = 1.0;
+  double obstacle_duration_threshold_sec_ = 0.5;
   double approach_threshold_dist_ = 0.1;
   double max_speed_ = 0.5;
-  double lookahead_time_sec_ = 2.5;
-  double goal_ignore_radius_ = 0.005;
+  double lookahead_time_sec_ = 15;
+  double goal_ignore_radius_ = 0.2;
   double cost_threshold_ = 20;
+  double immediate_block_dist_ = 0.7;
+  bool immediate_replan = false;
+
 };
 
 #endif // REPLAN_MONITOR_NODE_HPP

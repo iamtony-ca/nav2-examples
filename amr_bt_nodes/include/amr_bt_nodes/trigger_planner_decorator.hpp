@@ -30,9 +30,12 @@ public:
 
 private:
   void flagCallback(const std_msgs::msg::Bool::SharedPtr msg);
+  void ensureSharedExecutor(rclcpp::Node::SharedPtr node);
 
   rclcpp::Node::SharedPtr node_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr flag_sub_;
+  rclcpp::CallbackGroup::SharedPtr callback_group_;
+
   std::string flag_topic_;
 
   std::mutex mutex_;
@@ -45,14 +48,14 @@ private:
 class SharedExecutor
 {
 public:
-  static void ensureExecutorStarted(rclcpp::Node::SharedPtr node)
+  static void start(rclcpp::Node::SharedPtr node)
   {
     static std::shared_ptr<rclcpp::executors::MultiThreadedExecutor> executor;
     static std::once_flag flag;
     std::call_once(flag, [&]() {
       executor = std::make_shared<rclcpp::executors::MultiThreadedExecutor>();
       executor->add_node(node);
-      std::thread([]() {
+      std::thread([executor]() {
         executor->spin();
       }).detach();
     });
