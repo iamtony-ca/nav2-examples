@@ -187,7 +187,8 @@ void TaskManagement::feedback_callback(
   GoalHandleNav::SharedPtr,
   const std::shared_ptr<const NavigateToPose::Feedback> feedback)
 {
-  RCLCPP_INFO(this->get_logger(), "남은 거리: %.2f m", feedback->distance_remaining);
+  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "남은 거리: %.2f m", feedback->distance_remaining);
+  // RCLCPP_INFO(this->get_logger(), "남은 거리: %.2f m", feedback->distance_remaining);
 }
 
 void TaskManagement::result_callback(const GoalHandleNav::WrappedResult & result)
