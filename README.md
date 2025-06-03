@@ -13,6 +13,9 @@ ref, 250511: https://github.com/ros-navigation/navigation2/tree/jazzy
 # test
 ```
 ros2 launch nav2_bringup tb3_simulation_launch.py headless:=False
+
+ros2 launch nav2_bringup tb4_simulation_launch.py headless:=False
+
 ```
 
 ```
@@ -47,6 +50,9 @@ ros2 topic pub --once /decor_flag std_msgs/msg/Bool "{data: true}" \
   --qos-reliability best_effort \
   --qos-history keep_last \
   --qos-depth 10
+
+ros2 run tf2_ros tf2_echo map base_link
+
 
 ```
 
