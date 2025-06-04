@@ -1,4 +1,5 @@
 // task_management.hpp
+
 #pragma once
 
 #include <rclcpp/rclcpp.hpp>
@@ -9,10 +10,8 @@
 #include <mutex>
 #include "robot_management/nav2_param_manager.hpp"
 
-#include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <std_msgs/msg/string.hpp>
-#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav2_msgs/action/navigate_to_pose.hpp>
 
 class TaskManagement : public rclcpp::Node
@@ -22,11 +21,9 @@ public:
   using GoalHandleNav = rclcpp_action::ClientGoalHandle<NavigateToPose>;
 
   explicit TaskManagement(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
-  void initialize();  // 생성자 이후 반드시 호출해야 함
+  void initialize();
 
 private:
-
-
   void trigger_callback(const std_msgs::msg::String::SharedPtr msg);
   void send_goal();
   void goal_response_callback(GoalHandleNav::SharedPtr goal_handle);
@@ -37,11 +34,12 @@ private:
   void costmap_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
   void monitor_loop();
   double evaluate_cost_near_pose(const geometry_msgs::msg::PoseStamped & pose);
-
   geometry_msgs::msg::PoseStamped get_robot_pose();
   bool is_within_radius(const geometry_msgs::msg::PoseStamped & a,
                         const geometry_msgs::msg::PoseStamped & b,
                         double radius);
+
+  geometry_msgs::msg::PoseStamped transform_goal_pose_to_costmap_frame();
 
 
   rclcpp_action::Client<NavigateToPose>::SharedPtr nav_to_pose_client_;
@@ -58,9 +56,9 @@ private:
 
   geometry_msgs::msg::PoseStamped start_pose_;
   geometry_msgs::msg::PoseStamped goal_pose_;
-  bool start_param_set_ = false;
   bool goal_param_set_ = false;
-  bool left_start_area_ = false;
 
-
+  bool start_set_flag_= false;
+  bool moving_set_flag_= false;
+  bool end_set_flag_= false;
 };

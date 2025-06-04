@@ -1,4 +1,3 @@
-// task_management.cpp
 #include "robot_management/task_management.hpp"
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
@@ -6,6 +5,13 @@
 TaskManagement::TaskManagement(const rclcpp::NodeOptions & options)
 : rclcpp::Node("task_management", options)
 {
+  nav_to_pose_client_ = rclcpp_action::create_client<NavigateToPose>(
+    this, "navigate_to_pose");
+
+  trigger_sub_ = this->create_subscription<std_msgs::msg::String>(
+    "/nav2_trigger", 10,
+    std::bind(&TaskManagement::trigger_callback, this, std::placeholders::_1));
+
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
@@ -18,8 +24,8 @@ TaskManagement::TaskManagement(const rclcpp::NodeOptions & options)
     std::chrono::milliseconds(500),
     std::bind(&TaskManagement::monitor_loop, this));
 
-  //  shared_from_this()는 여기서 호출하면 안 됨
 }
+
 
 // 이 함수를 생성 후 반드시 호출
 void TaskManagement::initialize() {
@@ -130,5 +136,75 @@ void TaskManagement::monitor_loop() {
       param_mgr_->set_param_typed("local_costmap", "inflation_radius", 0.3);
       param_mgr_->set_param_typed("local_costmap", "cost_scaling_factor", 4.0);
     }
+  }
+}
+
+
+void TaskManagement::trigger_callback(const std_msgs::msg::String::SharedPtr msg)
+{
+  RCLCPP_INFO(this->get_logger(), "/nav2_trigger 수신: '%s'", msg->data.c_str());
+  if (msg->data == "go") {
+    send_goal();
+  } else {
+    RCLCPP_WARN(this->get_logger(), "알 수 없는 명령: '%s'", msg->data.c_str());
+  }
+}
+
+void TaskManagement::send_goal()
+{
+  if (!nav_to_pose_client_->wait_for_action_server(std::chrono::seconds(3))) {
+    RCLCPP_ERROR(this->get_logger(), "navigate_to_pose 서버 연결 실패");
+    return;
+  }
+
+  NavigateToPose::Goal goal_msg;
+  goal_msg.pose.header.frame_id = "map";
+  goal_msg.pose.header.stamp = this->now();
+  goal_msg.pose.pose.position.x = 1.0;
+  goal_msg.pose.pose.position.y = 2.0;
+  goal_msg.pose.pose.orientation.w = 1.0;
+
+  auto options = rclcpp_action::Client<NavigateToPose>::SendGoalOptions();
+  options.goal_response_callback = std::bind(&TaskManagement::goal_response_callback, this, std::placeholders::_1);
+  options.feedback_callback = std::bind(&TaskManagement::feedback_callback, this, std::placeholders::_1, std::placeholders::_2);
+  options.result_callback = std::bind(&TaskManagement::result_callback, this, std::placeholders::_1);
+
+  nav_to_pose_client_->async_send_goal(goal_msg, options);
+  RCLCPP_INFO(this->get_logger(), "NavigateToPose goal 전송 요청");
+}
+
+void TaskManagement::goal_response_callback(GoalHandleNav::SharedPtr goal_handle)
+{
+  // auto goal_handle = future.get();
+  if (!goal_handle) {
+    RCLCPP_ERROR(this->get_logger(), "목표가 거부됨");
+  } else {
+    RCLCPP_INFO(this->get_logger(), "목표 수락됨");
+  }
+}
+
+void TaskManagement::feedback_callback(
+  GoalHandleNav::SharedPtr,
+  const std::shared_ptr<const NavigateToPose::Feedback> feedback)
+{
+  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "남은 거리: %.2f m", feedback->distance_remaining);
+  // RCLCPP_INFO(this->get_logger(), "남은 거리: %.2f m", feedback->distance_remaining);
+}
+
+void TaskManagement::result_callback(const GoalHandleNav::WrappedResult & result)
+{
+  switch (result.code) {
+    case rclcpp_action::ResultCode::SUCCEEDED:
+      RCLCPP_INFO(this->get_logger(), "목표 도달 성공");
+      break;
+    case rclcpp_action::ResultCode::ABORTED:
+      RCLCPP_ERROR(this->get_logger(), "중단됨");
+      break;
+    case rclcpp_action::ResultCode::CANCELED:
+      RCLCPP_WARN(this->get_logger(), "취소됨");
+      break;
+    default:
+      RCLCPP_ERROR(this->get_logger(), "알 수 없는 결과");
+      break;
   }
 }
