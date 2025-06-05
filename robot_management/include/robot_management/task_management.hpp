@@ -13,6 +13,8 @@
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <nav2_msgs/action/navigate_to_pose.hpp>
+#include "rosidl_runtime_cpp/message_initialization.hpp"
+
 
 class TaskManagement : public rclcpp::Node
 {
@@ -39,8 +41,8 @@ private:
                         const geometry_msgs::msg::PoseStamped & b,
                         double radius);
 
-  geometry_msgs::msg::PoseStamped transform_goal_pose_to_costmap_frame();
-
+  // geometry_msgs::msg::PoseStamped transform_goal_pose_to_costmap_frame();
+  geometry_msgs::msg::PoseStamped transform_pose_to_costmap_frame(const geometry_msgs::msg::PoseStamped & input_pose);
 
   rclcpp_action::Client<NavigateToPose>::SharedPtr nav_to_pose_client_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr trigger_sub_;
@@ -61,4 +63,6 @@ private:
   bool start_set_flag_= false;
   bool moving_set_flag_= false;
   bool end_set_flag_= false;
+
+  int local_cnt = 0;
 };
