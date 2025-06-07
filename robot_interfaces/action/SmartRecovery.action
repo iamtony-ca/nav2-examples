@@ -1,0 +1,13 @@
+# ---- Goal ----------------------------------------------------
+float32 backup_distance          # m  (0.0 = 사용 안 함)
+float32 speed                    # m/s (0.0 = default controller speed)
+geometry_msgs/PoseStamped goal_pose  # 현재 NavigateToPose의 최종 목표
+
+---
+# ---- Result --------------------------------------------------
+bool   success                   # 회피 성공 여부
+string message                   # 상태·오류 설명
+
+---
+# ---- Feedback ------------------------------------------------
+float32 progress                 # 0.0 ~ 1.0 진행률 (옵션)

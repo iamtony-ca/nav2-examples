@@ -22,3 +22,12 @@
     <description>Trigger child node when flag is true</description>
   </class>
 </library>
+
+
+<library path="smart_recovery_action_node">
+  <class name="amr_bt_nodes::SmartRecoveryAction"
+         type="amr_bt_nodes::SmartRecoveryAction"
+         base_class_type="BT::ActionNodeBase">
+    <description>Smart recovery action node (uses robot_interfaces/SmartRecovery)</description>
+  </class>
+</library>

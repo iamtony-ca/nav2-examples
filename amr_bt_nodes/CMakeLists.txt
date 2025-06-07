@@ -9,6 +9,11 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(rclcpp_action REQUIRED)
+find_package(robot_interfaces REQUIRED)  # For SmartRecoveryAction
+find_package(nav_msgs REQUIRED)
+
+find_package(nav2_behavior_tree REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(behaviortree_cpp REQUIRED)
 find_package(pluginlib REQUIRED)
@@ -60,6 +65,18 @@ target_include_directories(trigger_planner_decorator PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)  
 
+# ───── Build smart_recovery_action_node ─────
+add_library(smart_recovery_action_node SHARED
+  src/smart_recovery_action.cpp)
+
+ament_target_dependencies(smart_recovery_action_node
+  rclcpp rclcpp_action behaviortree_cpp nav2_behavior_tree robot_interfaces geometry_msgs pluginlib)
+
+target_include_directories(smart_recovery_action_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
+
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
 
@@ -68,6 +85,7 @@ install(TARGETS
   run_if_flag_true_decorator
   check_flag_condition
   trigger_planner_decorator
+  smart_recovery_action_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
