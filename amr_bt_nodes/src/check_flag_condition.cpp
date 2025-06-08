@@ -17,7 +17,7 @@ CheckFlagCondition::CheckFlagCondition(
   }
 
   rclcpp::QoS qos(10);
-  qos.best_effort();
+  // qos.best_effort();
 
   flag_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
     flag_topic_, qos,
@@ -49,7 +49,7 @@ BT::NodeStatus CheckFlagCondition::tick()
   {
     std::lock_guard<std::mutex> lock(flag_mutex_);
     current_flag = flag_ok_;
-    flag_ok_ = false;
+    // flag_ok_ = false; // testttt..
   }
   
 

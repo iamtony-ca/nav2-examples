@@ -1,0 +1,93 @@
+
+<!--
+  This Behavior Tree replans the global path periodically at 1 Hz and it also has
+  recovery actions specific to planning / control as well as general system issues.
+  This will be continuous if a kinematically valid planner is selected.
+-->
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
+        <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
+      
+        <RateController hz="0.0001">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+            <Sequence>
+              <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
+              <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+            </Sequence>
+          </RecoveryNode>
+        </RateController>
+      
+
+        <!-- <ReactiveSequence name="SafeFollowPathSequence">
+          <CheckFlagCondition flag_topic="/mission_flag" node="{node}" />
+          <RecoveryNode number_of_retries="1" name="FollowPath">
+            <FollowPath path="{path}" controller_id="{selected_controller}" goal_checker_id= "general_goal_checker" error_code_id="{follow_path_error_code}"/>
+            <Sequence>
+              <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
+              <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+            </Sequence>
+          </RecoveryNode>
+        </ReactiveSequence> -->
+
+
+
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="{selected_controller}" goal_checker_id= "general_goal_checker" error_code_id="{follow_path_error_code}"/>
+          <Sequence>
+            <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
+            <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+          </Sequence>
+        </RecoveryNode>
+
+
+      </PipelineSequence>
+      <Sequence>
+        <Fallback>
+          <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
+          <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
+        </Fallback>
+        <ReactiveFallback name="RecoveryFallback">
+          <GoalUpdated/>
+          <RoundRobin name="RecoveryActions">
+            <Sequence name="ClearingActions">
+              <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+              <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+            </Sequence>
+                        <!--  추가된 short recovery -->
+            <!-- <RecoveryNode number_of_retries="1" name="ShortFollowPathRecovery"> -->
+            <Sequence name="ShortRecoverySequence">
+              <Wait wait_duration="5.0"/>
+
+              <ControllerSelector selected_controller="RecoveryMppi" default_controller="RecoveryMppi" topic_name="controller_selector"/>
+              <PlannerSelector selected_planner="RecoveryGridBased" default_planner="RecoveryGridBased" topic_name="planner_selector"/>
+              <ComputePathToPose goal="{goal}" path="{alt_path}" planner_id="RecoveryGridBased" error_code_id="{compute_path_error_code}"/>
+
+              <!-- <TruncatePath input_path="{path}" output_path="{short_path}" distance="0.35"/> -->
+              <TruncatePathLocal
+                input_path="{alt_path}"
+                output_path="{short_path}"
+                distance_forward="0.35"
+                distance_backward="0.0"
+                angular_distance_weight="0.5"
+                max_robot_pose_search_dist="2.0"
+                robot_frame="base_link"
+                transform_tolerance="0.3"/>
+
+              <SetTruncatedGoalFromPath short_path="{short_path}" alt_goal="{alt_goal}"/>
+              <ComputePathToPose goal="{alt_goal}" path="{short_path}" planner_id="RecoveryGridBased" error_code_id="{compute_path_error_code}"/>
+              <FollowPath path="{short_path}" controller_id="RecoveryMppi" goal_checker_id="relaxed_goal_checker" error_code_id="{follow_path_error_code}"/>
+              
+              <!-- <FollowPath path="{short_path}" controller_id="RecoveryMppi" goal_checker_id= "relaxed_goal_checker" error_code_id="{follow_path_error_code}"/> -->
+              <Wait wait_duration="1.0"/>
+            </Sequence>
+            <!-- </RecoveryNode> -->
+          </RoundRobin>
+        </ReactiveFallback>
+      </Sequence>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

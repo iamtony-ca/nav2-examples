@@ -31,3 +31,11 @@
     <description>Smart recovery action node (uses robot_interfaces/SmartRecovery)</description>
   </class>
 </library>
+
+<library path="set_truncated_goal_from_path">
+  <class name="amr_bt_nodes::SetTruncatedGoalFromPath"
+         type="amr_bt_nodes::SetTruncatedGoalFromPath"
+         base_class_type="BT::SyncActionNode">
+    <description>Extracts last pose from a truncated path and sets it to a goal key on the blackboard.</description>
+  </class>
+</library>

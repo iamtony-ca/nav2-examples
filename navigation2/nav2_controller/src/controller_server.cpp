@@ -476,6 +476,7 @@ void ControllerServer::computeControl()
     std::string current_controller;
     if (findControllerId(c_name, current_controller)) {
       current_controller_ = current_controller;
+      RCLCPP_WARN(get_logger(), "Selected controller: %s.", current_controller_.c_str());
     } else {
       throw nav2_core::InvalidController("Failed to find controller name: " + c_name);
     }
@@ -484,6 +485,7 @@ void ControllerServer::computeControl()
     std::string current_goal_checker;
     if (findGoalCheckerId(gc_name, current_goal_checker)) {
       current_goal_checker_ = current_goal_checker;
+      RCLCPP_WARN(get_logger(), "Selected goal checker: %s.", current_goal_checker_.c_str());
     } else {
       throw nav2_core::ControllerException("Failed to find goal checker name: " + gc_name);
     }
