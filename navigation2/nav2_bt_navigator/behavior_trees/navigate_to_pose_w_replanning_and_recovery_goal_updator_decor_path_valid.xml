@@ -10,7 +10,7 @@
 
         <RateController hz="1.0">
           <Fallback name="PlannerTrigger">
-            <TriggerPlannerDecorator flag_topic="/decor_flag" node="{node}" goal="{goal}">
+            <TriggerPlannerDecorator flag_topic="/replan_flag" node="{node}" goal="{goal}">
               <RecoveryNode number_of_retries="1" name="ComputePathToPose">
                 <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}" />
                 <Sequence>
@@ -25,13 +25,27 @@
         </RateController>
 
         <!-- FollowPath는 항상 path="{path}"를 받음 -->
-        <RecoveryNode number_of_retries="1" name="FollowPath">
-          <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}" />
+        <!-- <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="{selected_controller}" goal_checker_id= "general_goal_checker" error_code_id="{follow_path_error_code}" />
           <Sequence>
             <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}" />
             <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap" />
           </Sequence>
-        </RecoveryNode>
+        </RecoveryNode> -->
+
+        <Sequence>
+          <IsPathValidCondition path="{path}" />
+          <RecoveryNode number_of_retries="1" name="FollowPath">
+            <FollowPath path="{path}" controller_id="{selected_controller}" goal_checker_id="general_goal_checker" error_code_id="{follow_path_error_code}" />
+            <Sequence>
+              <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}" />
+              <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap" />
+            </Sequence>
+          </RecoveryNode>
+        </Sequence>
+
+
+
       </PipelineSequence>
 
       <!-- 실패 시 회복 전략 -->

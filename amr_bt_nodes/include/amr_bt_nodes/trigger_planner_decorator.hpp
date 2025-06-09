@@ -20,7 +20,7 @@ public:
   {
     return {
       BT::InputPort<rclcpp::Node::SharedPtr>("node", "Shared ROS node"),
-      BT::InputPort<std::string>("flag_topic", "/decor_flag", "Bool flag topic"),
+      BT::InputPort<std::string>("flag_topic", "/replan_flag", "Bool flag topic"),
       BT::InputPort<geometry_msgs::msg::PoseStamped>("goal", "Target goal pose")
     };
   }

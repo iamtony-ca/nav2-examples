@@ -88,6 +88,17 @@ target_include_directories(set_truncated_goal_from_path PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)  
 
+# ───── Build is_path_valid_condition ─────
+add_library(is_path_valid_condition SHARED
+  src/is_path_valid_condition.cpp)
+
+ament_target_dependencies(is_path_valid_condition
+  rclcpp behaviortree_cpp nav_msgs pluginlib)
+
+target_include_directories(is_path_valid_condition PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
 
@@ -98,6 +109,7 @@ install(TARGETS
   trigger_planner_decorator
   smart_recovery_action_node
   set_truncated_goal_from_path
+  is_path_valid_condition
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
