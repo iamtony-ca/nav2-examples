@@ -86,6 +86,13 @@
             </Sequence>
             <!-- </RecoveryNode> -->
           </RoundRobin>
+          
+          <Sequence name="ResetPlannersAndControllers">
+            <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
+            <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
+          </Sequence>
+
+          
         </ReactiveFallback>
       </Sequence>
     </RecoveryNode>
