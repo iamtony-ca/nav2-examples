@@ -1,0 +1,5 @@
+<library path="custom_inflation_layer">
+  <class type="custom_inflation_layer::InflationLayer" base_class_type="nav2_costmap_2d::Layer">
+    <description>This is a custom inflation layer plugin based on the original nav2_costmap_2d::InflationLayer.</description>
+  </class>
+</library>

@@ -1,0 +1,5 @@
+<library path="my_nav2_bt_nodes">
+  <class name="my_nav2_plugins::PrunePassedPath" type="my_nav2_plugins::PrunePassedPath" base_class_type="BT::TreeNode">
+    <description>Prunes the beginning of the path based on the robot's current position.</description>
+  </class>
+</library>
