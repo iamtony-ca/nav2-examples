@@ -24,6 +24,8 @@
 #include "nav2_costmap_2d/layered_costmap.hpp"
 #include "nav2_costmap_2d/cost_values.hpp" // For cost constants
 #include "nav_msgs/msg/path.hpp" // Path 메시지 사용을 위해 추가
+#include "nav2_costmap_2d/costmap_2d_ros.hpp"
+
 
 // Changed namespace to custom_inflation_layer
 namespace custom_inflation_layer
@@ -90,7 +92,8 @@ public:
     return cost;
   }
 
-  static std::shared_ptr<nav2_costmap_2d::InflationLayer> getInflationLayer(
+  // need to test or edit this function below..
+  static std::shared_ptr<custom_inflation_layer::InflationLayer> getInflationLayer(
     std::shared_ptr<nav2_costmap_2d::Costmap2DROS> & costmap_ros,
     const std::string layer_name = "")
   {
@@ -99,7 +102,7 @@ public:
       layer != layered_costmap->getPlugins()->end();
       ++layer)
     {
-      auto inflation_layer = std::dynamic_pointer_cast<nav2_costmap_2d::InflationLayer>(*layer);
+      auto inflation_layer = std::dynamic_pointer_cast<custom_inflation_layer::InflationLayer>(*layer);
       if (inflation_layer) {
         if (layer_name.empty() || inflation_layer->getName() == layer_name) {
           return inflation_layer;
@@ -109,7 +112,7 @@ public:
     return nullptr;
   }
   
-
+  
   typedef std::recursive_mutex mutex_t;
   mutex_t * getMutex() { return access_; }
   double getCostScalingFactor() { return cost_scaling_factor_; }
