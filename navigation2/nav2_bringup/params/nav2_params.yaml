@@ -47,7 +47,7 @@ bt_navigator:
     default_server_timeout: 20
     wait_for_service_timeout: 1000
     action_server_result_timeout: 900.0
-    default_nav_to_pose_bt_xml: "/root/test1_ws/src/navigation2/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery_org.xml"
+    default_nav_to_pose_bt_xml: "/root/test1_ws/src/navigation2/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml"
     navigators: ["navigate_to_pose", "navigate_through_poses"]
     navigate_to_pose:
       plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
@@ -67,7 +67,7 @@ bt_navigator:
       - "smart_recovery_action_node"
       - "set_truncated_goal_from_path"
       - "is_path_valid_condition"
-      # - "my_nav2_bt_nodes"
+      - "prune_passed_path_action"
 
 
     error_code_names:

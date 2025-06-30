@@ -48,3 +48,10 @@
     <description>Check if the provided path is non-empty</description>
   </class>
 </library>
+
+
+<library path="prune_passed_path_action">
+  <class name="amr_bt_nodes::PrunePassedPathAction" type="amr_bt_nodes::PrunePassedPathAction" base_class_type="BT::SyncActionNode">
+    <description>Prunes the beginning of the path based on the robot's current position.</description>
+  </class>
+</library>

@@ -18,6 +18,11 @@ find_package(geometry_msgs REQUIRED)
 find_package(behaviortree_cpp REQUIRED)
 find_package(pluginlib REQUIRED)
 
+find_package(nav2_common REQUIRED)
+find_package(nav2_util REQUIRED)
+find_package(tf2_ros REQUIRED)
+
+
 include_directories(include)
 
 # ───── Build run_if_flag_true_decorator ─────
@@ -99,6 +104,19 @@ target_include_directories(is_path_valid_condition PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)  
 
+
+# ───── Build prune_passed_path_action ─────
+add_library(prune_passed_path_action SHARED
+  src/prune_passed_path_action.cpp)
+
+ament_target_dependencies(prune_passed_path_action
+  rclcpp behaviortree_cpp nav2_common tf2_ros nav2_util pluginlib)
+
+target_include_directories(prune_passed_path_action PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
+
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
 
@@ -110,6 +128,7 @@ install(TARGETS
   smart_recovery_action_node
   set_truncated_goal_from_path
   is_path_valid_condition
+  prune_passed_path_action
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
