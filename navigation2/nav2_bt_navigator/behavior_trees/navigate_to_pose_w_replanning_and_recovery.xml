@@ -7,15 +7,20 @@
       <PipelineSequence name="NavigateWithReplanning">
 
         <!-- Controller & Planner 선택 -->
-        <!-- <LogTextAction name="InitialLog" message="Starting the navigation task." /> -->
+        <LogTextAction name="InitialLog" message="Starting the navigation task." interval_s="3.0" />
         <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
         <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
-
+        
         <RateController hz="1.0">
           <Fallback name="PlannerTrigger">
             <TriggerPlannerDecorator flag_topic="/decor_flag" node="{node}" goal="{goal}">
               <RecoveryNode number_of_retries="1" name="ComputePathToPose">
-                <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}" />
+                <Sequence>
+                  <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}" />
+                  <!-- <PrunePassedPath input_path="{path}" output_path="{pruned_path}" />
+                  
+                  <PathPublisher input_path="{pruned_path}" topic_name="/plan_prune" publish_period="0.3" node="{node}" />                 -->
+                </Sequence>
                 <Sequence>
                   <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}" />
                   <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap" />
@@ -26,14 +31,22 @@
             <AlwaysSuccess />
           </Fallback>
         </RateController>
+        <!-- <Sequence>
+
+        </Sequence> -->
 
         <!-- FollowPath는 항상 path="{path}"를 받음 -->
         <RecoveryNode number_of_retries="1" name="FollowPath">
-          <Sequence>
-          <!-- test addedd -->
-            <PrunePassedPathAction input_path="{path}" output_path="{pruned_path}" />
-            <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}" />
-          </Sequence>
+
+          <PipelineSequence name="FollowAndMonitorPipe">
+            <LogTextAction name="FollowLog" message="Path is valid. Pruning, publishing, and following." interval_s="1.0" />
+            
+            <PrunePassedPathAction input_path="{path}" output_path="{pruned_path}" pruning_distance="0.1" />
+            
+            <PathPublisherAction input_path="{pruned_path}" topic_name="/plan" publish_period="0.3" node="{node}" />
+            
+            <FollowPath path="{pruned_path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}" />
+          </PipelineSequence>
           <Sequence>
             <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}" />
             <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap" />

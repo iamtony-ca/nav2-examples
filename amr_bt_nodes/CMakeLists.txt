@@ -116,7 +116,7 @@ target_include_directories(prune_passed_path_action PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)  
 
-# ───── Build prune_passed_path_action ─────
+# ───── Build log_text_action ─────
 add_library(log_text_action SHARED
   src/log_text_action.cpp)
 
@@ -124,6 +124,17 @@ ament_target_dependencies(log_text_action
   rclcpp behaviortree_cpp pluginlib)
 
 target_include_directories(log_text_action PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
+# ───── Build path_publisher_action ─────
+add_library(path_publisher_action SHARED
+  src/path_publisher_action.cpp)
+
+ament_target_dependencies(path_publisher_action
+  rclcpp behaviortree_cpp pluginlib nav_msgs)
+
+target_include_directories(path_publisher_action PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)  
 
@@ -141,6 +152,7 @@ install(TARGETS
   is_path_valid_condition
   prune_passed_path_action
   log_text_action
+  path_publisher_action
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)

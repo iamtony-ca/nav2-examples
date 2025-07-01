@@ -1,12 +1,10 @@
 #include <string>
-#include <optional> // std::optional을 사용하기 위해 필요 (이전 코드와의 호환성을 위해 유지할 수도 있지만, 여기서는 BT::Expected를 사용)
+#include <optional> // std::optional (BT::Expected 대신 사용 시)
 
 #include "amr_bt_nodes/log_text_action.hpp" // 자체 헤더 파일 포함
 #include "behaviortree_cpp/bt_factory.h"    // 노드 등록 매크로를 위해 필요
 #include "rclcpp/rclcpp.hpp"                // 로깅 매크로 (RCLCPP_INFO 등) 사용을 위해 필요
-
-// BehaviorTree.CPP v3에서 BT::Expected 사용을 위한 헤더 (명시적으로 포함하는 것이 좋습니다)
-#include "behaviortree_cpp/basic_types.h" // BT::Expected를 포함할 가능성이 높습니다.
+#include "behaviortree_cpp/basic_types.h" // BT::Expected를 위해 필요
 
 namespace amr_bt_nodes
 {
@@ -14,63 +12,86 @@ namespace amr_bt_nodes
 LogTextAction::LogTextAction(
   const std::string & name,
   const BT::NodeConfiguration & config)
-: BT::SyncActionNode(name, config)
+: BT::SyncActionNode(name, config),
+  last_log_time_(0, 0, RCL_ROS_TIME) // 초기 시간 0으로 설정
 {
-  // 생성자에서는 특별한 초기화가 필요하지 않습니다.
-  // 필요한 ROS 노드 핸들 등은 tick()에서 blackboard를 통해 접근할 수 있습니다.
+  // 생성자에서 ROS 2 노드 핸들을 Blackboard로부터 가져옵니다.
+  // tick() 메서드에서 매번 가져오는 것보다 효율적입니다.
+  node_ = config.blackboard->get<rclcpp::Node::SharedPtr>("node");
+  if (!node_) {
+      RCLCPP_FATAL(rclcpp::get_logger("LogTextAction"), "Failed to get ROS 2 node from blackboard in constructor.");
+      // 생성자에서는 FAILURE를 반환할 수 없으므로, FATAL 로깅 후 문제가 있음을 알립니다.
+      // 실제 BT 실행 시 tick()에서 다시 확인하여 FAILURE를 반환하게 됩니다.
+  }
 }
 
 BT::PortsList LogTextAction::providedPorts()
 {
-  // "message"라는 이름의 Input Port를 정의합니다.
-  // 이 포트를 통해 BT XML에서 로깅할 텍스트를 전달받을 것입니다.
+  // "message" Input Port: 로깅할 텍스트 메시지 (std::string)
+  // "interval_s" Input Port: 로깅 주기를 나타내는 float 값 (초 단위, 기본값 1.0초)
   return {
-    BT::InputPort<std::string>("message", "Text message to be logged to the terminal")
+    BT::InputPort<std::string>("message", "Text message to be logged to the terminal"),
+    BT::InputPort<float>("interval_s", 1.0f, "Logging interval in seconds (e.g., 0.1 for 100ms)") // float 포트 추가 및 기본값 설정
   };
 }
 
 BT::NodeStatus LogTextAction::tick()
 {
-  // Blackboard에서 rclcpp::Node의 공유 포인터를 가져옵니다.
-  // Nav2 환경에서는 'node'라는 이름으로 기본적으로 제공됩니다.
-  auto node = config().blackboard->get<rclcpp::Node::SharedPtr>("node");
-  if (!node) {
-      RCLCPP_ERROR(rclcpp::get_logger("LogTextAction"), "Failed to get ROS 2 node from blackboard.");
+  if (!node_) {
+      RCLCPP_ERROR(rclcpp::get_logger("LogTextAction"), "LogTextAction: ROS 2 node is not available.");
       return BT::NodeStatus::FAILURE;
   }
 
-  // "message" 포트에서 문자열 데이터를 읽어옵니다.
-  // getInput()은 BT::Expected<T>를 반환합니다.
-  // BT::Expected<T>는 값이 성공적으로 로드되었는지 (has_value()),
-  // 아니면 에러가 발생했는지 (error())를 나타냅니다.
+  // 1. "message" 포트에서 문자열 데이터를 읽어옵니다.
   BT::Expected<std::string> msg_expected = getInput<std::string>("message");
-
-  // 메시지가 유효한지 확인합니다.
-  // has_value()를 사용하여 값이 존재하는지 확인합니다.
   if (!msg_expected.has_value()) {
-    // 메시지가 없거나 유효하지 않으면 에러를 로깅하고 실패를 반환합니다.
-    // error() 메서드로 에러 문자열을 가져올 수 있습니다.
     RCLCPP_ERROR(
-      node->get_logger(),
+      node_->get_logger(),
       "LogTextAction: Missing or invalid 'message' input port: %s",
       msg_expected.error().c_str());
     return BT::NodeStatus::FAILURE;
   }
+  const std::string& message = msg_expected.value(); // 참조로 가져와 복사 방지
 
-  // 성공적으로 메시지를 가져왔으므로 터미널에 출력합니다.
-  // value() 메서드로 실제 값을 가져옵니다.
-  RCLCPP_INFO(node->get_logger(), "BT Log: %s", msg_expected.value().c_str());
+  // 2. "interval_s" 포트에서 float 간격 데이터를 읽어옵니다.
+  BT::Expected<float> interval_expected = getInput<float>("interval_s");
+  if (!interval_expected.has_value()) {
+    RCLCPP_WARN(
+      node_->get_logger(),
+      "LogTextAction: Missing or invalid 'interval_s' input port. Using default interval (1.0s). Error: %s",
+      interval_expected.error().c_str());
+    // 포트가 없거나 유효하지 않으면, providedPorts()에서 설정한 기본값 (1.0f)이 사용됩니다.
+    // 하지만 확실성을 위해 한 번 더 경고를 줍니다.
+  }
+  // 기본값을 포함하여 유효한 float 값을 가져옵니다.
+  const float interval_s = interval_expected.value();
 
-  // 로깅 작업은 항상 성공했다고 가정하고 SUCCESS를 반환합니다.
+  // 3. 현재 시간 가져오기
+  // MonoClock을 사용하여 시스템 시간으로, 시스템 시간 변경에 영향을 받지 않도록 합니다.
+  rclcpp::Time current_time = node_->now();
+
+  // 4. 로깅 주기 확인
+  // (current_time - last_log_time_).seconds()는 시간 차이를 float (초)로 반환합니다.
+  if ((current_time - last_log_time_).seconds() >= interval_s) {
+    // 설정된 간격 이상 시간이 지났으면 로깅을 수행합니다.
+    RCLCPP_INFO(node_->get_logger(), "BT Log: %s", message.c_str());
+
+    // 마지막 로깅 시간을 현재 시간으로 업데이트합니다.
+    last_log_time_ = current_time;
+  }
+
+  // 로깅 여부와 관계없이 노드는 항상 SUCCESS를 반환하여 Behavior Tree의 흐름을 방해하지 않습니다.
+  // 로깅은 부가적인 기능이므로, 로깅이 안 되었다고 해서 BT 전체가 실패할 필요는 없습니다.
   return BT::NodeStatus::SUCCESS;
 }
 
 }  // namespace amr_bt_nodes
 
-
-// 외부 C 함수로 노드를 등록합니다.
-// BehaviorTreeFactory가 이 함수를 호출하여 플러그인을 로드합니다.
 extern "C" void BT_RegisterNodesFromPlugin(BT::BehaviorTreeFactory &factory)
 {
   factory.registerNodeType<amr_bt_nodes::LogTextAction>("LogTextAction");
 }
+
+
+
+// <LogTextAction name="InitialLog" message="Starting the navigation task." interval_s="3.0" />

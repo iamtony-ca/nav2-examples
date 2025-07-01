@@ -65,3 +65,12 @@
     </description>
   </class>
 </library>
+
+
+<library path="path_publisher_action">
+  <class name="amr_bt_nodes::PathPublisherAction" type="amr_bt_nodes::PathPublisherAction" base_class_type="BT::SyncActionNode">
+    <description>
+      PathPublisherAction is a BehaviorTree action node that publishes a path to a specified topic.
+    </description>
+  </class>
+</library>
