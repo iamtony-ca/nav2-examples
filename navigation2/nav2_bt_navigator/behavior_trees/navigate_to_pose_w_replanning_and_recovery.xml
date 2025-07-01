@@ -2,9 +2,12 @@
   <BehaviorTree ID="MainTree">
 
     <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      
+
       <PipelineSequence name="NavigateWithReplanning">
 
         <!-- Controller & Planner 선택 -->
+        <!-- <LogTextAction name="InitialLog" message="Starting the navigation task." /> -->
         <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
         <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
 

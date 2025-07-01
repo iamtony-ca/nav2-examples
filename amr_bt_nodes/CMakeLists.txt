@@ -116,6 +116,17 @@ target_include_directories(prune_passed_path_action PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)  
 
+# ───── Build prune_passed_path_action ─────
+add_library(log_text_action SHARED
+  src/log_text_action.cpp)
+
+ament_target_dependencies(log_text_action
+  rclcpp behaviortree_cpp pluginlib)
+
+target_include_directories(log_text_action PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
 
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
@@ -129,6 +140,7 @@ install(TARGETS
   set_truncated_goal_from_path
   is_path_valid_condition
   prune_passed_path_action
+  log_text_action
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)

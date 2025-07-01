@@ -68,6 +68,7 @@ bt_navigator:
       - "set_truncated_goal_from_path"
       - "is_path_valid_condition"
       - "prune_passed_path_action"
+      - "log_text_action"
 
 
     error_code_names:

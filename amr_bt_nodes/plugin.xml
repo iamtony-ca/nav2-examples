@@ -55,3 +55,13 @@
     <description>Prunes the beginning of the path based on the robot's current position.</description>
   </class>
 </library>
+
+
+<library path="log_text_action">
+  <class name="amr_bt_nodes::LogTextAction" type="amr_bt_nodes::LogTextAction" base_class_type="BT::SyncActionNode">
+    <description>
+      A custom BehaviorTree Action node that logs a given text message to the terminal.
+      Useful for debugging and informational purposes within the behavior tree.
+    </description>
+  </class>
+</library>
