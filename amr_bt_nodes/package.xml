@@ -25,6 +25,8 @@
   <depend>sensor_msgs</depend>
   <depend>tf2_ros</depend>
 
+  <depend>ros2launch</depend>
+
 
   <export>
     <build_type>ament_cmake</build_type>

@@ -74,3 +74,14 @@
     </description>
   </class>
 </library>
+
+
+<library path="trigger_receiver_and_parser">
+    <class name="amr_bt_nodes::TriggerReceiverAndParser" type="amr_bt_nodes::TriggerReceiverAndParser" base_class_type="BT::ActionNodeBase">
+        <description>
+            A custom Behavior Tree Action Node that subscribes to a ROS2 topic for trigger messages,
+            parses planner/controller IDs, updates the Blackboard, publishes a response,
+            and can also trigger a ROS2 service call for mode changes.
+        </description>
+    </class>
+</library>

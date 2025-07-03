@@ -22,8 +22,22 @@ find_package(nav2_common REQUIRED)
 find_package(nav2_util REQUIRED)
 find_package(tf2_ros REQUIRED)
 
+# find_package(robot_interfaces REQUIRED)
 
-include_directories(include)
+include_directories(
+  include
+  # ${rclcpp_INCLUDE_DIRS}
+  # ${behaviortree_cpp_INCLUDE_DIRS}
+  # ${nav2_behavior_tree_INCLUDE_DIRS}
+  # ${nav2_util_INCLUDE_DIRS}
+  # ${robot_interfaces_INCLUDE_DIRS} # <-- 이 부분이 중요!
+  # ${nav_msgs_INCLUDE_DIRS}
+  # ${geometry_msgs_INCLUDE_DIRS}
+  # ${rclcpp_action_INCLUDE_DIRS}
+  # ${tf2_ros_INCLUDE_DIRS}
+  # ${nav2_common_INCLUDE_DIRS}
+  
+  )
 
 # ───── Build run_if_flag_true_decorator ─────
 add_library(run_if_flag_true_decorator SHARED
@@ -139,6 +153,18 @@ target_include_directories(path_publisher_action PUBLIC
   $<INSTALL_INTERFACE:include>)  
 
 
+# ───── Build path_publisher_action ─────
+add_library(trigger_receiver_and_parser SHARED
+  src/trigger_receiver_and_parser.cpp)
+
+ament_target_dependencies(trigger_receiver_and_parser
+  rclcpp behaviortree_cpp pluginlib std_msgs nav2_behavior_tree nav2_util robot_interfaces)
+
+target_include_directories(trigger_receiver_and_parser PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
+
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
 
@@ -153,6 +179,7 @@ install(TARGETS
   prune_passed_path_action
   log_text_action
   path_publisher_action
+  trigger_receiver_and_parser
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)

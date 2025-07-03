@@ -28,12 +28,22 @@ find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/SmartControl.msg"
+  "msg/NavigationCommand.msg"
   "srv/SmartRecoveryPath.srv"
+  "srv/SetNavigationMode.srv"
+  
   "action/SmartRecovery.action"
   DEPENDENCIES geometry_msgs std_msgs std_srvs nav_msgs builtin_interfaces
 )
 
+# 이 라인은 robot_interfaces의 생성된 인터페이스가 다른 패키지에 노출되도록 함.
+# ament_export_dependencies(rosidl_default_runtime)
 
+# # rosidl_generate_interfaces에 의해 생성된 헤더 파일들을 install 공간으로 복사
+# install(
+#   DIRECTORY include/
+#   DESTINATION include
+# )
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

@@ -1,0 +1,141 @@
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <Sequence name="FullNavigationPipeline"> 
+        <!-- <TriggerReceiverAndParser name="MyTriggerHandler" 
+                                  topic_name="/my_navigation_commands" 
+                                  service_name="my_nav_service" 
+                                  output_planner_id="{selected_planner}"   
+                                  output_controller_id="{selected_controller}"/> -->
+
+        <TriggerReceiverAndParser 
+        name="MyTriggerHandler" 
+        node="{node}"                            input_topic_name="/navigation_command" 
+        output_topic_name="/navigation_response"
+        service_name="/set_navigation_mode"
+        service_trigger_key="trigger_service_call"  service_mode_key="service_request_mode"    output_planner_id="{selected_planner}" 
+        output_controller_id="{selected_controller}"/>
+        
+        <LogTextAction name="InitialLog" message="Starting the navigation task." interval_s="3.0" />
+        
+        <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
+        <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
+        
+        <PipelineSequence name="NavigateWithReplanning">
+          <RateController hz="1.0"> <Fallback name="PlannerTrigger">
+              <TriggerPlannerDecorator flag_topic="/replan_flag" node="{node}" goal="{goal}">
+                <Sequence> 
+                  <LogTextAction message="Replan triggered by /replan_flag." />
+                  <RecoveryNode number_of_retries="1" name="ComputePathToPose_Triggered">
+                    <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}" />
+                    <Sequence>
+                      <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}" />
+                      <ClearEntireCostmap name="ClearGlobalCostmap-Context_Triggered" service_name="global_costmap/clear_entirely_global_costmap" />
+                    </Sequence>
+                  </RecoveryNode>
+                </Sequence>
+              </TriggerPlannerDecorator>
+
+              <Sequence>
+                <LogTextAction message="Checking path validity..." />
+                <Inverter> 
+                  <IsPathValid path="{path}" max_cost="100" consider_unknown_as_obstacle="false" />
+                </Inverter>
+                <LogTextAction message="Path found to be invalid, initiating replan." />
+                <RecoveryNode number_of_retries="1" name="ComputePathToPose_InvalidPath">
+                  <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}" />
+                  <Sequence>
+                    <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}" />
+                    <ClearEntireCostmap name="ClearGlobalCostmap-Context_InvalidPath" service_name="global_costmap/clear_entirely_global_costmap" />
+                  </Sequence>
+                </RecoveryNode>
+              </Sequence>
+
+              <AlwaysSuccess />
+            </Fallback>
+          </RateController>
+
+          <RecoveryNode number_of_retries="1" name="FollowPath">
+            <PipelineSequence name="FollowAndMonitorPipe">
+              <LogTextAction name="FollowLog" message="Path is valid. Pruning, publishing, and following." interval_s="1.0" />
+              
+              <PrunePassedPathAction input_path="{path}" output_path="{pruned_path}" pruning_distance="0.1" />
+              
+              <PathPublisherAction input_path="{pruned_path}" topic_name="/plan" publish_period="0.3" node="{node}" />
+              
+              <!-- <IsPathValidCustomCondition path="{path}" /> -->
+              
+              <FollowPath path="{pruned_path}" controller_id="{selected_controller}" goal_checker_id="general_goal_checker" error_code_id="{follow_path_error_code}" />
+            </PipelineSequence>
+            <Sequence>
+              <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}" />
+              <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap" />
+            </Sequence>
+          </RecoveryNode>
+        </PipelineSequence>
+
+      </Sequence> ---
+
+      <!-- ## 실패 시 회복 전략 (Recovery Logic) -->
+
+      <Sequence>
+        <Fallback>
+          <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
+          <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
+        </Fallback>
+        <ReactiveFallback name="RecoveryFallback">
+          <GoalUpdated/>
+          <RoundRobin name="RecoveryActions">
+            <Sequence name="ClearingActions">
+              <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+              <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+            </Sequence>
+            
+            <Sequence name="ShortRecoverySequence">
+              <Wait wait_duration="5.0"/> <ControllerSelector selected_controller="RecoveryMppi" default_controller="RecoveryMppi" topic_name="controller_selector"/>
+              <PlannerSelector selected_planner="RecoveryGridBased" default_planner="RecoveryGridBased" topic_name="planner_selector"/>
+              
+              <ComputePathToPose goal="{goal}" path="{alt_path}" planner_id="RecoveryGridBased" error_code_id="{compute_path_error_code}"/>
+
+              <TruncatePathLocal
+                input_path="{alt_path}"
+                output_path="{short_path}"
+                distance_forward="0.35"
+                distance_backward="0.0"
+                angular_distance_weight="0.5"
+                max_robot_pose_search_dist="2.0"
+                robot_frame="base_link"
+                transform_tolerance="0.3"/>
+
+              <SetTruncatedGoalFromPath short_path="{short_path}" alt_goal="{alt_goal}"/>
+              <ComputePathToPose goal="{alt_goal}" path="{short_path}" planner_id="RecoveryGridBased" error_code_id="{compute_path_error_code}"/>
+              
+              <FollowPath path="{short_path}" controller_id="RecoveryMppi" goal_checker_id="relaxed_goal_checker" error_code_id="{follow_path_error_code}"/>
+              
+              <Sequence name="ResetPlannersAndControllers">
+                <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
+                <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
+                <Wait wait_duration="1.0"/>
+                
+               <RecoveryNode number_of_retries="1" name="ComputePathToPose_Reset">
+                 <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}" />
+                 <Sequence>
+                   <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}" />
+                   <ClearEntireCostmap name="ClearGlobalCostmap-Context_Reset" service_name="global_costmap/clear_entirely_global_costmap" />
+                 </Sequence>
+               </RecoveryNode>
+              </Sequence>
+            </Sequence>
+            
+            <!-- <Spin spin_dist="1.57" error_code_id="{spin_error_code}"/>
+            <Wait wait_duration="5.0"/>
+            <BackUp backup_dist="0.30" backup_speed="0.15" error_code_id="{backup_code_id}"/> -->
+            
+          </RoundRobin>
+        </ReactiveFallback>
+      </Sequence>
+    </RecoveryNode>
+
+  </BehaviorTree>
+</root>
