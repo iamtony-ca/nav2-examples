@@ -5,6 +5,7 @@
 #include <vector>
 #include <memory>
 #include <mutex>
+#include <cmath> // For M_PI
 
 #include "rclcpp/rclcpp.hpp"
 #include "nav_msgs/msg/path.hpp"
@@ -43,12 +44,10 @@ private:
     const geometry_msgs::msg::Point & p1,
     const geometry_msgs::msg::Point & p2);
 
-  // Subscribers
+  // Subscriptions & Publisher
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_sub_;
-
-  // Publisher
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr filtered_cloud_pub_;
 
   // TF
@@ -70,8 +69,13 @@ private:
   std::string robot_base_frame_;
   double distance_threshold_;
   double lookahead_dist_;
-  double goal_tolerance_; // 목표 도달 허용 오차 파라미터 추가
+  double goal_tolerance_;
   
+  // Pre-inflation Parameters
+  bool enable_pre_inflation_;
+  double pre_inflation_radius_;
+  int inflation_points_;
+
   // For LaserScan to PointCloud2 conversion
   laser_geometry::LaserProjection projector_;
 };
