@@ -23,8 +23,8 @@ def generate_launch_description():
             # 여기에 직접 파라미터 값을 설정할 수 있습니다.
             {'global_frame': 'map'},
             {'robot_base_frame': 'base_link'},
-            {'distance_threshold': 0.3},
-            {'lookahead_dist': 2.5},
+            {'distance_threshold': 0.1},
+            {'lookahead_dist': 4.5},
             # YAML 파일을 사용하려면 아래 라인의 주석을 해제하세요.
             # params_file
         ]
