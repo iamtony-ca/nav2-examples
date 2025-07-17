@@ -4,6 +4,8 @@ ros2 launch path_validation_pkg path_validator_rviz_launch.py
 
 ros2 run path_validation_pkg path_validator
 
+
+```
 ros2 topic pub --once /validate_path_request geometry_msgs/msg/PoseArray "
 header:
   frame_id: 'map'
@@ -27,3 +29,4 @@ poses:
     z: 0.0
     w: 1.0
 "
+```
