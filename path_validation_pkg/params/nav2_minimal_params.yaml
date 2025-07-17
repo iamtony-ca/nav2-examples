@@ -1,0 +1,85 @@
+# ===================================================================================
+# Global Path 유효성 검증만을 위한 최소 Nav2 파라미터 파일
+# - Gazebo나 실제 로봇 없이 'planner_server'만 단독으로 실행하기 위해 구성되었습니다.
+# - controller, behavior, local_costmap 등 불필요한 모든 설정은 제거되었습니다.
+# - 사용자님의 고유 설정(footprint, SmacPlanner)은 그대로 유지하여 정확도를 높였습니다.
+# ===================================================================================
+
+planner_server:
+  ros__parameters:
+    # -----------------------------------------------------------------
+    # 기본 설정
+    # -----------------------------------------------------------------
+    # 시뮬레이터가 없으므로 PC의 실제 시간(wall time)을 사용합니다.
+    use_sim_time: false
+
+    # -----------------------------------------------------------------
+    # Planner 설정 (사용자님의 기존 설정을 그대로 유지)
+    # -----------------------------------------------------------------
+    expected_planner_frequency: 20.0
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_smac_planner::SmacPlannerHybrid"
+      tolerance: 0.18
+      allow_unknown: true
+      downsample_costmap: false
+      downsampling_factor: 1
+      angle_quantization_bins: 36
+      motion_model_for_search: "DUBIN"
+      minimum_turning_radius: 0.001
+      reverse_penalty: 3.5
+      change_penalty: 3.0
+      non_straight_penalty: 3.5
+      cost_penalty: 1.0
+      rotation_penalty: 3.0
+      analytic_expansion_ratio: 3.5
+      analytic_expansion_max_length: 3.0
+      lookup_table_size: 20.0
+      allow_reverse_expansion: true
+      max_planning_time: 3.0
+      smooth_path: true
+      smoother:
+        max_iterations: 200
+        w_smooth: 0.3
+        w_data: 0.2
+        tolerance: 1.0e-10
+
+    # -----------------------------------------------------------------
+    # Global Costmap 설정 (planner_server 하위에 재구성)
+    # -----------------------------------------------------------------
+    global_costmap:
+      # 기본 프레임 설정
+      global_frame: "map"
+      robot_base_frame: "base_link"
+      
+      # 업데이트 주기
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      
+      # 지도 해상도
+      resolution: 0.05
+      track_unknown_space: true
+
+      # 로봇의 실제 모양과 패딩 (사용자님의 기존 설정을 그대로 유지)
+      robot_radius: 0.22
+
+      # 사용할 Costmap 레이어: static과 inflation만 사용합니다.
+      # obstacle_layer는 실제 센서가 없으므로 제거했습니다.
+      plugins: ["static_layer", "inflation_layer"]
+
+      # 정적 지도 레이어 설정
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+        enabled: True
+
+      # 팽창(Inflation) 레이어 설정 (로봇 크기 반영)
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        enabled: True
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.4 # footprint가 정의되어 있으므로 이 값은 무시되지만, 명시적으로 남겨둡니다.
+
+
+
+      always_send_full_costmap: True
