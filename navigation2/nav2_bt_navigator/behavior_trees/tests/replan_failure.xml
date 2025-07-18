@@ -42,7 +42,7 @@
                 </Repeat>
                 <PipelineSequence name="FollowAndMonitorPipe">
                     <LogTextAction name="FollowLog" message="Path is valid. Following path..." interval_s="2.0" />
-                    <TruncatePathLocal input_path="{path}" output_path="{pruned_path}" distance_forward="5.0" robot_frame="base_link" transform_tolerance="0.3"/>
+                    <TruncatePathLocal input_path="{path}" output_path="{pruned_path}" distance_forward="50.0" robot_frame="base_link" transform_tolerance="0.3"/>
                     <PathPublisherAction input_path="{pruned_path}" topic_name="/pruned_plan" node="{node}" />
                     <FollowPath path="{pruned_path}" controller_id="{selected_controller}" goal_checker_id="precise_goal_checker"/>
                 </PipelineSequence>
