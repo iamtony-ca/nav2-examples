@@ -1,0 +1,72 @@
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+    <BehaviorTree ID="MainTree">
+      <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+  
+        <Sequence name="MainLogic">
+          <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
+          <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
+  
+          <Parallel name="NavigateAndMonitor" policy="SUCCESS_ON_ONE">
+  
+            <Sequence name="CheckAndReplan">
+              <LogTextAction message="Checking for replan conditions..." interval_s="5.0"/>
+              <Fallback name="ReplanningTrigger">
+                <Inverter><IsPathValid path="{path}"/></Inverter>
+                <Inverter><Condition ID="selected_planner == active_planner" /></Inverter>
+                <TriggerPlannerDecorator flag_topic="/replan_flag" node="{node}"><AlwaysSuccess /></TriggerPlannerDecorator>
+              </Fallback>
+              <LogTextAction message="[REPLANNING] Triggered! Computing new path with '{selected_planner}'."/>
+              <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+                <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}"/>
+                <Sequence>
+                    <LogTextAction message="[RECOVERY] Failed to compute path. Clearing Global Costmap."/>
+                    <ClearEntireCostmap name="ClearGlobalCostmap-ComputePath" service_name="global_costmap/clear_entirely_global_costmap"/>
+                </Sequence>
+              </RecoveryNode>
+              <SetBlackboard output_key="active_planner" value="{selected_planner}"/>
+              
+              <AlwaysFailure />
+            </Sequence>
+  
+            <RecoveryNode number_of_retries="1" name="FollowPathRecovery">
+              <ReactiveFallback name="PauseOrFollow">
+                <Repeat num_cycles="-1">
+                  <Sequence>
+                    <CheckFlagCondition flag_topic="/controller_pause_flag" node="{node}" />
+                    <LogTextAction message="[PAUSED] Controller is paused." interval_s="2.0"/>
+                    <Sequence>
+                      <CancelControl/>
+                      <Wait wait_duration="1.0"/>
+                    </Sequence>
+                  </Sequence>
+                </Repeat>
+                <PipelineSequence name="FollowAndMonitorPipe">
+                    <LogTextAction name="FollowLog" message="Path is valid. Following path..." interval_s="2.0" />
+                    <TruncatePathLocal input_path="{path}" output_path="{pruned_path}" distance_forward="5.0" robot_frame="base_link" transform_tolerance="0.3"/>
+                    <PathPublisherAction input_path="{pruned_path}" topic_name="/pruned_plan" node="{node}" />
+                    <FollowPath path="{pruned_path}" controller_id="{selected_controller}" goal_checker_id="precise_goal_checker"/>
+                </PipelineSequence>
+              </ReactiveFallback>
+              <Sequence>
+                  <LogTextAction message="[RECOVERY] Failed to follow path. Clearing Local Costmap."/>
+                  <ClearEntireCostmap name="ClearLocalCostmap-FollowPath" service_name="local_costmap/clear_entirely_local_costmap"/>
+              </Sequence>
+            </RecoveryNode>
+            
+          </Parallel>
+        </Sequence>
+  
+        <ReactiveFallback name="GlobalRecoveryFallback">
+          <GoalUpdated/>
+          <RoundRobin name="RecoveryActions">
+            <Sequence name="ClearingActions">
+              <LogTextAction message="[GLOBAL RECOVERY] Clearing both costmaps."/>
+              <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+              <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+            </Sequence>
+          </RoundRobin>
+        </ReactiveFallback>
+  
+      </RecoveryNode>
+    </BehaviorTree>
+</root>
