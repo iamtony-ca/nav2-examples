@@ -11,7 +11,8 @@
         <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
         <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
       
-        <RateController hz="0.00001">
+        <!-- <RateController hz="0.00001"> -->
+        <RateController hz="1.0">
           <RecoveryNode number_of_retries="1" name="ComputePathToPose">
             <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
             <Sequence>
@@ -25,7 +26,7 @@
           <Sequence>
             <!-- test -->
 
-            <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
+            <FollowPath path="{path}" controller_id="{selected_controller}" goal_checker_id= "general_goal_checker" progress_checker_id="progress_checker" error_code_id="{follow_path_error_code}"/>
           </Sequence>
           <Sequence>
             <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>

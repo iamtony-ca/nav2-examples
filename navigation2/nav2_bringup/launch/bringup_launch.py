@@ -113,7 +113,9 @@ def generate_launch_description():
 
     declare_params_file_cmd = DeclareLaunchArgument(
         'params_file',
-        default_value=os.path.join(bringup_dir, 'params', 'nav2_params.yaml'),
+        # default_value=os.path.join(bringup_dir, 'params', 'nav2_params.yaml'),
+        default_value="/root/test1_ws/src/navigation2/nav2_bringup/params/nav2_params.yaml",
+        
         description='Full path to the ROS2 parameters file to use for all launched nodes',
     )
 
@@ -147,7 +149,9 @@ def generate_launch_description():
                 condition=IfCondition(use_composition),
                 name='nav2_container',
                 package='rclcpp_components',
+                ## ADD chang.
                 executable='component_container_isolated',
+                # executable='component_container_mt',
                 parameters=[configured_params, {'autostart': autostart}],
                 arguments=['--ros-args', '--log-level', log_level],
                 remappings=remappings,

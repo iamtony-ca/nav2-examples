@@ -223,10 +223,8 @@ ControllerServer::on_configure(const rclcpp_lifecycle::State & state)
   odom_sub_ = std::make_unique<nav_2d_utils::OdomSubscriber>(node);
   vel_publisher_ = std::make_unique<nav2_util::TwistPublisher>(node, "cmd_vel", 1);
 
-
   double action_server_result_timeout;
   get_parameter("action_server_result_timeout", action_server_result_timeout);
-
   rcl_action_server_options_t server_options = rcl_action_server_get_default_options();
   server_options.result_timeout.nanoseconds = RCL_S_TO_NS(action_server_result_timeout);
 
@@ -236,7 +234,6 @@ ControllerServer::on_configure(const rclcpp_lifecycle::State & state)
 
   // Create the action server that we implement with our followPath method
   // This may throw due to real-time prioritzation if user doesn't have real-time permissions
-
   try {
     action_server_ = std::make_unique<ActionServer>(
       shared_from_this(),
@@ -256,26 +253,8 @@ ControllerServer::on_configure(const rclcpp_lifecycle::State & state)
     speed_limit_topic, rclcpp::QoS(10),
     std::bind(&ControllerServer::speedLimitCallback, this, std::placeholders::_1));
 
-  // pause_flag subscriber 등록
-  callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
-  // callback_group_ = get_node_base_interface()->create_callback_group(
-  //   rclcpp::CallbackGroupType::Reentrant);  // Reentrant
-
-
-  rclcpp::SubscriptionOptions sub_options;
-  sub_options.callback_group = callback_group_;
-  pause_sub_ = this->create_subscription<std_msgs::msg::Bool>(
-    "/nav_pause_flag", rclcpp::QoS(1).transient_local().reliable(),
-    std::bind(&ControllerServer::pauseCallback, this, std::placeholders::_1), sub_options);
-
-
   return nav2_util::CallbackReturn::SUCCESS;
 }
-
-
-
-
-
 
 nav2_util::CallbackReturn
 ControllerServer::on_activate(const rclcpp_lifecycle::State & /*state*/)
@@ -476,7 +455,6 @@ void ControllerServer::computeControl()
     std::string current_controller;
     if (findControllerId(c_name, current_controller)) {
       current_controller_ = current_controller;
-      RCLCPP_WARN(get_logger(), "Selected controller: %s.", current_controller_.c_str());
     } else {
       throw nav2_core::InvalidController("Failed to find controller name: " + c_name);
     }
@@ -485,7 +463,6 @@ void ControllerServer::computeControl()
     std::string current_goal_checker;
     if (findGoalCheckerId(gc_name, current_goal_checker)) {
       current_goal_checker_ = current_goal_checker;
-      RCLCPP_WARN(get_logger(), "Selected goal checker: %s.", current_goal_checker_.c_str());
     } else {
       throw nav2_core::ControllerException("Failed to find goal checker name: " + gc_name);
     }
@@ -504,9 +481,7 @@ void ControllerServer::computeControl()
     last_valid_cmd_time_ = now();
     rclcpp::WallRate loop_rate(controller_frequency_);
     while (rclcpp::ok()) {
-      
       auto start_time = this->now();
-
 
       if (action_server_ == nullptr || !action_server_->is_server_active()) {
         RCLCPP_DEBUG(get_logger(), "Action server unavailable or inactive. Stopping.");
@@ -536,34 +511,6 @@ void ControllerServer::computeControl()
       }
 
       updateGlobalPath();
-
-
-      if (pause_flag_) {
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 3500,
-          "Paused: Controller is holding position.");
-        geometry_msgs::msg::TwistStamped velocity;
-        
-        was_paused_last_cycle_ = true;
-
-        velocity.twist.linear.x = 0.0;
-        velocity.twist.linear.y = 0.0;
-        velocity.twist.linear.z = 0.0;
-        velocity.twist.angular.x = 0.0;
-        velocity.twist.angular.y = 0.0;
-        velocity.twist.angular.z = 0.0;
-        velocity.header.stamp = now();
-        velocity.header.frame_id = costmap_ros_->getBaseFrameID();
-        publishVelocity(velocity);
-        continue;
-      }
-
-      // after resume, when first loop, reset progress checker
-      if (was_paused_last_cycle_) {
-        progress_checkers_[current_progress_checker_]->reset();
-        was_paused_last_cycle_ = false;
-        RCLCPP_INFO(get_logger(), "Progress checker reset after resume");
-      }
-
 
       computeAndPublishVelocity();
 
@@ -653,7 +600,6 @@ void ControllerServer::computeControl()
   action_server_->succeeded_current();
 }
 
-
 void ControllerServer::setPlannerPath(const nav_msgs::msg::Path & path)
 {
   RCLCPP_DEBUG(
@@ -675,19 +621,8 @@ void ControllerServer::setPlannerPath(const nav_msgs::msg::Path & path)
   current_path_ = path;
 }
 
-
-void ControllerServer::pauseCallback(const std_msgs::msg::Bool::SharedPtr msg)
-{
-  RCLCPP_INFO(get_logger(), "pause_callback");
-  pause_flag_ = msg->data;
-
-}
-
-
-
 void ControllerServer::computeAndPublishVelocity()
 {
-
   geometry_msgs::msg::PoseStamped pose;
 
   if (!getRobotPose(pose)) {
@@ -765,9 +700,7 @@ void ControllerServer::computeAndPublishVelocity()
 void ControllerServer::updateGlobalPath()
 {
   if (action_server_->is_preempt_requested()) {
-    if (!pause_flag_) {
-      RCLCPP_INFO(get_logger(), "Passing new path to controller.");
-    }
+    RCLCPP_INFO(get_logger(), "Passing new path to controller.");
     auto goal = action_server_->accept_pending_goal();
     std::string current_controller;
     if (findControllerId(goal->controller_id, current_controller)) {
@@ -805,16 +738,7 @@ void ControllerServer::updateGlobalPath()
       action_server_->terminate_current();
       return;
     }
-
-    if (!pause_flag_) {
-      // if not pause status, send the path to the controller
-      setPlannerPath(goal->path);
-      // RCLCPP_INFO(get_logger(), "Passing new path to controller.");
-    } else {
-      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 3500,
-        "Preempted goal received during pause. Path will be held.");
-    }
-    // setPlannerPath(goal->path);
+    setPlannerPath(goal->path);
   }
 }
 
@@ -822,7 +746,6 @@ void ControllerServer::publishVelocity(const geometry_msgs::msg::TwistStamped & 
 {
   auto cmd_vel = std::make_unique<geometry_msgs::msg::TwistStamped>(velocity);
   if (vel_publisher_->is_activated() && vel_publisher_->get_subscription_count() > 0) {
-    // RCLCPP_INFO(get_logger(), "publishVelocitypublishVelocitypublishVelocitypublishVelocity");
     vel_publisher_->publish(std::move(cmd_vel));
   }
 }

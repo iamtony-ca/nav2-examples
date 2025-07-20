@@ -47,7 +47,10 @@ bt_navigator:
     default_server_timeout: 20
     wait_for_service_timeout: 1000
     action_server_result_timeout: 900.0
-    default_nav_to_pose_bt_xml: "/root/test1_ws/src/navigation2/nav2_bt_navigator/behavior_trees/mode_changer.xml"
+    default_nav_to_pose_bt_xml: "/root/test1_ws/src/navigation2/nav2_bt_navigator/behavior_trees/tests/replan_failure7.xml"
+    # default_nav_to_pose_bt_xml: "/root/test1_ws/src/navigation2/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery_goal_updator_decor_recovery.xml"
+    # default_nav_to_pose_bt_xml: "/root/test1_ws/src/navigation2/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery_custom_condition.xml"
+    # default_nav_to_pose_bt_xml: "/root/test1_ws/src/navigation2/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery_org.xml"
     navigators: ["navigate_to_pose", "navigate_through_poses"]
     navigate_to_pose:
       plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
@@ -70,7 +73,7 @@ bt_navigator:
       - "prune_passed_path_action"
       - "log_text_action"
       - "path_publisher_action"
-      - "trigger_receiver_and_parser"
+      # - "trigger_receiver_and_parser"
 
 
     error_code_names:
@@ -87,7 +90,7 @@ controller_server:
     failure_tolerance: 0.3
     progress_checker_plugins: ["progress_checker"]
     # goal_checker_plugins: ["general_goal_checker", "relaxed_goal_checker"] # "precise_goal_checker"
-    goal_checker_plugins: ["general_goal_checker"] # "precise_goal_checker"
+    goal_checker_plugins: ["general_goal_checker", "precise_goal_checker", "relaxed_goal_checker"] # "precise_goal_checker"
     # controller_plugins: ["FollowPath", "RecoveryMppi"]
     controller_plugins: ["FollowPath"]
     use_realtime_priority: false
@@ -98,16 +101,21 @@ controller_server:
       required_movement_radius: 0.5
       movement_time_allowance: 10.0
     # Goal checker parameters
-    # relaxed_goal_checker:
-    #  plugin: "nav2_controller::SimpleGoalChecker"
-    #  xy_goal_tolerance: 0.25
-    #  yaw_goal_tolerance: 3.14
-    #  stateful: false
+    relaxed_goal_checker:
+     plugin: "nav2_controller::SimpleGoalChecker"
+     xy_goal_tolerance: 0.25
+     yaw_goal_tolerance: 3.14
+     stateful: false
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.25
       yaw_goal_tolerance: 0.25
+    precise_goal_checker:
+      stateful: True
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 0.25      
     # FollowPath:
     #   plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
     #   desired_linear_vel: 0.5
@@ -345,7 +353,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.25 #0.70
+        inflation_radius: 0.3 #0.70
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: True
@@ -381,8 +389,8 @@ global_costmap:
       robot_radius: 0.22
       resolution: 0.05
       track_unknown_space: true
-      # plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
-      plugins: ["static_layer", "obstacle_layer", "custom"]
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      # plugins: ["static_layer", "obstacle_layer", "custom"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
@@ -409,15 +417,15 @@ global_costmap:
       #   path_proximity_threshold: 1.0
       #   inflation_radius_normal: 0.25
       #   cost_scaling_factor_normal: 3.0
-      custom:
-        plugin: custom_inflation_layer::InflationLayer
-        enabled: true
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.25 #0.7
-        use_path_aware_inflation: true
-        path_proximity_threshold: 0.1
-        special_inflation_radius: 0.4
-        # global_path_topic: "plan"
+      # custom:
+      #   plugin: custom_inflation_layer::InflationLayer
+      #   enabled: true
+      #   cost_scaling_factor: 3.0
+      #   inflation_radius: 0.25 #0.7
+      #   use_path_aware_inflation: true
+      #   path_proximity_threshold: 0.1
+      #   special_inflation_radius: 0.4
+      #   # global_path_topic: "plan"
 
         # inflation_radius_dynamic: 0.5 # 동적 장애물에 대한 더 넓은 인플레이션 반경
         # cost_scaling_factor_dynamic: 50.0 # 동적 장애물에 대한 비용 스케일링
@@ -426,10 +434,10 @@ global_costmap:
         # inflation_radius_normal: 0.25
         # cost_scaling_factor_normal: 3.0
 
-      # inflation_layer:
-      #   plugin: "nav2_costmap_2d::InflationLayer"
-      #   cost_scaling_factor: 3.0
-      #   inflation_radius: 0.25 #0.7
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.6 #0.7
       always_send_full_costmap: True
 
 

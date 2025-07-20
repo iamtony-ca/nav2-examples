@@ -6,13 +6,16 @@
           <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
           <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
   
-          <Parallel name="NavigateAndMonitor" policy="SUCCESS_ON_ONE">
+          <Parallel name="NavigateAndMonitor" success_count="1" failure_count="2">
+          
   
             <Sequence name="CheckAndReplan">
               <LogTextAction message="Checking for replan conditions..." interval_s="5.0"/>
               <Fallback name="ReplanningTrigger">
                 <Inverter><IsPathValid path="{path}"/></Inverter>
-                <Inverter><Condition ID="selected_planner == active_planner" /></Inverter>
+                <Precondition if="selected_planner != active_planner" else="FAILURE">
+                  <AlwaysSuccess />
+                </Precondition>
                 <TriggerPlannerDecorator flag_topic="/replan_flag" node="{node}"><AlwaysSuccess /></TriggerPlannerDecorator>
               </Fallback>
               <LogTextAction message="[REPLANNING] Triggered! Computing new path with '{selected_planner}'."/>
@@ -43,8 +46,8 @@
                 <PipelineSequence name="FollowAndMonitorPipe">
                     <LogTextAction name="FollowLog" message="Path is valid. Following path..." interval_s="2.0" />
                     <TruncatePathLocal input_path="{path}" output_path="{pruned_path}" distance_forward="50.0" distance_backward="0.0" angular_distance_weight="0.0" robot_frame="base_link" transform_tolerance="0.3"/>
-                    <PathPublisherAction input_path="{pruned_path}" topic_name="/pruned_plan" node="{node}" />
-                    <FollowPath path="{pruned_path}" controller_id="{selected_controller}" goal_checker_id="precise_goal_checker"/>
+                    <PathPublisherAction input_path="{pruned_path}" topic_name="/pruned_plan" publish_period = "1.0" node="{node}" />
+                    <FollowPath path="{pruned_path}" controller_id="{selected_controller}" goal_checker_id= "general_goal_checker" progress_checker_id="progress_checker" error_code_id="{follow_path_error_code}"/>
                 </PipelineSequence>
               </ReactiveFallback>
               <Sequence>

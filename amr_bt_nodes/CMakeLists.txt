@@ -153,7 +153,7 @@ target_include_directories(path_publisher_action PUBLIC
   $<INSTALL_INTERFACE:include>)  
 
 
-# ───── Build path_publisher_action ─────
+# ───── Build trigger_receiver_and_parser ─────
 add_library(trigger_receiver_and_parser SHARED
   src/trigger_receiver_and_parser.cpp)
 

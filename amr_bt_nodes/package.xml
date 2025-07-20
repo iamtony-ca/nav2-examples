@@ -27,6 +27,7 @@
 
   <depend>ros2launch</depend>
 
+  <!-- <exec_depend>pluginlib</exec_depend> -->
 
   <export>
     <build_type>ament_cmake</build_type>

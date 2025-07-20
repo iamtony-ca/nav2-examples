@@ -37,9 +37,6 @@
 #include "pluginlib/class_loader.hpp"
 #include "pluginlib/class_list_macros.hpp"
 
-#include <std_msgs/msg/bool.hpp>
-
-
 namespace nav2_controller
 {
 
@@ -281,20 +278,12 @@ protected:
   // Current path container
   nav_msgs::msg::Path current_path_;
 
-
-  rclcpp::CallbackGroup::SharedPtr callback_group_;
-
-  std::atomic_bool pause_flag_{false};
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr pause_sub_;
-  std::atomic_bool was_paused_last_cycle_{false};
-
 private:
   /**
     * @brief Callback for speed limiting messages
     * @param msg Shared pointer to nav2_msgs::msg::SpeedLimit
     */
   void speedLimitCallback(const nav2_msgs::msg::SpeedLimit::SharedPtr msg);
-  void pauseCallback(const std_msgs::msg::Bool::SharedPtr msg);
 };
 
 }  // namespace nav2_controller

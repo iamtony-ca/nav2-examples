@@ -9,7 +9,7 @@
 
         <!-- 플래그가 TRUE일 때만 global path update 허용 -->
         <Sequence name="ConditionalPlannerWithRate">
-          <CheckFlagCondition flag_topic="/mission_flag" node="{bt_node}" />
+          <CheckFlagCondition flag_topic="/mission_flag" node="{node}" />
           <RateController hz="1.0">
             <RecoveryNode number_of_retries="1" name="ComputePathToPose">
               <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>

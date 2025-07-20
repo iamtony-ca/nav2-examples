@@ -13,20 +13,16 @@
 // limitations under the License.
 
 #include <memory>
+
 #include "nav2_controller/controller_server.hpp"
 #include "rclcpp/rclcpp.hpp"
 
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-
   auto node = std::make_shared<nav2_controller::ControllerServer>();
-
-  //  MultiThreadedExecutor
-  rclcpp::executors::MultiThreadedExecutor executor;
-  executor.add_node(node->get_node_base_interface());
-  executor.spin();
-
+  rclcpp::spin(node->get_node_base_interface());
   rclcpp::shutdown();
+
   return 0;
 }
