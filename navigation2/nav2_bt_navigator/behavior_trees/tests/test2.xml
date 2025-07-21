@@ -1,0 +1,121 @@
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <Sequence name="FullNavigationPipeline">
+        <LogTextAction name="InitialLog" message="Starting the navigation task." interval_s="1.0" />
+
+        <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
+        <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
+
+        <PipelineSequence name="NavigateWithReplanning">
+          
+          <RateController hz="5.0">
+            <Fallback name="PlannerTrigger">
+              
+              <TriggerPlannerDecorator flag_topic="/replan_flag" node="{node}" goal="{goal}">
+                <Sequence>
+                  <LogTextAction message="Replan triggered by /replan_flag." />
+                  <RecoveryNode number_of_retries="1" name="ComputePathToPose_Triggered">
+                    <Sequence>
+                      <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
+                      <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+                      <SmoothPath unsmoothed_path="{path}" smoothed_path="{path}" smoother_id="simple_smoother"/>
+                    </Sequence>
+                    <Sequence>
+                      <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}" />
+                      <ClearEntireCostmap name="ClearGlobalCostmap-Context_Triggered" service_name="global_costmap/clear_entirely_global_costmap" />
+                    </Sequence>
+                  </RecoveryNode>
+                </Sequence>
+              </TriggerPlannerDecorator>
+
+              <Sequence>
+                <LogTextAction message="Checking path validity..." />
+                <Inverter>
+                  <!-- <IsPathValid path="{path}" max_cost="100" consider_unknown_as_obstacle="false" /> -->
+                  <IsPathValid path="{path}" />
+                </Inverter>
+                <LogTextAction message="Path found to be invalid, initiating replan." />
+                <RecoveryNode number_of_retries="1" name="ComputePathToPose_InvalidPath">
+                  <Sequence>
+                    <LogTextAction message="checked path validity and replanning..." />
+                    <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
+                    <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+                    <SmoothPath unsmoothed_path="{path}" smoothed_path="{path}" smoother_id="simple_smoother"/>
+                  </Sequence>
+                  <Sequence>
+                    <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}" />
+                    <ClearEntireCostmap name="ClearGlobalCostmap-Context_InvalidPath" service_name="global_costmap/clear_entirely_global_costmap" />
+                  </Sequence>
+                </RecoveryNode>
+              </Sequence>
+              
+              <AlwaysSuccess />
+            </Fallback>
+          </RateController>
+
+
+          <ReactiveFallback name="PauseAndResume">
+
+            <Sequence>
+                <CheckFlagCondition flag_topic="/controller_pause_flag" node="{node}" />
+                <LogTextAction message="[PAUSED] Controller is paused. Halting motion." interval_s="1.0"/>
+                <SequenceWithMemory>
+                    <CancelControl/>
+                    <Repeat num_cycles="-1">
+                        <Sequence>
+                            <CheckFlagCondition flag_topic="/controller_pause_flag" node="{node}" />
+                            <Wait wait_duration="1.0" />
+                        </Sequence>
+                    </Repeat>
+                </SequenceWithMemory>
+            </Sequence>
+
+            <RecoveryNode number_of_retries="1" name="FollowPath">
+                <PipelineSequence name="FollowAndMonitorPipe">
+                <LogTextAction name="FollowLog" message="Path is valid. Pruning, publishing, and following." interval_s="1.0" />
+                <TruncatePathLocal
+                    input_path="{path}"
+                    output_path="{pruned_path}"
+                    distance_forward="50.0"
+                    distance_backward="0.0"
+                    angular_distance_weight="0.0"
+                    robot_frame="base_link"
+                    transform_tolerance="0.3"/>
+                <PathPublisherAction input_path="{pruned_path}" topic_name="/plan_pruned" publish_period="0.3" node="{node}" />
+                <Sequence>
+                    <LogTextAction message="############FollowPath#########" />
+                    <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
+                    <FollowPath path="{pruned_path}" controller_id="{selected_controller}" goal_checker_id="precise_goal_checker" progress_checker_id= "progress_checker" error_code_id="{follow_path_error_code}"/>
+                </Sequence>
+                </PipelineSequence>
+                <Sequence>
+                <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}" />
+                <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap" />
+                </Sequence>
+            </RecoveryNode>
+
+          </ReactiveFallback>
+
+        </PipelineSequence>
+      </Sequence>
+
+      <Sequence>
+        <Fallback>
+          <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
+          <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
+        </Fallback>
+        <ReactiveFallback name="RecoveryFallback">
+          <GoalUpdated/>
+          <RoundRobin name="RecoveryActions">
+            <Sequence name="ClearingActions">
+              <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+              <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+            </Sequence>
+            <Wait wait_duration="1.0"/>
+          </RoundRobin>
+        </ReactiveFallback>
+      </Sequence>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

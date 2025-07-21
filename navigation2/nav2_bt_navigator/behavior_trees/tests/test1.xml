@@ -1,0 +1,69 @@
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="16" name="NavigateRecovery">
+      <Sequence name="NavigationWithInitialPlan">
+
+        <RecoveryNode number_of_retries="3" name="InitialPlan">
+            <Sequence name="InitialPathPipeline">
+                <LogTextAction message="[Navigation] Creating initial path..."/>
+                <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased" error_code_id="{compute_path_error_code}"/>
+                <SmoothPath unsmoothed_path="{path}" smoothed_path="{path}" smoother_id="simple_smoother"/>
+                <TruncatePathLocal input_path="{path}" output_path="{pruned_path}" distance_forward="50.0" robot_frame="base_link" transform_tolerance="0.3"/>
+            </Sequence>
+            <Sequence name="InitialPlanRecovery">
+              <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}" />
+              <ClearEntireCostmap name="ClearGlobalCostmap-Initial" service_name="global_costmap/clear_entirely_global_costmap" />
+            </Sequence>
+        </RecoveryNode>
+
+        <Parallel name="NavigationParallel" success_count="1" failure_count="1">
+
+          <RecoveryNode number_of_retries="1" name="FollowPathRecovery">
+              <Sequence name="FollowAndPublish">
+                  <PathPublisherAction input_path="{pruned_path}" topic_name="/plan_pruned" publish_period="0.3" node="{node}" />
+                  <FollowPath path="{pruned_path}" controller_id="FollowPath" goal_checker_id="precise_goal_checker" progress_checker_id="progress_checker" error_code_id="{follow_path_error_code}" />
+              </Sequence>
+              <Sequence name="FollowPathRecoveryActions">
+                <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}" />
+                <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap" />
+              </Sequence>
+          </RecoveryNode>
+
+          <Repeat num_cycles="-1">
+            <Sequence name="PathUpdateMonitor">
+              <Fallback name="UpdatePath_OR_Succeed">
+                <Sequence name="CheckAndReplanning">
+                  <Fallback name="ShouldIReplan">
+                    <GoalUpdated/>
+                    <Inverter><IsPathValid path="{path}"/></Inverter>
+                    <CheckFlagCondition flag_topic="/replan_flag" node="{node}"/>
+                  </Fallback>
+                  <LogTextAction message="[Parallel] Path update triggered. Replanning..."/>
+                  <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased" error_code_id="{compute_path_error_code}"/>
+                  <SmoothPath unsmoothed_path="{path}" smoothed_path="{path}" smoother_id="simple_smoother"/>
+                  <TruncatePathLocal input_path="{path}" output_path="{pruned_path}" distance_forward="50.0" robot_frame="base_link" transform_tolerance="0.3"/>
+                </Sequence>
+                <AlwaysSuccess/>
+              </Fallback>
+              <Wait wait_duration="0.1"/>
+            </Sequence>
+          </Repeat>
+          </Parallel>
+      </Sequence>
+
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <Spin spin_dist="1.57" />
+          <Wait wait_duration="1.0" />
+          <BackUp backup_dist="0.30" backup_speed="0.05" />
+        </RoundRobin>
+      </ReactiveFallback>
+      
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

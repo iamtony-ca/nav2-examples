@@ -45,6 +45,7 @@ BT::NodeStatus CheckFlagCondition::tick()
   callback_group_executor_.spin_some();
 
   if (last_flag_.load()) {
+    // last_flag_.store(false);
     return BT::NodeStatus::SUCCESS;
   }
   return BT::NodeStatus::FAILURE;

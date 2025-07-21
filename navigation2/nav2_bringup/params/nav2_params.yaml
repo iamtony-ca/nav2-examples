@@ -47,7 +47,7 @@ bt_navigator:
     default_server_timeout: 20
     wait_for_service_timeout: 1000
     action_server_result_timeout: 900.0
-    default_nav_to_pose_bt_xml: "/root/test1_ws/src/navigation2/nav2_bt_navigator/behavior_trees/tests/replan_failure7.xml"
+    default_nav_to_pose_bt_xml: "/root/test1_ws/src/navigation2/nav2_bt_navigator/behavior_trees/tests/test2.xml"
     # default_nav_to_pose_bt_xml: "/root/test1_ws/src/navigation2/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery_goal_updator_decor_recovery.xml"
     # default_nav_to_pose_bt_xml: "/root/test1_ws/src/navigation2/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery_custom_condition.xml"
     # default_nav_to_pose_bt_xml: "/root/test1_ws/src/navigation2/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery_org.xml"
