@@ -32,7 +32,6 @@
               <Sequence>
                 <LogTextAction message="Checking path validity..." />
                 <Inverter>
-                  <!-- <IsPathValid path="{path}" max_cost="100" consider_unknown_as_obstacle="false" /> -->
                   <IsPathValid path="{path}" />
                 </Inverter>
                 <LogTextAction message="Path found to be invalid, initiating replan." />
@@ -57,18 +56,12 @@
 
           <ReactiveFallback name="PauseAndResume">
 
-            <Sequence>
+            <Sequence name="PauseBranch">
                 <CheckFlagCondition flag_topic="/controller_pause_flag" node="{node}" />
-                <LogTextAction message="[PAUSED] Controller is paused. Halting motion." interval_s="1.0"/>
-                <SequenceWithMemory>
-                    <CancelControl/>
-                    <Repeat num_cycles="-1">
-                        <Sequence>
-                            <CheckFlagCondition flag_topic="/controller_pause_flag" node="{node}" />
-                            <Wait wait_duration="0.1" />
-                        </Sequence>
-                    </Repeat>
-                </SequenceWithMemory>
+                <LogTextAction message="[PAUSED] Halting motion." interval_s="1.0"/>
+                <CancelControl/>
+                <!-- <Wait wait_duration="0.1" /> -->
+                <!-- <AlwaysFailure /> -->
             </Sequence>
 
             <RecoveryNode number_of_retries="1" name="FollowPath">
@@ -96,7 +89,6 @@
             </RecoveryNode>
 
           </ReactiveFallback>
-
         </PipelineSequence>
       </Sequence>
 
