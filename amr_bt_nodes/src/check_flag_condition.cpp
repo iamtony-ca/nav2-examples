@@ -25,7 +25,10 @@ CheckFlagCondition::CheckFlagCondition(
   rclcpp::SubscriptionOptions sub_options;
   sub_options.callback_group = callback_group_;
   
-  rclcpp::QoS qos(10);
+  // rclcpp::QoS qos(10);
+  rclcpp::QoS qos(rclcpp::KeepLast(1));
+  qos.transient_local().reliable();
+  
   flag_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
     flag_topic_, qos,
     std::bind(&CheckFlagCondition::flagCallback, this, std::placeholders::_1),
