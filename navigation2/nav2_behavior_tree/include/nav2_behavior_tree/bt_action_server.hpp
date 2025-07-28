@@ -174,6 +174,18 @@ public:
     return tree_;
   }
 
+
+  // ADD chang.gwak
+  /**
+   * @brief Get the behavior tree engine
+   * @return A pointer to the behavior tree engine
+   */
+  nav2_behavior_tree::BehaviorTreeEngine * getEngine()
+  {
+    return bt_.get();
+  }
+  /////////////// done ADD chang.gwak
+
   /**
    * @brief Function to halt the current tree. It will interrupt the execution of RUNNING nodes
    * by calling their halt() implementation (only for Async nodes that may return RUNNING)

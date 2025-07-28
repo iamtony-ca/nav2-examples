@@ -29,6 +29,7 @@ NavigateToPoseNavigator::configure(
   start_time_ = rclcpp::Time(0);
   auto node = parent_node.lock();
 
+
   if (!node->has_parameter("goal_blackboard_id")) {
     node->declare_parameter("goal_blackboard_id", std::string("goal"));
   }
@@ -67,9 +68,9 @@ NavigateToPoseNavigator::getDefaultBTFilepath(
       "default_nav_to_pose_bt_xml",
       pkg_share_dir +
       
-      // ADD chang.
-      // "/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml");
-      "/behavior_trees/tests/replan_failure.xml");
+      // ADD chang.gwak
+      "/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml");
+      // "/behavior_trees/tests/replan_failure.xml");
   }
 
   node->get_parameter("default_nav_to_pose_bt_xml", default_bt_xml_filename);
@@ -96,6 +97,27 @@ NavigateToPoseNavigator::goalReceived(ActionT::Goal::ConstSharedPtr goal)
       bt_xml_filename.c_str());
     return false;
   }
+
+  // ADD chang.gwak
+  // 1. 생성된 Tree 객체에 대한 참조를 가져옵니다.
+  auto & tree = bt_action_server_->getTree();
+
+  // 2. Engine에 접근하여 우리가 만든 로거 추가 함수를 호출합니다.
+  bt_action_server_->getEngine()->addStdCoutLogger(tree);
+  
+    // 2. 전체 내용을 파일에 로깅 (btlog)
+  // bt_action_server_->getEngine()->addFileLogger2(tree, "/root/test1_ws/src/bt_loggings/nav2_trace.btlog");
+  
+
+  // bt_action_server_->getEngine()->addStdCoutLogger(
+  //   tree, {"ComputePathToPose", "FollowPath", "PipelineSequence"}); 
+
+  RCLCPP_INFO(logger_, "Behavior tree filtered logger attached.");
+
+
+
+
+  /////////////// done ADD chang.gwak
 
   return initializeGoalPose(goal);
 }

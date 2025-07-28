@@ -24,6 +24,9 @@
 #include "behaviortree_cpp/bt_factory.h"
 #include "behaviortree_cpp/xml_parsing.h"
 
+#include "behaviortree_cpp/loggers/bt_cout_logger.h"  // ADD chang.gwak
+#include "behaviortree_cpp/loggers/bt_file_logger_v2.h" // ADD chang.gwak
+
 #include "rclcpp/rclcpp.hpp"
 
 namespace nav2_behavior_tree
@@ -85,6 +88,19 @@ public:
     const std::string & file_path,
     BT::Blackboard::Ptr blackboard);
 
+    // ADD chang.gwak
+  /**
+   * @brief Function to attach a standard cout logger to the BT
+   */
+  void addStdCoutLogger(const BT::Tree &tree);
+  // void addStdCoutLogger(
+  //   const BT::Tree &tree, 
+  //   const std::vector<std::string> & nodes_to_log = {});
+
+
+  void addFileLogger2(const BT::Tree &tree, const std::string & filepath);
+    /////////////// done ADD chang.gwak
+
   /**
    * @brief Function to explicitly reset all BT nodes to initial state
    * @param tree Tree to halt
@@ -97,6 +113,14 @@ protected:
 
   // Clock
   rclcpp::Clock::SharedPtr clock_;
+
+  // ADD chang.gwak
+  // Logger
+  std::unique_ptr<BT::StdCoutLogger> cout_logger_;
+  // std::unique_ptr<BT::StatusChangeLogger> cout_logger_;
+  std::unique_ptr<BT::FileLogger2> file_logger2_;
+    /////////////// done ADD chang.gwak
+
 };
 
 }  // namespace nav2_behavior_tree

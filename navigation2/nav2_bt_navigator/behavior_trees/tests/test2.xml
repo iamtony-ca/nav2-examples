@@ -14,7 +14,7 @@
               
               <TriggerPlannerDecorator flag_topic="/replan_flag" node="{node}" goal="{goal}">
                 <Sequence>
-                  <LogTextAction message="Replan triggered by /replan_flag." />
+                  <LogTextAction message="########Replan triggered by /replan_flag.#####" />
                   <RecoveryNode number_of_retries="1" name="ComputePathToPose_Triggered">
                     <Sequence>
                       <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
@@ -87,7 +87,8 @@
                     <LogTextAction message="############FollowPath#########" />
                     <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
                     <FollowPath path="{pruned_path}" controller_id="{selected_controller}" goal_checker_id="precise_goal_checker" progress_checker_id= "progress_checker" error_code_id="{follow_path_error_code}"/>
-                </Sequence>
+                    <LogTextAction message="############FollowPath completed#########" bb_key="{selected_planner}" />
+                  </Sequence>
                 </PipelineSequence>
                 <Sequence>
                 <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}" />

@@ -18,6 +18,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <algorithm> // std::find 를 위해 추가 // ADD chang.gwak
 
 #include "rclcpp/rclcpp.hpp"
 #include "behaviortree_cpp/utils/shared_library.h"
@@ -105,5 +106,55 @@ BehaviorTreeEngine::haltAllActions(BT::Tree & tree)
   // this halt signal should propagate through the entire tree.
   tree.haltTree();
 }
+
+// ADD chang.gwak
+// Function to attach a standard cout logger to the BT
+void
+BehaviorTreeEngine::addStdCoutLogger(const BT::Tree & tree)
+{
+  // 이전 로거가 있다면 초기화하고 새로 생성합니다.
+  cout_logger_.reset();
+  cout_logger_ = std::make_unique<BT::StdCoutLogger>(tree);
+}
+
+void
+BehaviorTreeEngine::addFileLogger2(const BT::Tree & tree, const std::string & filepath)
+{
+  file_logger2_ = std::make_unique<BT::FileLogger2>(tree, filepath);
+}
+
+
+// void
+// BehaviorTreeEngine::addStdCoutLogger(
+//   const BT::Tree & tree,
+//   const std::vector<std::string> & nodes_to_log)
+// {
+//   // 이전 StdCoutLogger 생성 코드를 아래 내용으로 교체합니다.
+//   cout_logger_.reset(); // 이전 로거 초기화
+
+//   // StatusChangeLogger를 사용하여 직접 콜백을 만듭니다.
+//   auto custom_callback =
+//     [this, nodes_to_log](BT::Duration timestamp, const BT::TreeNode &node,
+//                          BT::NodeStatus prev_status, BT::NodeStatus status)
+//     {
+//       // 모니터링 목록이 비어있거나, 현재 노드가 목록에 있을 때만 로그 출력
+//       if (nodes_to_log.empty() ||
+//         std::find(nodes_to_log.begin(), nodes_to_log.end(), node.registrationName()) != nodes_to_log.end())
+//       {
+//         // StdCoutLogger의 출력과 유사한 형식으로 직접 출력
+//         double since_epoch = std::chrono::duration<double>(timestamp).count();
+//         RCLCPP_INFO(
+//           rclcpp::get_logger("FilteredBtLogger"), "[%.3f]: %s: %s -> %s",
+//           since_epoch, node.name().c_str(),
+//           BT::toStr(prev_status, true).c_str(), BT::toStr(status, true).c_str());
+//       }
+//     };
+
+//   cout_logger_ = std::make_unique<BT::StatusChangeLogger>(tree.rootNode(), custom_callback);
+// }
+
+
+/////////////// done ADD chang.gwak
+
 
 }  // namespace nav2_behavior_tree
