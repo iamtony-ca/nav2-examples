@@ -13,6 +13,7 @@ CheckFlagCondition::CheckFlagCondition(
     throw BT::RuntimeError("[CheckFlagCondition] Missing required input [node]");
   }
   getInput("flag_topic", flag_topic_);
+  getInput("latch", latch_);
 
   // 2. Create a callback group that is not automatically added to an executor
   callback_group_ = node_->create_callback_group(
@@ -40,6 +41,8 @@ CheckFlagCondition::CheckFlagCondition(
 void CheckFlagCondition::flagCallback(const std_msgs::msg::Bool::SharedPtr msg)
 {
   last_flag_.store(msg->data);
+
+  RCLCPP_INFO(node_->get_logger(), "[CheckFlagCondition] Received flag(%s): %s", flag_topic_.c_str(), msg->data ? "true" : "false");
 }
 
 BT::NodeStatus CheckFlagCondition::tick()
@@ -47,22 +50,33 @@ BT::NodeStatus CheckFlagCondition::tick()
   // 5. Manually spin our private executor on each tick to process callbacks
   callback_group_executor_.spin_some();
 
-  if (last_flag_.load()) {
-    // last_flag_.store(false);
-    return BT::NodeStatus::SUCCESS;
+  // if (last_flag_.load()) {
+  //   // last_flag_.store(false);
+  //   return BT::NodeStatus::SUCCESS;
+  // }
+
+  // latch 값에 따라 동작 분기
+  if (latch_) {
+    // Latching mode: 상태 유지
+    // 현재 플래그가 true이면 SUCCESS 반환
+    if (last_flag_.load()) {
+      return BT::NodeStatus::SUCCESS;
+    }
+  } else {
+    // Non-latching mode: 1회성 이벤트
+    // 플래그 값을 확인하고 즉시 false로 원복 (atomic exchange 사용)
+    // exchange는 이전 값을 반환하고, 새 값으로 아톰하게(원자적으로) 교체합니다.
+    if (last_flag_.exchange(false)) {
+      return BT::NodeStatus::SUCCESS;
+    }
   }
+
   return BT::NodeStatus::FAILURE;
 }
 
 }  // namespace amr_bt_nodes
 
-// #include "behaviortree_cpp/bt_factory.h"
 
-// // BT_REGISTER_NODES는 그대로 유지합니다.
-// BT_REGISTER_NODES(factory)
-// {
-//   factory.registerNodeType<amr_bt_nodes::CheckFlagCondition>("CheckFlagCondition");
-// }
 
 #include "behaviortree_cpp/bt_factory.h"
 

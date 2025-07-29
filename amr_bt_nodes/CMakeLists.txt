@@ -165,6 +165,18 @@ target_include_directories(trigger_receiver_and_parser PUBLIC
   $<INSTALL_INTERFACE:include>)  
 
 
+# ───── Build is_blackboard_changed_condition ─────
+add_library(is_blackboard_changed_condition SHARED
+  src/is_blackboard_changed_condition.cpp)
+
+ament_target_dependencies(is_blackboard_changed_condition
+  rclcpp behaviortree_cpp pluginlib)
+
+target_include_directories(is_blackboard_changed_condition PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
+
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
 
@@ -180,6 +192,7 @@ install(TARGETS
   log_text_action
   path_publisher_action
   trigger_receiver_and_parser
+  is_blackboard_changed_condition
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)

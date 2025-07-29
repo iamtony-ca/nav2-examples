@@ -85,3 +85,14 @@
         </description>
     </class>
 </library>
+
+
+<library path="is_blackaboard_changed_condition">
+    <class name="amr_bt_nodes::IsBlackboardChangedCondition" type="amr_bt_nodes::IsBlackboardChangedCondition" base_class_type="BT::ConditionNode">
+        <description>
+            Condition node that checks if a specific key in the Blackboard has changed since the last tick.
+            If the value has changed, it returns SUCCESS; otherwise, it returns FAILURE.
+            This is useful for triggering actions only when certain data in the Blackboard is updated.
+        </description>
+    </class>
+</library>

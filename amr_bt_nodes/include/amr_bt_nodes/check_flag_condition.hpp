@@ -18,7 +18,10 @@ public:
   {
     return {
       BT::InputPort<std::string>("flag_topic", "/mission_flag", "Topic name to subscribe for flag"),
-      BT::InputPort<rclcpp::Node::SharedPtr>("node", "Shared ROS2 node")
+      BT::InputPort<rclcpp::Node::SharedPtr>("node", "Shared ROS2 node"),
+      // latch 포트 추가: true이면 상태 유지, false이면 1회성 동작
+      BT::InputPort<bool>("latch", true, "If true, SUCCESS state is latched until flag is false")
+
     };
   }
 
@@ -31,6 +34,8 @@ private:
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr flag_sub_;
   std::string flag_topic_;
   std::atomic<bool> last_flag_{false}; // Use std::atomic for thread safety
+  // latch 포트 값을 저장할 멤버 변수
+  bool latch_;
 
   // PlannerSelector 패턴 적용
   rclcpp::CallbackGroup::SharedPtr callback_group_;

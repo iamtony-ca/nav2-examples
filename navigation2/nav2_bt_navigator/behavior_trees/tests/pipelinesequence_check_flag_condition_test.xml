@@ -1,0 +1,54 @@
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+    <BehaviorTree ID="MainTree">
+        <PipelineSequence name="NavigateWithReplanning">
+            <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased"
+                topic_name="planner_selector" />
+            <LogTextAction message="PlannerSelector" bb_key="{selected_planner}" />
+            <Fallback name="ReplanOnBlackboardChange">
+                <Sequence>
+                    <LogTextAction
+                        message="Checking if blackboard key '{selected_planner}' has changed" />
+                    <Inverter>
+                        <IsBlackboardChangedCondition blackboard_entry="{selected_planner}" />
+                    </Inverter>
+                    <LogTextAction message="Blackboard Succeed" />
+                </Sequence>
+
+                <Sequence>
+                    <LogTextAction message="Checking CheckFlagCondition latch_false" />
+                    <CheckFlagCondition flag_topic="/latch_false" latch="false" node="{node}" />
+                    <LogTextAction message="CheckFlagCondition latch_false Succeed" />
+                </Sequence>
+
+                <Sequence>
+                    <LogTextAction message="Checking CheckFlagCondition latch_true" />
+                    <CheckFlagCondition flag_topic="/latch_true" latch="true" node="{node}" />
+                    <LogTextAction message="CheckFlagCondition latch_true Succeed" interval_s="1.0" />
+                    <SequenceWithMemory>
+                        <CancelControl />
+                        <Repeat num_cycles="-1">
+                            <Sequence>
+                                <CheckFlagCondition flag_topic="/latch_true" latch="true"
+                                    node="{node}" />
+                                <Wait wait_duration="0.1" />
+                            </Sequence>
+                        </Repeat>
+                    </SequenceWithMemory>
+                </Sequence>
+
+                <LogTextAction message="All conditions Failure" />
+            </Fallback>
+
+            <LogTextAction message="Starting ComputePathToPose" />
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}"
+                error_code_id="{compute_path_error_code}" />
+            <Sequence>
+                <LogTextAction message="Starting FollowPath" />
+                <FollowPath path="{path}" controller_id="{selected_controller}"
+                    goal_checker_id="precise_goal_checker" progress_checker_id="progress_checker"
+                    error_code_id="{follow_path_error_code}" />
+                <LogTextAction message="FollowPath Succeed" />
+            </Sequence>
+        </PipelineSequence>
+    </BehaviorTree>
+</root>

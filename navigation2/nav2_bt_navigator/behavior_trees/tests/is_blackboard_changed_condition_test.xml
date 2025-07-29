@@ -1,0 +1,23 @@
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+    <BehaviorTree ID="MainTree">
+        <Sequence name="NavigateWithReplanning">
+
+            <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased"
+                topic_name="planner_selector" />
+            <LogTextAction message="PlannerSelector" bb_key="{selected_planner}" />    
+            <Fallback name="ReplanOnBlackboardChange">
+                <Sequence>
+                    <LogTextAction message="Checking if blackboard key '{selected_planner}' has changed" />
+                    <IsBlackboardChangedCondition blackboard_entry="{selected_planner}" />
+                    <LogTextAction message="Blackboard Succeed" />
+                </Sequence>
+                <LogTextAction message="Blackboard Failure" />
+            </Fallback>
+            <LogTextAction message="Starting ComputePathToPose" />
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}"
+                error_code_id="{compute_path_error_code}" />
+            <!-- <FollowPath path="{path}" controller_id="{selected_controller}"
+            error_code_id="{follow_path_error_code}"/> -->
+        </Sequence>
+    </BehaviorTree>
+</root>
