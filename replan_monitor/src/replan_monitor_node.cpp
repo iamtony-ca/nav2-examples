@@ -12,9 +12,12 @@ ReplanMonitorNode::ReplanMonitorNode()
   path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
     "/plan", rclcpp::QoS(10), std::bind(&ReplanMonitorNode::pathCallback, this, std::placeholders::_1), sub_options);
 
+  // costmap_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
+  //   "/local_costmap/costmap", rclcpp::QoS(10), std::bind(&ReplanMonitorNode::costmapCallback, this, std::placeholders::_1), sub_options);
   costmap_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
-    "/local_costmap/costmap", rclcpp::QoS(10), std::bind(&ReplanMonitorNode::costmapCallback, this, std::placeholders::_1), sub_options);
+    "/global_costmap/costmap", rclcpp::QoS(10), std::bind(&ReplanMonitorNode::costmapCallback, this, std::placeholders::_1), sub_options);
 
+  
   replan_pub_ = this->create_publisher<std_msgs::msg::Bool>("/replan_flag", 10);
 
   timer_ = this->create_wall_timer(
