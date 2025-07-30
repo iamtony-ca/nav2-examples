@@ -73,6 +73,9 @@ bool ReplanMonitorNode::getCurrentPoseFromTF(geometry_msgs::msg::Pose &pose_out)
 
 void ReplanMonitorNode::evaluateReplanCondition() {
   std::lock_guard<std::mutex> lock(data_mutex_);
+
+  immediate_replan = false; // /replan_flag 1회만 pub. 
+  
   std_msgs::msg::Bool flag_msg;
   flag_msg.data = false;
   // std_msgs::msg::Bool flag_msg;
