@@ -50,7 +50,7 @@ private:
   double cooldown_sec_ = 1.0;
   double blocked_ratio_threshold_ = 0.15;
   size_t blocked_threshold_ = 2;
-  double passed_pose_ignore_dist_ = 0.3;
+  double passed_pose_ignore_dist_ = 0.9;  // 0.3 edit 250730
   double obstacle_duration_threshold_sec_ = 0.5;
   double approach_threshold_dist_ = 0.1;
   double max_speed_ = 0.5;
