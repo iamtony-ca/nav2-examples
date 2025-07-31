@@ -30,7 +30,7 @@ StatusManager::StatusManager(const rclcpp::NodeOptions & options)
     collision_sub_ = this->create_subscription<std_msgs::msg::Bool>(
         "/is_collision_imminent", rclcpp::SystemDefaultsQoS(), std::bind(&StatusManager::collision_callback, this, std::placeholders::_1), sub_options);
 
-    // // 'FOLLOWING_WAYPOINTS' 상태를 위해 NavigateThroughPoses의 피드백을 받아야 하므로 클라이언트가 필요합니다.
+    // // 'FOLLOWING_WAYPOINTS' 상태를 위해 NavigateThroughPoses의 피드백을 받아야 하므로 클라이언트가 필요
     // nav_through_poses_client_ = rclcpp_action::create_client<NavigateThroughPoses>(
     //     this, "navigate_through_poses", group_subscribers_);
         

@@ -11,7 +11,7 @@
 #include <mutex>
 #include <optional>
 
-// 사용자님께서 최종 요청하신 RobotStatus Enum
+// 최종 RobotStatus Enum
 enum class RobotStatus : uint8_t {
     IDLE,
     RECEIVED_GOAL,
