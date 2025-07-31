@@ -54,6 +54,8 @@ ros2 topic pub --once /decor_flag std_msgs/msg/Bool "{data: true}" \
 ros2 run tf2_ros tf2_echo map base_link
 
 
+ros2 topic list --include-hidden-topics -t
+
 ```
 
 
