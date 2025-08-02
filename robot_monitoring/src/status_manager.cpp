@@ -30,16 +30,23 @@ StatusManager::StatusManager(const rclcpp::NodeOptions & options)
     collision_sub_ = this->create_subscription<std_msgs::msg::Bool>(
         "/is_collision_imminent", rclcpp::SystemDefaultsQoS(), std::bind(&StatusManager::collision_callback, this, std::placeholders::_1), sub_options);
 
-    // // 'FOLLOWING_WAYPOINTS' 상태를 위해 NavigateThroughPoses의 피드백을 받아야 하므로 클라이언트가 필요
     // nav_through_poses_client_ = rclcpp_action::create_client<NavigateThroughPoses>(
     //     this, "navigate_through_poses", group_subscribers_);
         
-    RCLCPP_INFO(this->get_logger(), "StatusManager Node has been started (Ultimate Mode, Corrected).");
+    RCLCPP_INFO(this->get_logger(), "StatusManager Node has been started (Deadlock-Free Mode).");
 }
 
 void StatusManager::set_status(RobotStatus new_status)
 {
     std::lock_guard<std::mutex> lock(status_mutex_);
+    if (current_status_ == RobotStatus::SUCCEEDED ||
+        current_status_ == RobotStatus::FAILED ||
+        current_status_ == RobotStatus::CANCELED)
+    {
+        if (new_status != RobotStatus::RECEIVED_GOAL && new_status != RobotStatus::IDLE) {
+            return;
+        }
+    }
     if (current_status_ != new_status) {
         current_status_ = new_status;
         publish_status_locked();
@@ -49,6 +56,14 @@ void StatusManager::set_status(RobotStatus new_status)
 void StatusManager::timer_callback()
 {
     std::lock_guard<std::mutex> lock(status_mutex_);
+    if (!is_main_task_active_ &&
+        current_status_ != RobotStatus::IDLE &&
+        current_status_ != RobotStatus::SUCCEEDED &&
+        current_status_ != RobotStatus::FAILED &&
+        current_status_ != RobotStatus::CANCELED)
+    {
+        current_status_ = RobotStatus::IDLE;
+    }
     publish_status_locked();
 }
 
@@ -61,121 +76,189 @@ void StatusManager::publish_status_locked()
 
 void StatusManager::main_nav_status_callback(const GoalStatusArray::SharedPtr msg)
 {
-    bool task_is_currently_active = false;
+    // // msg->status_list는 배열이므로, for문으로 각 요소를 순회
+    // for (const auto& goal_status : msg->status_list) {
+    //     // 이제 'goal_status' 변수를 통해 각 목표의 'status' 값에 접근가능
+    //     RCLCPP_INFO(this->get_logger(), "Goal Status: %d", goal_status.status);
+    // }
+    bool task_is_currently_active = is_goal_active(msg);
     for (const auto& status : msg->status_list) {
-        if (status.status == GoalStatus::STATUS_ACCEPTED || status.status == GoalStatus::STATUS_EXECUTING) {
-            task_is_currently_active = true;
-        }
-        else if (status.status == GoalStatus::STATUS_CANCELED) {
+        if (status.status == GoalStatus::STATUS_CANCELED) {
             set_status(RobotStatus::CANCELED);
             is_main_task_active_ = false;
             return;
         }
     }
-
-    if (is_main_task_active_ && !task_is_currently_active) {
-        std::lock_guard<std::mutex> lock(status_mutex_);
-        if (current_status_ != RobotStatus::FAILED && current_status_ != RobotStatus::CANCELED) {
-            // 최종 SUCCEEDED 상태는 BT 로그에서 더 정확하게 판단하므로 여기서는 IDLE로 전환
-            current_status_ = RobotStatus::IDLE;
-            publish_status_locked();
-        }
-    } else if (!is_main_task_active_ && task_is_currently_active) {
+    if (!is_main_task_active_ && task_is_currently_active) {
         set_status(RobotStatus::RECEIVED_GOAL);
     }
     is_main_task_active_ = task_is_currently_active;
 }
 
+
+
+// void StatusManager::main_nav_status_callback(const GoalStatusArray::SharedPtr msg)
+// {
+//     bool task_is_currently_active = is_goal_active(msg);
+
+//     for (const auto& status : msg->status_list) {
+//         // 최종 상태를 먼저 확인
+//         if (status.status == GoalStatus::STATUS_SUCCEEDED) {
+//             set_status(RobotStatus::SUCCEEDED);
+//             is_main_task_active_ = false;
+//             return;
+//         }
+//         if (status.status == GoalStatus::STATUS_ABORTED) {
+//             set_status(RobotStatus::FAILED);
+//             is_main_task_active_ = false;
+//             return;
+//         }
+//         if (status.status == GoalStatus::STATUS_CANCELED) {
+//             set_status(RobotStatus::CANCELED);
+//             is_main_task_active_ = false;
+//             return;
+//         }
+//     }
+
+//     // 최종 상태가 아니라면, 작업 시작 여부만 판단
+//     if (!is_main_task_active_ && task_is_currently_active) {
+//         set_status(RobotStatus::RECEIVED_GOAL);
+//     }
+    
+//     is_main_task_active_ = task_is_currently_active;
+// }
+
+
+
+
+
+
+
+// 교착 상태를 유발하는 lock 제거
 void StatusManager::compute_path_status_callback(const GoalStatusArray::SharedPtr msg)
 {
+    // // msg->status_list는 배열이므로, for문으로 각 요소를 순회
+    // for (const auto& goal_status : msg->status_list) {
+    //     // 이제 'goal_status' 변수를 통해 각 목표의 'status' 값에 접근가능
+    //     RCLCPP_INFO(this->get_logger(), "Goal Status: %d", goal_status.status);
+    // }
+
+
     if (is_goal_active(msg)) {
-        std::lock_guard<std::mutex> lock(status_mutex_);
         if (current_context_ == RobotContext::RECOVERY) {
-            current_status_ = RobotStatus::RECOVERY_PLANNING;
+            set_status(RobotStatus::RECOVERY_PLANNING);
         } else {
-            current_status_ = RobotStatus::PLANNING;
+            set_status(RobotStatus::PLANNING);
         }
-        publish_status_locked();
     }
 }
 
+// 교착 상태를 유발하는 lock 제거
 void StatusManager::follow_path_status_callback(const GoalStatusArray::SharedPtr msg)
 {
+    // // msg->status_list는 배열이므로, for문으로 각 요소를 순회
+    // for (const auto& goal_status : msg->status_list) {
+    //     // 이제 'goal_status' 변수를 통해 각 목표의 'status' 값에 접근가능
+    //     RCLCPP_INFO(this->get_logger(), "Goal Status: %d", goal_status.status);
+    // }
+
+
     if (is_goal_active(msg)) {
-        std::lock_guard<std::mutex> lock(status_mutex_);
         if (current_context_ == RobotContext::RECOVERY) {
-            current_status_ = RobotStatus::RECOVERY_DRIVING;
+            set_status(RobotStatus::RECOVERY_DRIVING);
         } else {
-            current_status_ = RobotStatus::DRIVING;
+            set_status(RobotStatus::DRIVING);
         }
-        publish_status_locked();
     }
 }
 
+//  교착 상태를 유발하는 lock 제거
 void StatusManager::bt_log_callback(const BehaviorTreeLog::SharedPtr msg)
 {
-    std::lock_guard<std::mutex> lock(status_mutex_);
-
     for (const auto& event : msg->event_log) {
         const std::string& node_name = event.node_name;
-        RobotStatus status_before = current_status_;
-
+        
         if (event.current_status == "RUNNING") {
             if (node_name.find("Recovery") != std::string::npos) {
                 current_context_ = RobotContext::RECOVERY;
-            } else if (node_name == "CheckPauseCondition") {
-                current_status_ = RobotStatus::PAUSED;
-            } else if (node_name.find("Clear") != std::string::npos && node_name.find("Costmap") != std::string::npos) {
-                current_status_ = RobotStatus::RECOVERY_CLEARING;
             }
-        } else if (event.current_status == "SUCCESS") {
+            if (node_name == "CheckPauseCondition") {
+                set_status(RobotStatus::PAUSED);
+            } else if (node_name.find("Clear") != std::string::npos && node_name.find("Costmap") != std::string::npos) {
+                set_status(RobotStatus::RECOVERY_CLEARING);
+            }
+        } else if (event.current_status == "SUCCESS" || event.current_status == "FAILURE") {
             if (node_name.find("Recovery") != std::string::npos) {
                 current_context_ = RobotContext::NORMAL;
             }
             if (node_name == "NavigateRecovery" || node_name == "MainTree") {
-                current_status_ = RobotStatus::SUCCEEDED;
+                if (event.current_status == "SUCCESS") {
+                    set_status(RobotStatus::SUCCEEDED);
+                } else {
+                    set_status(RobotStatus::FAILED);
+                }
+                return;
             }
-        } else if (event.current_status == "FAILURE") {
-             if (node_name == "NavigateRecovery" || node_name == "MainTree") {
-                current_status_ = RobotStatus::FAILED;
-            }
-        }
-        
-        if (status_before != current_status_) {
-            publish_status_locked();
         }
     }
 }
 
+
+
+
+// void StatusManager::bt_log_callback(const BehaviorTreeLog::SharedPtr msg)
+// {
+//     for (const auto& event : msg->event_log) {
+//         const std::string& node_name = event.node_name;
+        
+//         if (event.current_status == "RUNNING") {
+//             // 문맥 설정
+//             if (node_name.find("Recovery") != std::string::npos) {
+//                 std::lock_guard<std::mutex> lock(status_mutex_);
+//                 current_context_ = RobotContext::RECOVERY;
+//             }
+//             // BT에서만 알 수 있는 상태 직접 설정
+//             if (node_name == "CheckPauseCondition") {
+//                 set_status(RobotStatus::PAUSED);
+//             } else if (node_name.find("Clear") != std::string::npos && node_name.find("Costmap") != std::string::npos) {
+//                 set_status(RobotStatus::RECOVERY_CLEARING);
+//             }
+//         } else if (event.current_status == "SUCCESS" || event.current_status == "FAILURE") {
+//              // 문맥 해제
+//             if (node_name.find("Recovery") != std::string::npos) {
+//                 std::lock_guard<std::mutex> lock(status_mutex_);
+//                 current_context_ = RobotContext::NORMAL;
+//             }
+//             //  최종 상태 감지 로직은 여기서 제거됨
+//         }
+//     }
+// }
+
+
+
+//  교착 상태를 유발하는 lock 제거
 void StatusManager::feedback_callback_through_poses(
   GoalHandleThroughPoses::SharedPtr, const std::shared_ptr<const NavigateThroughPoses::Feedback> feedback)
 {
-    std::lock_guard<std::mutex> lock(status_mutex_);
     if ((current_status_ == RobotStatus::DRIVING || current_status_ == RobotStatus::FOLLOWING_WAYPOINTS) 
         && feedback->number_of_poses_remaining > 0) 
     {
-        current_status_ = RobotStatus::FOLLOWING_WAYPOINTS;
-        publish_status_locked();
+        set_status(RobotStatus::FOLLOWING_WAYPOINTS);
     } 
     else if (current_status_ == RobotStatus::FOLLOWING_WAYPOINTS && feedback->number_of_poses_remaining == 0) 
     {
-        current_status_ = RobotStatus::DRIVING;
-        publish_status_locked();
+        set_status(RobotStatus::DRIVING);
     }
 }
 
+//  교착 상태를 유발하는 lock 제거
 void StatusManager::collision_callback(const std_msgs::msg::Bool::SharedPtr msg)
 {
-    std::lock_guard<std::mutex> lock(status_mutex_);
     if (msg->data) {
-        if (current_status_ != RobotStatus::COLLISION_IMMINENT) {
-            current_status_ = RobotStatus::COLLISION_IMMINENT;
-            publish_status_locked();
-        }
+        set_status(RobotStatus::COLLISION_IMMINENT);
     } else {
         if (current_status_ == RobotStatus::COLLISION_IMMINENT) {
-            current_status_ = RobotStatus::IDLE;
-            publish_status_locked();
+            set_status(RobotStatus::IDLE);
         }
     }
 }

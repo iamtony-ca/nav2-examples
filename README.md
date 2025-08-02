@@ -56,6 +56,8 @@ ros2 run tf2_ros tf2_echo map base_link
 
 ros2 topic list --include-hidden-topics -t
 
+ros2 interface show action_msgs/msg/GoalStatus
+
 ```
 
 
