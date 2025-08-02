@@ -9,6 +9,9 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(lifecycle_msgs REQUIRED)
+
+
 
 add_executable(status_manager_node
   src/main.cpp
@@ -26,6 +29,7 @@ ament_target_dependencies(status_manager_node
   "rclcpp_action"
   "nav2_msgs"
   "std_msgs"
+  "lifecycle_msgs"
 )
 
 # 'include' 디렉토리의 모든 파일을 설치(install)
