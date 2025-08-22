@@ -13,6 +13,28 @@ VelocityModifierNode::VelocityModifierNode(const rclcpp::NodeOptions & options)
 {
   RCLCPP_INFO(this->get_logger(), "Velocity Modifier Node is initializing...");
 
+  // 최소 속도 파라미터
+  this->declare_parameter<double>("min_abs_linear_vel", 0.05);
+  this->declare_parameter<double>("min_abs_angular_vel", 0.05);
+  this->get_parameter("min_abs_linear_vel", min_abs_linear_vel_);
+  this->get_parameter("min_abs_angular_vel", min_abs_angular_vel_);
+
+  // 비율 보정 시 적용될 상한선 파라미터 
+  this->declare_parameter<double>("ratio_scaling_max_linear_vel", 0.35);
+  this->declare_parameter<double>("ratio_scaling_max_angular_vel", 0.25);
+  this->get_parameter("ratio_scaling_max_linear_vel", ratio_scaling_max_linear_vel_);
+  this->get_parameter("ratio_scaling_max_angular_vel", ratio_scaling_max_angular_vel_);
+  
+  RCLCPP_INFO(
+    this->get_logger(), "Min absolute linear velocity: %.3f m/s", min_abs_linear_vel_);
+  RCLCPP_INFO(
+    this->get_logger(), "Min absolute angular velocity: %.3f rad/s", min_abs_angular_vel_);
+  RCLCPP_INFO(
+    this->get_logger(), "Ratio scaling max linear velocity: %.3f m/s", ratio_scaling_max_linear_vel_);
+  RCLCPP_INFO(
+    this->get_logger(), "Ratio scaling max angular velocity: %.3f rad/s", ratio_scaling_max_angular_vel_);
+
+  
   cb_group_cmd_vel_ = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
   cb_group_control_ = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
 
@@ -53,6 +75,49 @@ void VelocityModifierNode::cmdVelCallback(const geometry_msgs::msg::Twist::Share
   adjusted_vel->angular.z = std::clamp(
     adjusted_vel->angular.z, -speed_limit_angular_, speed_limit_angular_);
 
+  // 3. 저속 보정 로직 
+  const double vx = adjusted_vel->linear.x;
+  const double wz = adjusted_vel->angular.z;
+  const double abs_vx = std::abs(vx);
+  const double abs_wz = std::abs(wz);
+  const double epsilon = 1e-9;
+
+  // 조건: 정지 명령이 아니면서, 선속도 또는 각속도 중 하나라도 최소 임계값보다 작은 경우
+  bool is_nonzero_and_too_slow = (abs_vx > epsilon || abs_wz > epsilon) &&
+                                 ((abs_vx > epsilon && abs_vx < min_abs_linear_vel_) ||
+                                  (abs_wz > epsilon && abs_wz < min_abs_angular_vel_));
+
+  if (is_nonzero_and_too_slow) {
+    RCLCPP_DEBUG(this->get_logger(), "Command is too slow, applying unified scaling.");
+
+    // 각 축을 최소 속도까지 증폭시키는 데 필요한 배율을 계산
+    double s_linear = 1.0;
+    if (abs_vx > epsilon) {
+      s_linear = min_abs_linear_vel_ / abs_vx;
+    }
+
+    double s_angular = 1.0;
+    if (abs_wz > epsilon) {
+      s_angular = min_abs_angular_vel_ / abs_wz;
+    }
+
+    // 두 배율 중 더 큰 값을 최종 배율로 선택
+    // 이렇게 하면 최소한 하나의 축은 최소 임계값에 도달하거나 넘어서게 됨
+    double scale = std::max(s_linear, s_angular);
+
+    // 원래 속도에 최종 배율을 곱하여 비율을 유지한 채 증폭
+    double new_vx = vx * scale;
+    double new_wz = wz * scale;
+
+    // 이 로직으로 계산된 값에 대해서만 특별 상한선 적용
+    adjusted_vel->linear.x = std::clamp(
+      new_vx, -ratio_scaling_max_linear_vel_, ratio_scaling_max_linear_vel_);
+    adjusted_vel->angular.z = std::clamp(
+      new_wz, -ratio_scaling_max_angular_vel_, ratio_scaling_max_angular_vel_);
+  }
+
+
+  
   adjusted_cmd_vel_pub_->publish(std::move(adjusted_vel));
 }
 
