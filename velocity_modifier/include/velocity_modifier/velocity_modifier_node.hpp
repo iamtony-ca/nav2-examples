@@ -8,6 +8,7 @@
 #include <mutex> // <atomic> 대신 <mutex>를 포함
 #include <limits>
 #include <memory>
+#include <cmath>
 
 namespace velocity_modifier
 {
@@ -37,6 +38,15 @@ private:
   double speed_limit_linear_;
   double speed_limit_angular_;
   double speed_scale_;
+
+  
+  double min_abs_linear_vel_;
+  double min_abs_angular_vel_;
+  
+  // 비율 보정 시 적용될 상한선 
+  double ratio_scaling_max_linear_vel_;
+  double ratio_scaling_max_angular_vel_;
+
 };
 
 }  // namespace velocity_modifier
