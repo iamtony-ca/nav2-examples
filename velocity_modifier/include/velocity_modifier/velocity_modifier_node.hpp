@@ -4,6 +4,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <robot_interfaces/msg/modifier_control.hpp>
+#include <std_msgs/msg/string.hpp>
 
 #include <mutex> // <atomic> 대신 <mutex>를 포함
 #include <limits>
@@ -17,18 +18,22 @@ class VelocityModifierNode : public rclcpp::Node
 {
 public:
   using ModifierControl = robot_interfaces::msg::ModifierControl;
+  using String = std_msgs::msg::String;
 
   explicit VelocityModifierNode(const rclcpp::NodeOptions & options);
 
 private:
   void cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
   void controlCallback(const ModifierControl::SharedPtr msg);
+  void recoveryModeCallback(const String::SharedPtr msg);
 
   rclcpp::CallbackGroup::SharedPtr cb_group_cmd_vel_;
   rclcpp::CallbackGroup::SharedPtr cb_group_control_;
+  rclcpp::CallbackGroup::SharedPtr cb_group_recovery_;
 
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
   rclcpp::Subscription<ModifierControl>::SharedPtr control_sub_;
+  rclcpp::Subscription<String>::SharedPtr recovery_mode_sub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr adjusted_cmd_vel_pub_;
 
   // 데이터 보호를 위한 뮤텍스
@@ -46,6 +51,8 @@ private:
   // 비율 보정 시 적용될 상한선 
   double ratio_scaling_max_linear_vel_;
   double ratio_scaling_max_angular_vel_;
+  
+  bool recovery_mode_ = false;
 
 };
 

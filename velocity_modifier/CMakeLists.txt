@@ -11,6 +11,7 @@ find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(robot_interfaces REQUIRED)  # robot_interfaces 패키지 추가
 find_package(rosidl_default_generators REQUIRED)
+find_package(std_msgs REQUIRED)
 
 # 커스텀 메시지(.msg)로부터 C++ 코드를 생성
 # rosidl_generate_interfaces(${PROJECT_NAME}
@@ -32,6 +33,7 @@ ament_target_dependencies(
   velocity_modifier_node
   rclcpp
   geometry_msgs
+  std_msgs
   robot_interfaces
   rosidl_default_runtime
 )
