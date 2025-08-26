@@ -1,0 +1,12 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence>
+      <StringPublisherAction
+          node="{node}"
+          topic_name="/robot_command"
+          message="start_mission"
+          num_publishes="5" />
+      
+      </Sequence>
+  </BehaviorTree>
+</root>

@@ -96,3 +96,10 @@
         </description>
     </class>
 </library>
+
+
+<library path="string_publisher_action">
+  <class name="amr_bt_nodes::StringPublisherAction" type="amr_bt_nodes::StringPublisherAction" base_class_type="BT::SyncActionNode">
+    <description>Publishes a string message a specified number of times.</description>
+  </class>
+</library>

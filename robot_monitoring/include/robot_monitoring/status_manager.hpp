@@ -15,6 +15,7 @@
 #include <vector>
 #include <map>
 #include <atomic>
+// #include <set> // For storing previous BT node states
 
 enum class RobotStatus : uint8_t {
     IDLE,
@@ -24,9 +25,9 @@ enum class RobotStatus : uint8_t {
     FOLLOWING_WAYPOINTS,
     PAUSED,
     COLLISION_IMMINENT,
-    RECOVERY_CLEARING,
-    RECOVERY_PLANNING,
-    RECOVERY_DRIVING,
+    RECOVERY_FAILURE,      // RECOVERY_CLEARING -> RECOVERY_FAILURE
+    RECOVERY_RUNNING,      // RECOVERY_PLANNING -> RECOVERY_RUNNING
+    RECOVERY_SUCCESS,    // RECOVERY_DRIVING -> RECOVERY_SUCCEEDED
     SUCCEEDED,
     FAILED,
     CANCELED
@@ -78,7 +79,7 @@ private:
     std::vector<std::string> running_bt_nodes_;
     std::atomic<bool> is_in_recovery_context_{false};
     std::optional<action_msgs::msg::GoalStatus> latest_terminal_status_;
-    // *** FIX: 현재 활성 navigate_to_pose 목표의 ID를 추적하기 위한 변수 ***
+    // 현재 활성 navigate_to_pose 목표의 ID를 추적하기 위한 변수 ***
     std::optional<unique_identifier_msgs::msg::UUID> active_nav_goal_id_;
 
     

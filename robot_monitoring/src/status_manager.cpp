@@ -63,18 +63,22 @@ void StatusManager::evaluate_and_publish_if_changed()
 
 RobotStatus StatusManager::determine_current_status(RobotStatus last_known_status)
 {
-    // ... (1 ~ 4번 로직은 이전과 동일) ...
+    
     // 1. 최우선: 안전/명령 오버라이드
     if (is_collision_imminent_.load()) return RobotStatus::COLLISION_IMMINENT;
     if (is_paused_.load()) return RobotStatus::PAUSED;
 
     // 2. 진행 중인 작업: navigate_to_pose
     if (is_nav_executing_.load()) {
-        if (is_in_recovery_context_.load()) {
-            if (is_bt_node_running("ClearEntireCostmap")) return RobotStatus::RECOVERY_CLEARING;
-            if (is_bt_node_running("ComputePathToPose")) return RobotStatus::RECOVERY_PLANNING;
-            if (is_bt_node_running("FollowPath")) return RobotStatus::RECOVERY_DRIVING;
-            return RobotStatus::RECOVERY_CLEARING;
+        // Recovery 상태는 이제 bt_log_callback에서 직접 처리하므로,
+        // 이곳의 is_in_recovery_context_ 관련 로직은 제거합니다.
+        // Recovery 상태(RUNNING, SUCCEEDED, FAILURE)는 일시적인 이벤트성 상태이며,
+        // 이 함수가 다시 호출될 때 주행이나 계획 상태로 자연스럽게 전환됩니다.
+        if (last_known_status == RobotStatus::RECOVERY_RUNNING)       
+        {
+            // Recovery 이벤트 직후에는 해당 상태를 잠시 유지하여 외부에서 인지할 수 있도록 합니다.
+            // 다음 BT 이벤트나 액션 상태 변경에 따라 다른 상태로 갱신됩니다.
+            return last_known_status;
         }
 
         if (is_driving_sub_action_executing_.load()) return RobotStatus::DRIVING;
@@ -113,7 +117,7 @@ RobotStatus StatusManager::determine_current_status(RobotStatus last_known_statu
         return RobotStatus::IDLE;
     }
 
-    // *** 6. 수정된 최종 폴백 ***
+    // *** 6.  폴백 ***
     // 핵심 노드가 비활성화된 명백한 실패 상황일 때만 FAILED 반환
     if (!are_core_nodes_active_.load()) {
         return RobotStatus::FAILED;
@@ -231,25 +235,76 @@ void StatusManager::follow_path_status_callback(const GoalStatusArray::SharedPtr
 
 void StatusManager::bt_log_callback(const BehaviorTreeLog::SharedPtr msg)
 {
-    // ... (이전과 동일한 로직) ...
     std::lock_guard<std::recursive_mutex> lock(status_mutex_);
-    running_bt_nodes_.clear();
-    bool recovery_flag = false;
+
+    // 추적할 Recovery 시퀀스 노드 이름 정의
+    const static std::set<std::string> recovery_sequence_nodes = {
+        "ShortRecoverySequence1",
+        "ShortRecoverySequence2"
+    };
+
+    bool status_changed_by_recovery = false;
+    RobotStatus new_status = current_status_;
+
+    // BT 이벤트 로그를 순회하며 Recovery 시퀀스의 상태 전이를 감지
     for (const auto& event : msg->event_log) {
-        if (event.current_status == "RUNNING") {
-            running_bt_nodes_.push_back(event.node_name);
-            if (event.node_name == "NavigateRecovery" || event.node_name.find("Recovery") != std::string::npos) {
-                recovery_flag = true;
+        // Recovery 시퀀스 노드인지 확인
+        if (recovery_sequence_nodes.count(event.node_name)) {
+            // IDLE -> RUNNING: Recovery 시작
+            // if (event.previous_status == "IDLE" && event.current_status == "RUNNING") {
+            if (event.current_status == "RUNNING") {    
+                new_status = RobotStatus::RECOVERY_RUNNING;
+                status_changed_by_recovery = true;
+            }
+            // RUNNING -> SUCCEEDED: Recovery 성공
+            // else if (event.previous_status == "RUNNING" && event.current_status == "SUCCESS") {
+            else if (event.current_status == "SUCCESS") {    
+                new_status = RobotStatus::RECOVERY_SUCCESS;
+                status_changed_by_recovery = true;
+            }
+            // IDLE/RUNNING -> FAILURE: Recovery 실패
+            // else if ((event.previous_status == "RUNNING" || event.previous_status == "IDLE") &&
+            //          event.current_status == "FAILURE")
+            else if (event.current_status == "FAILURE")            
+            {
+                new_status = RobotStatus::RECOVERY_FAILURE;
+                status_changed_by_recovery = true;
             }
         }
     }
-    is_in_recovery_context_.store(recovery_flag);
+
+    // Recovery 이벤트에 의해 상태가 변경되었다면 즉시 적용 및 발행
+    if (status_changed_by_recovery && current_status_ != new_status) {
+        current_status_ = new_status;
+        auto status_msg = std_msgs::msg::String();
+        status_msg.data = status_to_string(current_status_);
+        RCLCPP_INFO(this->get_logger(), "Robot Status Changed (by Recovery BT) -> %s", status_msg.data.c_str());
+        status_publisher_->publish(status_msg);
+    }
+
+    // 현재 실행 중인 모든 BT 노드 목록 업데이트
+    running_bt_nodes_.clear();
+    bool recovery_flag_check = false;
+    for (const auto& event : msg->event_log) {
+        if (event.current_status == "RUNNING") {
+            running_bt_nodes_.push_back(event.node_name);
+            if (recovery_sequence_nodes.count(event.node_name) > 0) {
+                 recovery_flag_check = true;
+            }
+        }
+    }
+    // is_in_recovery_context_ 플래그도 동기화 (다른 로직에서 사용될 경우 대비)
+    is_in_recovery_context_.store(recovery_flag_check);
+    
+    // Recovery 이벤트가 없었을 경우, 기존의 평가 로직을 호출
+
     evaluate_and_publish_if_changed();
+
 }
 
 void StatusManager::odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
 {
-    // ... (이전과 동일한 로직) ...
+    
     double linear_vel = msg->twist.twist.linear.x;
     double angular_vel = msg->twist.twist.angular.z;
     is_robot_stopped_.store(std::abs(linear_vel) < 0.01 && std::abs(angular_vel) < 0.01);
@@ -308,25 +363,22 @@ bool StatusManager::is_bt_node_running(const std::string& node_name) const
 std::string StatusManager::status_to_string(RobotStatus status)
 {
     switch (status) {
-        case RobotStatus::IDLE:                return "IDLE";
-        case RobotStatus::RECEIVED_GOAL:       return "RECEIVED_GOAL";
-        case RobotStatus::PLANNING:            return "PLANNING";
-        case RobotStatus::DRIVING:             return "DRIVING";
-        case RobotStatus::FOLLOWING_WAYPOINTS: return "FOLLOWING_WAYPOINTS";
-        case RobotStatus::PAUSED:              return "PAUSED";
-        case RobotStatus::COLLISION_IMMINENT:  return "COLLISION_IMMINENT";
-        case RobotStatus::RECOVERY_CLEARING:   return "RECOVERY_CLEARING";
-        case RobotStatus::RECOVERY_PLANNING:   return "RECOVERY_PLANNING";
-        case RobotStatus::RECOVERY_DRIVING:    return "RECOVERY_DRIVING";
-        case RobotStatus::SUCCEEDED:           return "SUCCEEDED";
-        case RobotStatus::FAILED:              return "FAILED";
-        case RobotStatus::CANCELED:            return "CANCELED";
-        default:                               return "UNKNOWN";
+        case RobotStatus::IDLE:                 return "IDLE";
+        case RobotStatus::RECEIVED_GOAL:        return "RECEIVED_GOAL";
+        case RobotStatus::PLANNING:             return "PLANNING";
+        case RobotStatus::DRIVING:              return "DRIVING";
+        case RobotStatus::FOLLOWING_WAYPOINTS:  return "FOLLOWING_WAYPOINTS";
+        case RobotStatus::PAUSED:               return "PAUSED";
+        case RobotStatus::COLLISION_IMMINENT:   return "COLLISION_IMMINENT";
+        case RobotStatus::RECOVERY_FAILURE:     return "RECOVERY_FAILURE";
+        case RobotStatus::RECOVERY_RUNNING:     return "RECOVERY_RUNNING";
+        case RobotStatus::RECOVERY_SUCCESS:     return "RECOVERY_SUCCESS";
+        case RobotStatus::SUCCEEDED:            return "SUCCEEDED";
+        case RobotStatus::FAILED:               return "FAILED";
+        case RobotStatus::CANCELED:             return "CANCELED";
+        default:                                return "UNKNOWN";
     }
 }
-
-
-
 
 
 
