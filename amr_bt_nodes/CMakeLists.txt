@@ -200,6 +200,16 @@ target_include_directories(get_next_few_goals_action PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)  
 
+# ───── Build remove_first_goal_action ─────
+add_library(remove_first_goal_action SHARED
+  src/remove_first_goal_action.cpp)
+
+ament_target_dependencies(remove_first_goal_action
+  rclcpp geometry_msgs behaviortree_cpp pluginlib)
+
+target_include_directories(remove_first_goal_action PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
 
 
 # ───── Pluginlib Export ─────
@@ -220,6 +230,7 @@ install(TARGETS
   is_blackboard_changed_condition
   string_publisher_action
   get_next_few_goals_action
+  remove_first_goal_action
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)

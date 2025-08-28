@@ -1,0 +1,24 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="1" name="NavigateRecovery">
+      <Repeat name="FollowWaypointsUntilDone">
+        <Sequence>
+          <Inverter>
+            <IsGoalsListEmpty goals="{goals}" />
+          </Inverter>
+
+          <GetFirstGoalAction input_goals="{goals}" output_goal="{current_goal}" />
+          
+          <NavigateToPose goal="{current_goal}" />
+          
+          <RemoveFirstGoalAction input_goals="{goals}" remaining_goals="{goals}" />
+        </Sequence>
+      </Repeat>
+      
+      <Sequence name="RecoveryActions">
+        <ClearEntireCostmap service_name="global_costmap/clear_entirely_global_costmap" />
+        <Spin spin_dist="1.57" />
+      </Sequence>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

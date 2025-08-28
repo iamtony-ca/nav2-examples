@@ -112,3 +112,14 @@
     </description>
   </class>
 </library>
+
+
+<library path="remove_first_goal_action">
+  <class name="amr_bt_nodes::RemoveFirstGoalAction"
+         type="amr_bt_nodes::RemoveFirstGoalAction"
+         base_class_type="BT::SyncActionNode">
+    <description>
+      A BT node that removes the first element from a list of goals.
+    </description>
+  </class>
+</library>
