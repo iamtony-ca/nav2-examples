@@ -123,3 +123,12 @@
     </description>
   </class>
 </library>
+
+
+<library path="replan_guard_decorator">
+  <class name="amr_bt_nodes::ReplanGuardDecorator" type="amr_bt_nodes::ReplanGuardDecorator" base_class_type="BT::DecoratorNode">
+    <description>
+      A decorator that triggers its child only when the final goal in a sequence changes, a replan flag is received, or a specific blackboard status (like 'recovery_mode') is set.
+    </description>
+  </class>
+</library>

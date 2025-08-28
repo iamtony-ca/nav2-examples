@@ -1,0 +1,23 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <ReplanGuardDecorator
+            node="{node}"
+            goals="{goals}"
+            bt_blackboard_status="{bt_server_status}">
+          <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridAStar"/>
+        </ReplanGuardDecorator>
+        <FollowPath path="{path}" controller_id="FollowPath"/>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <Sequence name="RecoveryActions">
+          <SetBlackboard output_key="bt_server_status" value="recovery_mode" />
+          <ClearEntireCostmap service_name="global_costmap/clear_entirely_global_costmap"/>
+          <Spin spin_dist="1.57"/>
+        </Sequence>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

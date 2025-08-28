@@ -211,6 +211,17 @@ target_include_directories(remove_first_goal_action PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)  
 
+# ───── Build replan_guard_decorator ─────
+add_library(replan_guard_decorator SHARED
+  src/replan_guard_decorator.cpp)
+
+ament_target_dependencies(replan_guard_decorator
+  rclcpp std_msgs geometry_msgs behaviortree_cpp pluginlib)
+
+target_include_directories(replan_guard_decorator PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
 
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
@@ -231,6 +242,7 @@ install(TARGETS
   string_publisher_action
   get_next_few_goals_action
   remove_first_goal_action
+  replan_guard_decorator
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
