@@ -132,3 +132,13 @@
     </description>
   </class>
 </library>
+
+<library path="advanced_remove_passed_goals_action">
+  <class name="amr_bt_nodes::AdvancedRemovePassedGoalsAction"
+         type="amr_bt_nodes::AdvancedRemovePassedGoalsAction"
+         base_class_type="BT::StatefulActionNode">
+    <description>
+      A BT node to robustly remove passed goals based on path progress, a search window, and hysteresis.
+    </description>
+  </class>
+</library>

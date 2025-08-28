@@ -222,6 +222,17 @@ target_include_directories(replan_guard_decorator PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)  
 
+# ───── Build advanced_remove_passed_goals_action ─────
+add_library(advanced_remove_passed_goals_action SHARED
+  src/advanced_remove_passed_goals_action.cpp)
+
+ament_target_dependencies(advanced_remove_passed_goals_action
+  rclcpp nav_msgs geometry_msgs nav2_util tf2_geometry_msgs behaviortree_cpp pluginlib)
+
+target_include_directories(advanced_remove_passed_goals_action PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
 
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
@@ -243,6 +254,7 @@ install(TARGETS
   get_next_few_goals_action
   remove_first_goal_action
   replan_guard_decorator
+  advanced_remove_passed_goals_action
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
