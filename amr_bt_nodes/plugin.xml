@@ -105,6 +105,15 @@
 </library>
 
 
+<library path="trigger_planner_goals_decorator">
+  <class name="amr_bt_nodes::TriggerPlannerGoalsDecorator"
+         type="amr_bt_nodes::TriggerPlannerGoalsDecorator"
+         base_class_type="BT::DecoratorNode">
+    <description>Trigger child node when flag is true</description>
+  </class>
+</library>
+
+
 <library path="get_next_few_goals_action">
   <class name="amr_bt_nodes::GetNextFewGoalsAction" type="amr_bt_nodes::GetNextFewGoalsAction" base_class_type="BT::SyncActionNode">
     <description>

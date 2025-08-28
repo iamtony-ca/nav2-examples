@@ -188,6 +188,21 @@ target_include_directories(string_publisher_action PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)  
 
+# ───── Build trigger_planner_goals_decorator ─────
+add_library(trigger_planner_goals_decorator SHARED
+  src/trigger_planner_goals_decorator.cpp)
+
+ament_target_dependencies(trigger_planner_goals_decorator
+  rclcpp
+  std_msgs
+  geometry_msgs
+  behaviortree_cpp
+  pluginlib)
+
+target_include_directories(trigger_planner_goals_decorator PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
 
 # ───── Build get_next_few_goals_action ─────
 add_library(get_next_few_goals_action SHARED
@@ -251,6 +266,7 @@ install(TARGETS
   trigger_receiver_and_parser
   is_blackboard_changed_condition
   string_publisher_action
+  trigger_planner_goals_decorator
   get_next_few_goals_action
   remove_first_goal_action
   replan_guard_decorator
