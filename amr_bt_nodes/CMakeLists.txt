@@ -189,6 +189,19 @@ target_include_directories(string_publisher_action PUBLIC
   $<INSTALL_INTERFACE:include>)  
 
 
+# ───── Build get_next_few_goals_action ─────
+add_library(get_next_few_goals_action SHARED
+  src/get_next_few_goals_action.cpp)
+
+ament_target_dependencies(get_next_few_goals_action
+  rclcpp geometry_msgs behaviortree_cpp pluginlib)
+
+target_include_directories(get_next_few_goals_action PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
+
+
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
 
@@ -206,6 +219,7 @@ install(TARGETS
   trigger_receiver_and_parser
   is_blackboard_changed_condition
   string_publisher_action
+  get_next_few_goals_action
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)

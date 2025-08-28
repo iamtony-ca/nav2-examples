@@ -103,3 +103,12 @@
     <description>Publishes a string message a specified number of times.</description>
   </class>
 </library>
+
+
+<library path="get_next_few_goals_action">
+  <class name="amr_bt_nodes::GetNextFewGoalsAction" type="amr_bt_nodes::GetNextFewGoalsAction" base_class_type="BT::SyncActionNode">
+    <description>
+      A BT node that gets a specified number of goals from the beginning of a goal list.
+    </description>
+  </class>
+</library>

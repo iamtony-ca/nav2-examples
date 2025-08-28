@@ -1,0 +1,18 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence name="NavigateWithWaypoints">
+      
+      <GetNextFewGoalsAction
+          name="ExtractNext3Goals"
+          num_goals="3"
+          input_goals="{goals}"
+          output_goals="{waypoint_subset}" />
+
+      <FollowPath
+          path="{waypoint_subset}"
+          controller_id="FollowPath"
+          goal_checker_id="general_goal_checker"/>
+
+    </Sequence>
+  </BehaviorTree>
+</root>
