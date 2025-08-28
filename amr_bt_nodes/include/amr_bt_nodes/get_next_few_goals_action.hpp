@@ -22,6 +22,7 @@
 
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "behaviortree_cpp/behavior_tree.h"
+#include "rclcpp/rclcpp.hpp"
 
 namespace amr_bt_nodes
 {

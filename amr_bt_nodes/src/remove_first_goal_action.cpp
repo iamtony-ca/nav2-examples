@@ -9,7 +9,8 @@ namespace amr_bt_nodes
 RemoveFirstGoalAction::RemoveFirstGoalAction(
   const std::string & name,
   const BT::NodeConfiguration & config)
-: BT::SyncActionNode(name, config)
+: BT::SyncActionNode(name, config),
+  logger_(rclcpp::get_logger("RemoveFirstGoalAction"))
 {
   config.blackboard->get<rclcpp::Node::SharedPtr>("node", node_);
   logger_ = node_->get_logger();
