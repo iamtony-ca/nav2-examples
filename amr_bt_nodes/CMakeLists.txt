@@ -21,6 +21,8 @@ find_package(pluginlib REQUIRED)
 find_package(nav2_common REQUIRED)
 find_package(nav2_util REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(nav2_costmap_2d REQUIRED)
+
 
 # find_package(robot_interfaces REQUIRED)
 
@@ -248,6 +250,18 @@ target_include_directories(advanced_remove_passed_goals_action PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)  
 
+# ───── Build advanced_remove_passed_goals_action ─────
+add_library(is_goals_occupied_condition SHARED
+  src/is_goals_occupied_condition.cpp)
+
+ament_target_dependencies(is_goals_occupied_condition
+  rclcpp geometry_msgs tf2_ros nav2_msgs nav2_costmap_2d nav2_util tf2_geometry_msgs behaviortree_cpp pluginlib)
+
+target_include_directories(is_goals_occupied_condition PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
+
 
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
@@ -271,6 +285,7 @@ install(TARGETS
   remove_first_goal_action
   replan_guard_decorator
   advanced_remove_passed_goals_action
+  is_goals_occupied_condition
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)

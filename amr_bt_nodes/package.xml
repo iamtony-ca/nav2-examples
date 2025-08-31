@@ -24,6 +24,7 @@
   <depend>nav2_util</depend>
   <depend>sensor_msgs</depend>
   <depend>tf2_ros</depend>
+  <depend>nav2_costmap_2d</depend>
 
   <depend>ros2launch</depend>
 

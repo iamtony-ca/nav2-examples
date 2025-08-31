@@ -41,9 +41,9 @@
 </library>
 
 
-<library path="is_path_valid_condition">
-  <class name="amr_bt_nodes::IsPathValidCondition"
-         type="amr_bt_nodes::IsPathValidCondition"
+<library path="is_path_valid_custom_condition">
+  <class name="amr_bt_nodes::IsPathValidCustomCondition"
+         type="amr_bt_nodes::IsPathValidCustomCondition"
          base_class_type="BT::ConditionNode">
     <description>Check if the provided path is non-empty</description>
   </class>
@@ -148,6 +148,17 @@
          base_class_type="BT::StatefulActionNode">
     <description>
       A BT node to robustly remove passed goals based on path progress, a search window, and hysteresis.
+    </description>
+  </class>
+</library>
+
+
+<library path="is_goals_occupied_condition">
+  <class name="amr_bt_nodes::IsGoalsOccupiedCondition"
+         type="amr_bt_nodes::IsGoalsOccupiedCondition"
+         base_class_type="BT::ConditionNode">
+    <description>
+      Checks if any of the provided goals are in an occupied space.
     </description>
   </class>
 </library>

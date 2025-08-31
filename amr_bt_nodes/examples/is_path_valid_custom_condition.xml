@@ -1,0 +1,14 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence>
+      <Fallback name="path_generation_logic">
+        <IsPathValidCustomCondition path="{path}" />
+
+        <ComputePathThroughPoses goals="{goals}" path="{path}" />
+      </Fallback>
+      
+      <FollowPath path="{path}" />
+
+      </Sequence>
+  </BehaviorTree>
+</root>

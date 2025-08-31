@@ -1,0 +1,27 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence>
+      <IsGoalsOccupiedCondition
+          name="CheckGoalOccupancy"
+          goals="{candidate_goals}"
+          costmap_topic="local_costmap/costmap_raw"
+          occupied_goals="{obstructed_goals}"
+          unoccupied_goals="{safe_goals}" />
+
+      <Fallback name="ProcessGoals">
+        <Sequence>
+          <AlwaysSuccess> <Log message="Obstacles detected. Trying to use safe goals..."/>
+          </AlwaysSuccess>
+
+          <IsGoalVectorEmpty goals="{safe_goals}" invert="true"/>
+          
+          <ComputePathToPose goal="{safe_goals[0]}" path="{path}" />
+          <FollowPath path="{path}"/>
+        </Sequence>
+        
+        <Log message="No safe goals to navigate to." level="warn"/>
+      </Fallback>
+      
+    </Sequence>
+  </BehaviorTree>
+</root>
