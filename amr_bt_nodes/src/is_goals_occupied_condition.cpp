@@ -64,7 +64,8 @@ BT::NodeStatus IsGoalsOccupiedCondition::tick()
 
   if (!costmap || costmap_frame.empty()) {
     RCLCPP_WARN(node_->get_logger(), "Costmap or its frame ID is not available yet.");
-    return BT::NodeStatus::FAILURE;
+    // return BT::NodeStatus::FAILURE;
+    return BT::NodeStatus::RUNNING;
   }
 
   std::vector<geometry_msgs::msg::PoseStamped> goals;
@@ -145,3 +146,11 @@ void IsGoalsOccupiedCondition::costmapCallback(const nav2_msgs::msg::Costmap::Sh
 }
 
 }  // namespace amr_bt_nodes
+
+
+#include "behaviortree_cpp/bt_factory.h"
+
+extern "C" void BT_RegisterNodesFromPlugin(BT::BehaviorTreeFactory & factory)
+{
+  factory.registerNodeType<amr_bt_nodes::IsGoalsOccupiedCondition>("IsGoalsOccupiedCondition");
+}
