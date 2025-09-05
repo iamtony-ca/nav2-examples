@@ -162,3 +162,30 @@
     </description>
   </class>
 </library>
+
+
+<library path="string_periodic_publisher_action">
+  <class name="amr_bt_nodes::StringPeriodicPublisherAction" type="amr_bt_nodes::StringPeriodicPublisherAction" base_class_type="BT::SyncActionNode">
+    <description>
+      This is a SyncActionNode plugin that periodically issues N messages in a burst format at specified time intervals.
+    </description>
+  </class>
+</library>
+
+<library path="error_code_publisher_action">
+  <class name="amr_bt_nodes::ErrorCodePublisherAction" type="amr_bt_nodes::ErrorCodePublisherAction" base_class_type="BT::SyncActionNode">
+    <description>
+      Publishes a uint16 error code message a specified number of times.
+    </description>
+  </class>
+</library>
+
+<library path="run_n_times_decorator">
+  <class name="amr_bt_nodes::RunNTimesDecorator" type="amr_bt_nodes::RunNTimesDecorator" base_class_type="BT::DecoratorNode">
+    <description>
+      Executes the child node for a specified number of ticks each time a new goal/execution cycle begins.
+      After N ticks, this node will continuously return SUCCESS for the remainder of the
+       current execution cycle without ticking its child.
+    </description>
+  </class>
+</library>

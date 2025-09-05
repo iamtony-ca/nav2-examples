@@ -1,0 +1,12 @@
+<root main_tree_to_execute="MainTree">
+    <BehaviorTree ID="MainTree">
+        <Sequence>
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased" error_code_id="{error_code_id}"/>
+
+            <ErrorCodePublisherAction
+                topic_name="/robot_error"
+                error_code="{error_code_id}"
+                node="{ros_node}" />
+        </Sequence>
+    </BehaviorTree>
+</root>

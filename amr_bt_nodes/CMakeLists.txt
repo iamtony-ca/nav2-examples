@@ -250,7 +250,7 @@ target_include_directories(advanced_remove_passed_goals_action PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)  
 
-# ───── Build advanced_remove_passed_goals_action ─────
+# ───── Build is_goals_occupied_condition ─────
 add_library(is_goals_occupied_condition SHARED
   src/is_goals_occupied_condition.cpp)
 
@@ -258,6 +258,43 @@ ament_target_dependencies(is_goals_occupied_condition
   rclcpp geometry_msgs tf2_ros nav2_msgs nav2_costmap_2d nav2_util tf2_geometry_msgs behaviortree_cpp pluginlib)
 
 target_include_directories(is_goals_occupied_condition PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
+
+# ───── Build string_periodic_publisher_action ─────
+add_library(string_periodic_publisher_action SHARED
+  src/string_periodic_publisher_action.cpp)
+
+ament_target_dependencies(string_periodic_publisher_action
+  rclcpp std_msgs behaviortree_cpp pluginlib)
+
+target_include_directories(string_periodic_publisher_action PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
+
+
+# ───── Build error_code_publisher_action ─────
+add_library(error_code_publisher_action SHARED
+  src/error_code_publisher_action.cpp)
+
+ament_target_dependencies(error_code_publisher_action
+  rclcpp std_msgs behaviortree_cpp pluginlib)
+
+target_include_directories(error_code_publisher_action PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
+
+# ───── Build run_n_times_decorator ─────
+add_library(run_n_times_decorator SHARED
+  src/run_n_times_decorator.cpp)
+
+ament_target_dependencies(run_n_times_decorator
+  rclcpp behaviortree_cpp pluginlib)
+
+target_include_directories(run_n_times_decorator PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)  
 
@@ -286,6 +323,9 @@ install(TARGETS
   replan_guard_decorator
   advanced_remove_passed_goals_action
   is_goals_occupied_condition
+  string_periodic_publisher_action
+  error_code_publisher_action
+  run_n_times_decorator
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)

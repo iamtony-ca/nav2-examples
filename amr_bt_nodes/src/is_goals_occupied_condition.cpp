@@ -36,6 +36,10 @@ IsGoalsOccupiedCondition::IsGoalsOccupiedCondition(
     costmap_topic, qos,
     std::bind(&IsGoalsOccupiedCondition::costmapCallback, this, std::placeholders::_1),
     sub_option);
+
+  // // PlannerSelector 패턴 적용: 초기 latched 메시지 처리를 위함
+  // callback_group_executor_.spin_some(std::chrono::seconds(0)); // timeout 0은 즉시 반환
+
 }
 
 BT::PortsList IsGoalsOccupiedCondition::providedPorts()

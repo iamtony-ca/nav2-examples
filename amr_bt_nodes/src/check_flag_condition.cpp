@@ -35,6 +35,10 @@ CheckFlagCondition::CheckFlagCondition(
     std::bind(&CheckFlagCondition::flagCallback, this, std::placeholders::_1),
     sub_options);
 
+  // PlannerSelector 패턴 적용: 초기 latched 메시지 처리를 위함
+  callback_group_executor_.spin_some(std::chrono::seconds(0)); // timeout 0은 즉시 반환
+
+
   RCLCPP_INFO(node_->get_logger(), "[CheckFlagCondition] Subscribed to topic: %s", flag_topic_.c_str());
 }
 

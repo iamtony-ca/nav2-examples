@@ -1,0 +1,46 @@
+<root main_tree_to_execute="PatrolMission">
+  <BehaviorTree ID="PatrolMission">
+    <RateController hz="1.0">
+      <ReactiveFallback name="MissionControl">
+        
+        <StringPeriodicPublisherAction
+            node="{node}"
+            topic_name="/robot_heartbeat"
+            message="PATROLLING"
+            num_publishes="2"
+            publish_interval="5.0" />
+
+        <Sequence name="PatrolRoute">
+          <SaySomething message="Starting patrol... Next waypoint: A" />
+          <FollowPath path="{path_to_A}" />
+          <SaySomething message="Arrived at A. Next waypoint: B" />
+          <FollowPath path="{path_to_B}" />
+        </Sequence>
+      </ReactiveFallback>
+    </RateController>
+  </BehaviorTree>
+
+
+  <BehaviorTree ID="PatrolMission_Parallel">
+    <RateController hz="1.0">
+      <Parallel success_threshold="1">
+
+        <StringPeriodicPublisherAction
+            node="{node}"
+            topic_name="/robot_heartbeat"
+            message="PATROLLING"
+            num_publishes="2"
+            publish_interval="5.0" />
+
+        <Sequence name="PatrolRoute">
+          <SaySomething message="Starting patrol to A..." />
+          <FollowPath path="{path_to_A}" />
+          <SaySomething message="Arrived at A. Moving to B..." />
+          <FollowPath path="{path_to_B}" />
+        </Sequence>
+
+      </Parallel>
+    </RateController>
+  </BehaviorTree>
+
+</root>

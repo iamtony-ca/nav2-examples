@@ -54,7 +54,14 @@ BT::NodeStatus RemoveFirstGoalAction::tick()
 }  // namespace amr_bt_nodes
 
 #include "behaviortree_cpp/bt_factory.h"
-BT_REGISTER_NODES(factory)
+// BT_REGISTER_NODES(factory)
+// {
+//   factory.registerNodeType<amr_bt_nodes::RemoveFirstGoalAction>("RemoveFirstGoalAction");
+// }
+
+extern "C" void BT_RegisterNodesFromPlugin(BT::BehaviorTreeFactory &factory)
 {
   factory.registerNodeType<amr_bt_nodes::RemoveFirstGoalAction>("RemoveFirstGoalAction");
 }
+
+
