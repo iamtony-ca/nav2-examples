@@ -4,6 +4,12 @@
 
 using GoalStatus = action_msgs::msg::GoalStatus;
 
+// UUID 비교를 위한 헬퍼 함수 (cpp 파일 상단에 배치)
+bool is_same_goal_id(const unique_identifier_msgs::msg::UUID& id1, const unique_identifier_msgs::msg::UUID& id2) {
+    return std::equal(std::begin(id1.uuid), std::end(id1.uuid), std::begin(id2.uuid));
+}
+
+
 StatusManager::StatusManager(const rclcpp::NodeOptions & options)
 : Node("status_manager", options)
 {
@@ -15,6 +21,12 @@ StatusManager::StatusManager(const rclcpp::NodeOptions & options)
         "/navigate_to_pose/_action/status", 10, std::bind(&StatusManager::nav_to_pose_status_callback, this, std::placeholders::_1));
     waypoints_status_sub_ = this->create_subscription<GoalStatusArray>(
         "/follow_waypoints/_action/status", 10, std::bind(&StatusManager::waypoints_status_callback, this, std::placeholders::_1));
+
+    nav_through_poses_status_sub_ = this->create_subscription<GoalStatusArray>(
+        "/navigate_through_poses/_action/status", 10, std::bind(&StatusManager::nav_through_poses_status_callback, this, std::placeholders::_1));
+
+    compute_path_poses_status_sub_ = this->create_subscription<GoalStatusArray>(
+        "/compute_path_through_poses/_action/status", 10, std::bind(&StatusManager::compute_path_poses_status_callback, this, std::placeholders::_1));        
     compute_path_status_sub_ = this->create_subscription<GoalStatusArray>(
         "/compute_path_to_pose/_action/status", 10, std::bind(&StatusManager::compute_path_status_callback, this, std::placeholders::_1));
     follow_path_status_sub_ = this->create_subscription<GoalStatusArray>(
@@ -94,11 +106,32 @@ RobotStatus StatusManager::determine_current_status(RobotStatus last_known_statu
     }
 
     // 3. 진행 중인 작업: follow_waypoints
-    if (is_waypoints_executing_.load()) {
-        if (!is_in_recovery_context_.load()) {
-            return RobotStatus::FOLLOWING_WAYPOINTS;
+    // if (is_waypoints_executing_.load()) {
+    //     if (!is_in_recovery_context_.load()) {
+    //         return RobotStatus::FOLLOWING_WAYPOINTS;
+    //     }
+    // }
+    if (is_waypoints_executing_.load() || is_nav_through_poses_executing_.load()) {
+        if (last_known_status == RobotStatus::RECOVERY_RUNNING)       
+        {
+            // Recovery 이벤트 직후에는 해당 상태를 잠시 유지하여 외부에서 인지할 수 있도록 합니다.
+            // 다음 BT 이벤트나 액션 상태 변경에 따라 다른 상태로 갱신됩니다.
+            return last_known_status;
         }
+
+        if (is_driving_sub_action_executing_.load()) return RobotStatus::DRIVING;
+        if (is_planning_sub_action_executing_.load()) return RobotStatus::PLANNING;
+        
+        if (last_known_status == RobotStatus::PLANNING || last_known_status == RobotStatus::DRIVING) {
+            return last_known_status;
+        }
+        
+        if (is_bt_node_running("NavigateWithReplanning")) return RobotStatus::RECEIVED_GOAL;
+        
+        return RobotStatus::RECEIVED_GOAL;
     }
+
+
 
     // 4. 작업 종료 상태
     if (latest_terminal_status_.has_value()) {
@@ -128,9 +161,110 @@ RobotStatus StatusManager::determine_current_status(RobotStatus last_known_statu
     return last_known_status;
 }
 
-// UUID 비교를 위한 헬퍼 함수
-bool is_same_goal_id(const unique_identifier_msgs::msg::UUID& id1, const unique_identifier_msgs::msg::UUID& id2) {
-    return std::equal(std::begin(id1.uuid), std::end(id1.uuid), std::begin(id2.uuid));
+void StatusManager::nav_through_poses_status_callback(const GoalStatusArray::SharedPtr msg)
+{
+    bool was_active = is_nav_through_poses_executing_.load();
+    bool is_active_now = false;
+    std::optional<action_msgs::msg::GoalStatus> final_status;
+
+    if (!active_nav_through_poses_goal_id_.has_value()) {
+        for (const auto& status : msg->status_list) {
+            if (status.status == GoalStatus::STATUS_EXECUTING) {
+                is_active_now = true;
+                std::lock_guard<std::recursive_mutex> lock(status_mutex_);
+                active_nav_through_poses_goal_id_ = status.goal_info.goal_id;
+                break;
+            }
+        }
+    } else {
+        is_active_now = true;
+    }
+
+    if (active_nav_through_poses_goal_id_.has_value()) {
+        for (const auto& status : msg->status_list) {
+            if (is_same_goal_id(status.goal_info.goal_id, active_nav_through_poses_goal_id_.value())) {
+                if (status.status == GoalStatus::STATUS_CANCELED) {
+                    final_status = status;
+                    break;
+                }
+                if (status.status == GoalStatus::STATUS_SUCCEEDED || status.status == GoalStatus::STATUS_ABORTED) {
+                    final_status = status;
+                }
+            }
+        }
+    }
+
+    if (final_status.has_value()) {
+        is_active_now = false;
+        std::lock_guard<std::recursive_mutex> lock(status_mutex_);
+        latest_terminal_status_ = final_status;
+        active_nav_through_poses_goal_id_.reset();
+    }
+
+    if (was_active != is_active_now) {
+        is_nav_through_poses_executing_.store(is_active_now);
+    }
+    
+    if (!was_active && is_active_now) {
+        std::lock_guard<std::recursive_mutex> lock(status_mutex_);
+        latest_terminal_status_.reset();
+    }
+
+    evaluate_and_publish_if_changed();
+}
+
+
+// *** 수정: waypoints_status_callback 에도 Goal ID 추적 로직 추가 ***
+void StatusManager::waypoints_status_callback(const GoalStatusArray::SharedPtr msg)
+{
+    bool was_active = is_waypoints_executing_.load();
+    bool is_active_now = false;
+    std::optional<action_msgs::msg::GoalStatus> final_status;
+
+    if (!active_waypoints_goal_id_.has_value()) {
+        for (const auto& status : msg->status_list) {
+            if (status.status == GoalStatus::STATUS_EXECUTING) {
+                is_active_now = true;
+                std::lock_guard<std::recursive_mutex> lock(status_mutex_);
+                active_waypoints_goal_id_ = status.goal_info.goal_id;
+                break;
+            }
+        }
+    } else {
+        is_active_now = true;
+    }
+
+    if (active_waypoints_goal_id_.has_value()) {
+        for (const auto& status : msg->status_list) {
+            if (is_same_goal_id(status.goal_info.goal_id, active_waypoints_goal_id_.value())) {
+                if (status.status == GoalStatus::STATUS_CANCELED) {
+                    final_status = status;
+                    break;
+                }
+                if (status.status == GoalStatus::STATUS_SUCCEEDED || status.status == GoalStatus::STATUS_ABORTED) {
+                    final_status = status;
+                }
+            }
+        }
+    }
+
+    if (final_status.has_value()) {
+        is_active_now = false;
+        std::lock_guard<std::recursive_mutex> lock(status_mutex_);
+        latest_terminal_status_ = final_status;
+        active_waypoints_goal_id_.reset();
+    }
+
+    if (was_active != is_active_now) {
+        is_waypoints_executing_.store(is_active_now);
+    }
+    
+    if (!was_active && is_active_now) {
+        std::lock_guard<std::recursive_mutex> lock(status_mutex_);
+        latest_terminal_status_.reset();
+    }
+
+    evaluate_and_publish_if_changed();
 }
 
 void StatusManager::nav_to_pose_status_callback(const GoalStatusArray::SharedPtr msg)
@@ -191,9 +325,9 @@ void StatusManager::nav_to_pose_status_callback(const GoalStatusArray::SharedPtr
     evaluate_and_publish_if_changed();
 }
 
-void StatusManager::waypoints_status_callback(const GoalStatusArray::SharedPtr msg)
+void StatusManager::compute_path_poses_status_callback(const GoalStatusArray::SharedPtr msg)
 {
-    // ... (이전과 동일한 로직) ...
+    
     bool is_active = false;
     for (const auto& status : msg->status_list) {
         if (status.status == GoalStatus::STATUS_EXECUTING) {
@@ -201,7 +335,7 @@ void StatusManager::waypoints_status_callback(const GoalStatusArray::SharedPtr m
             break;
         }
     }
-    is_waypoints_executing_.store(is_active);
+    is_planning_sub_action_executing_.store(is_active);
     evaluate_and_publish_if_changed();
 }
 
@@ -240,7 +374,8 @@ void StatusManager::bt_log_callback(const BehaviorTreeLog::SharedPtr msg)
     // 추적할 Recovery 시퀀스 노드 이름 정의
     const static std::set<std::string> recovery_sequence_nodes = {
         "ShortRecoverySequence1",
-        "ShortRecoverySequence2"
+        "ShortRecoverySequence2",
+        "ShortRecoverySequenceTotal1",
     };
 
     bool status_changed_by_recovery = false;
