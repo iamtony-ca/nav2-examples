@@ -1,0 +1,7 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence>
+      <BoolPublisherAction topic_name="/clear_costmap" message="true" num_publishes="2" node="{ros_node}"/>
+    </Sequence>
+  </BehaviorTree>
+</root>

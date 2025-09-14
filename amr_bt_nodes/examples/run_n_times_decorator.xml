@@ -1,0 +1,10 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence>
+      <RunNTimesDecorator num_ticks="3">
+        <PlaySound file="start_moving.wav"/>
+      </RunNTimesDecorator>
+      <FollowPath/>
+    </Sequence>
+  </BehaviorTree>
+</root>

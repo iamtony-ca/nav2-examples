@@ -189,3 +189,29 @@
     </description>
   </class>
 </library>
+
+
+<library path="bool_publisher_action">
+  <class name="amr_bt_nodes::BoolPublisherAction" type="amr_bt_nodes::BoolPublisherAction" base_class_type="BT::SyncActionNode">
+    <description>
+      BoolPublisherAction is a BehaviorTree action node that publishes a boolean type msg to a specified topic.
+    </description>
+  </class>
+</library>
+
+
+<library path="set_blackboard_bool_action">
+  <class name="amr_bt_nodes::SetBlackboardBoolAction" type="amr_bt_nodes::SetBlackboardBoolAction" base_class_type="BT::SyncActionNode">
+    <description>
+      SyncAction Node for set blackboard variable of type of boolean
+    </description>
+  </class>
+</library>
+
+<library path="set_blackboard_ushort_action">
+  <class name="amr_bt_nodes::SetBlackboardUShortAction" type="amr_bt_nodes::SetBlackboardUShortAction" base_class_type="BT::SyncActionNode">
+    <description>
+      SyncAction Node for set blackboard variable of type of uint16
+    </description>
+  </class>
+</library>

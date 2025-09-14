@@ -299,6 +299,41 @@ target_include_directories(run_n_times_decorator PUBLIC
   $<INSTALL_INTERFACE:include>)  
 
 
+# ───── Build bool_publisher_action ─────
+add_library(bool_publisher_action SHARED
+  src/bool_publisher_action.cpp)
+
+ament_target_dependencies(bool_publisher_action
+  rclcpp std_msgs behaviortree_cpp pluginlib)
+
+target_include_directories(bool_publisher_action PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
+
+# ───── Build set_blackboard_bool_action ─────
+add_library(set_blackboard_bool_action SHARED
+  src/set_blackboard_bool_action.cpp)
+
+ament_target_dependencies(set_blackboard_bool_action
+  rclcpp std_msgs behaviortree_cpp pluginlib)
+
+target_include_directories(set_blackboard_bool_action PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
+# ───── Build set_blackboard_ushort_action ─────
+add_library(set_blackboard_ushort_action SHARED
+  src/set_blackboard_ushort_action.cpp)
+
+ament_target_dependencies(set_blackboard_ushort_action
+  rclcpp behaviortree_cpp pluginlib)
+
+target_include_directories(set_blackboard_ushort_action PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
+
 
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
@@ -326,6 +361,10 @@ install(TARGETS
   string_periodic_publisher_action
   error_code_publisher_action
   run_n_times_decorator
+  bool_publisher_action
+  set_blackboard_bool_action
+  set_blackboard_ushort_action
+  
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)

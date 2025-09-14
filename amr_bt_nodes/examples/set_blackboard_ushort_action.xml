@@ -1,0 +1,22 @@
+<RecoveryNode number_of_retried="10">
+    <PipelineSequence>
+        <Sequence>
+            <SetBlackboardUShort output_key="compute_path_error_code" value="0"/>
+        </Sequence>
+
+        <Sequence>
+            <SetBlackboardUShort output_key="compute_path_error_code" value="0"/>
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+
+            <SetBlackboardUShort output_key="follow_path_error_code" value="0"/>
+            <FollowPath path="{pruned_path}" controller_id="FollowPath"
+                        goal_checker_id="precise_goal_checker" progress_checker_id="progress_checker"
+                        error_code_id="{follow_path_error_code}" />
+        </Sequence>
+    </PipelineSequence>
+    <Sequence>
+        <Precondition if="compute_path_error_code == 305" else="FAILURE">
+            <Wait wait_duration="1.0"/>
+        </Precondition>  
+    </Sequence>
+</RecoveryNode>
