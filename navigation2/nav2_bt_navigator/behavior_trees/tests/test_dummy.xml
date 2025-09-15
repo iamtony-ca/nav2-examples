@@ -1,0 +1,127 @@
+<PipelineSequence>
+
+
+
+  <Sequence>
+
+    <Wait wait_duration="5.0"/>
+
+    <!-- <SetBlackboard output_key="is_process_finished" value="true"/> -->
+
+  </Sequence>
+
+  <Sequence>
+
+    <!-- <Precondition if="is_process_finished == true" else="RUNNING"> -->
+
+    <StatusMonitorAction status_to_read="FINISHED"/>
+
+    <!-- </Precondition> -->
+
+  </Sequence>
+
+</PipelineSequence>
+
+
+
+<PipelineSequence>
+
+
+
+  <Sequence>
+
+
+    <SetBlackboard output_key="compute_path_error_code" value="0"/>
+
+  </Sequence>
+
+  <Sequence>
+
+    <!-- <Precondition if="is_process_finished == true" else="RUNNING"> -->
+    <SetBlackboard output_key="compute_path_error_code" value="0"/>
+    <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+
+
+    <FollowPath path="{pruned_path}" controller_id="FollowPath"
+                goal_checker_id="precise_goal_checker" progress_checker_id="progress_checker"
+                error_code_id="{follow_path_error_code}" />
+    <!-- <StatusMonitorAction status_to_read="FINISHED"/> -->
+
+    <!-- </Precondition> -->
+
+  </Sequence>
+
+</PipelineSequence>
+
+
+
+
+
+<RecoveryNode number_of_retried="10">
+    <PipelineSequence>
+
+        <Sequence>
+
+
+            <UnsetBlackboard key="compute_path_error_code" />
+
+        </Sequence>
+
+        <Sequence>
+
+            <UnsetBlackboard key="compute_path_error_code" />
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+
+            <UnsetBlackboard key="follow_path_error_code" />
+            <FollowPath path="{pruned_path}" controller_id="FollowPath"
+                        goal_checker_id="precise_goal_checker" progress_checker_id="progress_checker"
+                        error_code_id="{follow_path_error_code}" />
+        </Sequence>
+
+    </PipelineSequence>
+    <Sequence>
+        <Precondition if="compute_path_error_code == 305" else="FAILURE">
+
+            <Wait wait_duration="1.0">
+            <UnsetBlackboard key="compute_path_error_code" />
+            <UnsetBlackboard key="follow_path_error_code" />
+        </Precondition>  
+
+    </Sequence>
+</RecoveryNode>
+
+
+
+
+<RecoveryNode number_of_retried="10">
+    <PipelineSequence>
+
+        <Sequence>
+
+
+            <SetBlackboardUInt16Action output_key="compute_path_error_code" value="0"/>
+
+        </Sequence>
+
+        <Sequence>
+
+            <SetBlackboardUInt16Action output_key="compute_path_error_code" value="0"/>
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+
+            <SetBlackboardUInt16Action output_key="follow_path_error_code" value="0"/>
+            <FollowPath path="{pruned_path}" controller_id="FollowPath"
+                        goal_checker_id="precise_goal_checker" progress_checker_id="progress_checker"
+                        error_code_id="{follow_path_error_code}" />
+        </Sequence>
+
+    </PipelineSequence>
+    <Sequence>
+        <Precondition if="compute_path_error_code == 305" else="FAILURE">
+
+            <Wait wait_duration="1.0">
+            <!-- <UnsetBlackboard key="compute_path_error_code" />
+            <UnsetBlackboard key="follow_path_error_code" /> -->
+        </Precondition>  
+
+    </Sequence>
+</RecoveryNode>

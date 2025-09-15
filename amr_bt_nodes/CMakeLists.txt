@@ -334,6 +334,21 @@ target_include_directories(set_blackboard_ushort_action PUBLIC
   $<INSTALL_INTERFACE:include>)  
 
 
+# ───── Build check_pause_condition ─────
+add_library(check_pause_condition SHARED
+  src/check_pause_condition.cpp)
+
+ament_target_dependencies(check_pause_condition
+  rclcpp
+  std_msgs
+  behaviortree_cpp
+  pluginlib)
+
+target_include_directories(check_pause_condition PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+
+
 
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)

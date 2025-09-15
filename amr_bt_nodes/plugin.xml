@@ -215,3 +215,12 @@
     </description>
   </class>
 </library>
+
+
+<library path="check_pause_condition">
+  <class name="amr_bt_nodes::CheckPauseCondition"
+         type="amr_bt_nodes::CheckPauseCondition"
+         base_class_type="BT::ConditionNode">
+    <description>Return SUCCESS if flag is true, otherwise FAILURE for controller_pause</description>
+  </class>
+</library>
