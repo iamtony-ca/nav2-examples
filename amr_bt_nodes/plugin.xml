@@ -224,3 +224,12 @@
     <description>Return SUCCESS if flag is true, otherwise FAILURE for controller_pause</description>
   </class>
 </library>
+
+
+<library path="reactive_round_robin_control">
+  <class name="amr_bt_nodes::ReactiveRoundRobinControl"
+         type="amr_bt_nodes::ReactiveRoundRobinControl"
+         base_class_type="BT::ControlNode">
+    <description>ReactiveRoundRobinControl </description>
+  </class>
+</library>

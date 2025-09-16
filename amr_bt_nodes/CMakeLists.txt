@@ -349,6 +349,19 @@ target_include_directories(check_pause_condition PUBLIC
   $<INSTALL_INTERFACE:include>)
 
 
+# ───── Build reactive_round_robin_control ─────
+add_library(reactive_round_robin_control SHARED
+  src/reactive_round_robin_control.cpp)
+
+ament_target_dependencies(reactive_round_robin_control
+  rclcpp
+  behaviortree_cpp
+  pluginlib)
+
+target_include_directories(reactive_round_robin_control PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+
 
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
@@ -379,7 +392,7 @@ install(TARGETS
   bool_publisher_action
   set_blackboard_bool_action
   set_blackboard_ushort_action
-  
+  reactive_round_robin_control
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
