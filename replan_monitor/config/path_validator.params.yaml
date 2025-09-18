@@ -1,0 +1,32 @@
+path_validator_node:
+  ros__parameters:
+    # Frames
+    global_frame: "map"
+    base_frame: "base_link"
+
+    # Event pulse / cooldown
+    cooldown_sec: 1.0
+    publish_false_pulse: true
+    flag_pulse_ms: 120
+
+    # Obstacle persistence & thresholds
+    obstacle_persistence_sec: 0.5
+    cost_threshold: 200.0         # 보수적으로 높게 시작 (inflated 영역 기준)
+
+    # Detection ROI / DB
+    max_speed: 0.5
+    lookahead_time_sec: 15.0
+    min_lookahead_m: 2.0
+    db_update_frequency: 5.0      # Hz
+    obstacle_prune_timeout_sec: 3.0
+    db_stride: 2                  # 1이면 모든 셀 검사, 2 이상이면 샘플링
+    cone_angle_deg: 100.0         # 전방 부채꼴 각도
+    kernel_half_size: 1           # 1 => 3x3 커널로 블록 검사
+    ignore_unknown: true          # Unknown(255) 제외 (권장)
+
+    # Path validation
+    consecutive_threshold: 3      # 연속 K 포인트 이상 차단되면 리플랜
+    path_check_distance_m: 6.0    # 경로 검사 상한 거리(가까운 구간만)
+
+    # Typical sim param
+    use_sim_time: false

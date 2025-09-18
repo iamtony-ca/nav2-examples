@@ -22,3 +22,40 @@
   </export>
 </package>
 
+
+
+<!-- 
+<?xml version="1.0"?>
+<package format="3">
+  <name>replan_monitor</name>
+  <version>0.1.0</version>
+  <description>Path validation & replan trigger node for Nav2 (path_validator_node)</description>
+
+  <maintainer email="you@example.com">Your Name</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- Core deps -->
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+
+  <!-- TF -->
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+
+  <!-- Nav2 / Costmap -->
+  <depend>nav2_msgs</depend>
+  <depend>nav2_costmap_2d</depend>
+
+  <!-- Launch (runtime) -->
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package> -->
