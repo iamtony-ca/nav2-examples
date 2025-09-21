@@ -13,7 +13,7 @@ bool is_same_goal_id(const unique_identifier_msgs::msg::UUID& id1, const unique_
 StatusManager::StatusManager(const rclcpp::NodeOptions & options)
 : Node("status_manager", options)
 {
-    // ... (생성자 내용은 이전과 동일하게 유지) ...
+    
     status_publisher_ = this->create_publisher<std_msgs::msg::String>("/robot_status", rclcpp::SystemDefaultsQoS());
     timer_ = this->create_wall_timer(std::chrono::seconds(1), std::bind(&StatusManager::timer_callback, this));
 
