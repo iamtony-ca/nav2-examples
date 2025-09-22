@@ -394,7 +394,7 @@ void StatusManager::compute_path_poses_status_callback(const GoalStatusArray::Sh
     }
 
 
-    if(current_status_ !- RobotStatus::DRIVING) {
+    if(current_status_ != RobotStatus::DRIVING) {
         bool is_active = false;
         for (const auto& status : msg->status_list) {
             if (status.status == GoalStatus::STATUS_EXECUTING) {
