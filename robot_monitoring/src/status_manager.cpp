@@ -13,32 +13,40 @@ bool is_same_goal_id(const unique_identifier_msgs::msg::UUID& id1, const unique_
 StatusManager::StatusManager(const rclcpp::NodeOptions & options)
 : Node("status_manager", options)
 {
-    
+    // 이 그룹에 속한 모든 콜백은 한 번에 하나씩만 순차적으로 실행됩니다.
+    callback_group_ = this->create_callback_group(
+    rclcpp::CallbackGroupType::MutuallyExclusive);
+
+    // 모든 구독에 적용할 옵션에 콜백 그룹을 할당합니다.
+    auto sub_options = rclcpp::SubscriptionOptions();
+    sub_options.callback_group = callback_group_;
+
+
     status_publisher_ = this->create_publisher<std_msgs::msg::String>("/robot_status", rclcpp::SystemDefaultsQoS());
-    timer_ = this->create_wall_timer(std::chrono::seconds(1), std::bind(&StatusManager::timer_callback, this));
+    timer_ = this->create_wall_timer(std::chrono::seconds(1), std::bind(&StatusManager::timer_callback, this), callback_group_);
 
     nav_to_pose_status_sub_ = this->create_subscription<GoalStatusArray>(
-        "/navigate_to_pose/_action/status", 10, std::bind(&StatusManager::nav_to_pose_status_callback, this, std::placeholders::_1));
+        "/navigate_to_pose/_action/status", 10, std::bind(&StatusManager::nav_to_pose_status_callback, this, std::placeholders::_1), sub_options);
     waypoints_status_sub_ = this->create_subscription<GoalStatusArray>(
-        "/follow_waypoints/_action/status", 10, std::bind(&StatusManager::waypoints_status_callback, this, std::placeholders::_1));
+        "/follow_waypoints/_action/status", 10, std::bind(&StatusManager::waypoints_status_callback, this, std::placeholders::_1), sub_options);
 
     nav_through_poses_status_sub_ = this->create_subscription<GoalStatusArray>(
-        "/navigate_through_poses/_action/status", 10, std::bind(&StatusManager::nav_through_poses_status_callback, this, std::placeholders::_1));
+        "/navigate_through_poses/_action/status", 10, std::bind(&StatusManager::nav_through_poses_status_callback, this, std::placeholders::_1), sub_options);
 
     compute_path_poses_status_sub_ = this->create_subscription<GoalStatusArray>(
-        "/compute_path_through_poses/_action/status", 10, std::bind(&StatusManager::compute_path_poses_status_callback, this, std::placeholders::_1));        
+        "/compute_path_through_poses/_action/status", 10, std::bind(&StatusManager::compute_path_poses_status_callback, this, std::placeholders::_1), sub_options);        
     compute_path_status_sub_ = this->create_subscription<GoalStatusArray>(
-        "/compute_path_to_pose/_action/status", 10, std::bind(&StatusManager::compute_path_status_callback, this, std::placeholders::_1));
+        "/compute_path_to_pose/_action/status", 10, std::bind(&StatusManager::compute_path_status_callback, this, std::placeholders::_1), sub_options);
     follow_path_status_sub_ = this->create_subscription<GoalStatusArray>(
-        "/follow_path/_action/status", 10, std::bind(&StatusManager::follow_path_status_callback, this, std::placeholders::_1));
+        "/follow_path/_action/status", 10, std::bind(&StatusManager::follow_path_status_callback, this, std::placeholders::_1), sub_options);
     bt_log_sub_ = this->create_subscription<BehaviorTreeLog>(
-        "/behavior_tree_log", 10, std::bind(&StatusManager::bt_log_callback, this, std::placeholders::_1));
+        "/behavior_tree_log", 10, std::bind(&StatusManager::bt_log_callback, this, std::placeholders::_1), sub_options);
     odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-        "/odom", 10, std::bind(&StatusManager::odom_callback, this, std::placeholders::_1));
+        "/odom", 10, std::bind(&StatusManager::odom_callback, this, std::placeholders::_1), sub_options);
     collision_sub_ = this->create_subscription<std_msgs::msg::Bool>(
-        "/is_collision_imminent", rclcpp::SystemDefaultsQoS(), std::bind(&StatusManager::collision_callback, this, std::placeholders::_1));
+        "/is_collision_imminent", rclcpp::SystemDefaultsQoS(), std::bind(&StatusManager::collision_callback, this, std::placeholders::_1), sub_options);
     pause_sub_ = this->create_subscription<std_msgs::msg::Bool>(
-        "/pause_robot", rclcpp::SystemDefaultsQoS(), std::bind(&StatusManager::pause_flag_callback, this, std::placeholders::_1));
+        "/pause_robot", rclcpp::SystemDefaultsQoS(), std::bind(&StatusManager::pause_flag_callback, this, std::placeholders::_1), sub_options);
 
     for (const auto& name : core_node_names_) {
         lifecycle_clients_.push_back(this->create_client<lifecycle_msgs::srv::GetState>(name + "/get_state"));
@@ -57,6 +65,16 @@ void StatusManager::timer_callback()
     status_publisher_->publish(msg);
 }
 
+
+void StatusManager::reset_bt_state_cache_locked_()
+{
+  // status_mutex_ 가 이미 잠겨 있어야 함!
+  bt_states_.clear();
+  running_bt_nodes_.clear();
+  is_in_recovery_context_ = false;
+}
+
+
 // 상태 변화 감지 및 발행을 담당하는 메인 함수
 void StatusManager::evaluate_and_publish_if_changed()
 {
@@ -65,6 +83,16 @@ void StatusManager::evaluate_and_publish_if_changed()
     RobotStatus new_status = determine_current_status(current_status_);
 
     if (current_status_ != new_status) {
+        if (new_status == RobotStatus::SUCCEEDED ||
+            new_status == RobotStatus::FAILED   ||
+            new_status == RobotStatus::CANCELED ||
+            new_status == RobotStatus::IDLE) {   // ← 선택
+            reset_bt_state_cache_locked_();
+            flag_goal_accept_ = false;
+            }
+        
+        
+        
         current_status_ = new_status;
         auto msg = std_msgs::msg::String();
         msg.data = status_to_string(current_status_);
@@ -94,15 +122,30 @@ RobotStatus StatusManager::determine_current_status(RobotStatus last_known_statu
         }
 
         if (is_driving_sub_action_executing_.load()) return RobotStatus::DRIVING;
-        if (is_planning_sub_action_executing_.load()) return RobotStatus::PLANNING;
+        if (is_planning_sub_action_executing_.load()) {
+            if (is_bt_node_running("IntelligentRecovery")){
+                return RobotStatus::RECOVERY_RUNNING;
+            }
+            else {
+                return RobotStatus::PLANNING;
+            }
+
+            
+        }
+        
+        
+        
         
         if (last_known_status == RobotStatus::PLANNING || last_known_status == RobotStatus::DRIVING) {
             return last_known_status;
         }
         
-        if (is_bt_node_running("NavigateWithReplanning")) return RobotStatus::RECEIVED_GOAL;
+        if (is_bt_node_running("NavigateWithReplanning") && !flag_goal_accept_) {
+            flag_goal_accept_ = true;
+            return RobotStatus::RECEIVED_GOAL;
+        }
         
-        return RobotStatus::RECEIVED_GOAL;
+        return last_known_status;
     }
 
     // 3. 진행 중인 작업: follow_waypoints
@@ -112,6 +155,12 @@ RobotStatus StatusManager::determine_current_status(RobotStatus last_known_statu
     //     }
     // }
     if (is_waypoints_executing_.load() || is_nav_through_poses_executing_.load()) {
+        if (!flag_goal_accept_){
+            flag_goal_accept_ = true;
+            return RobotStatus::RECEIVED_GOAL;
+        }
+        
+        
         if (last_known_status == RobotStatus::RECOVERY_RUNNING)       
         {
             // Recovery 이벤트 직후에는 해당 상태를 잠시 유지하여 외부에서 인지할 수 있도록 합니다.
@@ -120,15 +169,27 @@ RobotStatus StatusManager::determine_current_status(RobotStatus last_known_statu
         }
 
         if (is_driving_sub_action_executing_.load()) return RobotStatus::DRIVING;
-        if (is_planning_sub_action_executing_.load()) return RobotStatus::PLANNING;
+        if (is_planning_sub_action_executing_.load()) {
+            if(is_bt_node_running("IntelligentRecovery")) {
+                return RobotStatus::RECOVERY_RUNNING;
+            }
+            else {
+                return RobotStatus::PLANNING;
+            }
+
+        }
+        
         
         if (last_known_status == RobotStatus::PLANNING || last_known_status == RobotStatus::DRIVING) {
             return last_known_status;
         }
         
-        if (is_bt_node_running("NavigateWithReplanning")) return RobotStatus::RECEIVED_GOAL;
+        if (is_bt_node_running("NavigateWithReplanning") && !flag_goal_accept_) {
+            flag_goal_accept_ = true;
+            return RobotStatus::RECEIVED_GOAL;
+        } 
         
-        return RobotStatus::RECEIVED_GOAL;
+        return last_known_status;
     }
 
 
@@ -328,15 +389,32 @@ void StatusManager::nav_to_pose_status_callback(const GoalStatusArray::SharedPtr
 void StatusManager::compute_path_poses_status_callback(const GoalStatusArray::SharedPtr msg)
 {
     
-    bool is_active = false;
-    for (const auto& status : msg->status_list) {
-        if (status.status == GoalStatus::STATUS_EXECUTING) {
-            is_active = true;
-            break;
-        }
+    if (is_bt_node_running("IntelligentRecovery")) {
+        return;
     }
-    is_planning_sub_action_executing_.store(is_active);
-    evaluate_and_publish_if_changed();
+
+
+    if(current_status_ !- RobotStatus::DRIVING) {
+        bool is_active = false;
+        for (const auto& status : msg->status_list) {
+            if (status.status == GoalStatus::STATUS_EXECUTING) {
+                is_active = true;
+                break;
+            }
+        }
+        is_planning_sub_action_executing_.store(is_active);
+        evaluate_and_publish_if_changed();        
+    }
+
+    // bool is_active = false;
+    // for (const auto& status : msg->status_list) {
+    //     if (status.status == GoalStatus::STATUS_EXECUTING) {
+    //         is_active = true;
+    //         break;
+    //     }
+    // }
+    // is_planning_sub_action_executing_.store(is_active);
+    // evaluate_and_publish_if_changed();
 }
 
 void StatusManager::compute_path_status_callback(const GoalStatusArray::SharedPtr msg)
@@ -367,75 +445,117 @@ void StatusManager::follow_path_status_callback(const GoalStatusArray::SharedPtr
     evaluate_and_publish_if_changed();
 }
 
-void StatusManager::bt_log_callback(const BehaviorTreeLog::SharedPtr msg)
-{
-    std::lock_guard<std::recursive_mutex> lock(status_mutex_);
 
-    // 추적할 Recovery 시퀀스 노드 이름 정의
-    const static std::set<std::string> recovery_sequence_nodes = {
-        "ShortRecoverySequence1",
-        "ShortRecoverySequence2",
-        "ShortRecoverySequenceTotal1",
-    };
 
-    bool status_changed_by_recovery = false;
-    RobotStatus new_status = current_status_;
+void StatusManager::bt_log_callback(const BehaviorTreeLog::SharedPtr msg) {
+  std::lock_guard<std::recursive_mutex> lk(status_mutex_);
+  bool recovery_changed = false;
+  RobotStatus new_status = current_status_;
 
-    // BT 이벤트 로그를 순회하며 Recovery 시퀀스의 상태 전이를 감지
-    for (const auto& event : msg->event_log) {
-        // Recovery 시퀀스 노드인지 확인
-        if (recovery_sequence_nodes.count(event.node_name)) {
-            // IDLE -> RUNNING: Recovery 시작
-            // if (event.previous_status == "IDLE" && event.current_status == "RUNNING") {
-            if (event.current_status == "RUNNING") {    
-                new_status = RobotStatus::RECOVERY_RUNNING;
-                status_changed_by_recovery = true;
-            }
-            // RUNNING -> SUCCEEDED: Recovery 성공
-            // else if (event.previous_status == "RUNNING" && event.current_status == "SUCCESS") {
-            else if (event.current_status == "SUCCESS") {    
-                new_status = RobotStatus::RECOVERY_SUCCESS;
-                status_changed_by_recovery = true;
-            }
-            // IDLE/RUNNING -> FAILURE: Recovery 실패
-            // else if ((event.previous_status == "RUNNING" || event.previous_status == "IDLE") &&
-            //          event.current_status == "FAILURE")
-            else if (event.current_status == "FAILURE")            
-            {
-                new_status = RobotStatus::RECOVERY_FAILURE;
-                status_changed_by_recovery = true;
-            }
-        }
+  static const std::unordered_set<std::string> recovery_seq = {
+    "ShortRecoverySequence1","ShortRecoverySequence2","ShortRecoverySequenceTotal1"
+  };
+
+  for (const auto& ev : msg->event_log) {
+    bt_states_[ev.node_name] = ev.current_status; // 누적 업데이트
+
+    if (recovery_seq.count(ev.node_name)) {
+      if (ev.current_status == "RUNNING")      { new_status = RobotStatus::RECOVERY_RUNNING; recovery_changed = true; }
+      else if (ev.current_status == "SUCCESS") { new_status = RobotStatus::RECOVERY_SUCCESS; recovery_changed = true; }
+      else if (ev.current_status == "FAILURE") { new_status = RobotStatus::RECOVERY_FAILURE; recovery_changed = true; }
     }
+  }
 
-    // Recovery 이벤트에 의해 상태가 변경되었다면 즉시 적용 및 발행
-    if (status_changed_by_recovery && current_status_ != new_status) {
-        current_status_ = new_status;
-        auto status_msg = std_msgs::msg::String();
-        status_msg.data = status_to_string(current_status_);
-        RCLCPP_INFO(this->get_logger(), "Robot Status Changed (by Recovery BT) -> %s", status_msg.data.c_str());
-        status_publisher_->publish(status_msg);
-    }
+  if (recovery_changed && current_status_ != new_status) {
+    current_status_ = new_status;
+    std_msgs::msg::String out; out.data = status_to_string(current_status_);
+    RCLCPP_INFO(get_logger(), "Robot Status Changed (by Recovery BT) -> %s", out.data.c_str());
+    status_publisher_->publish(out);
+  }
 
-    // 현재 실행 중인 모든 BT 노드 목록 업데이트
-    running_bt_nodes_.clear();
-    bool recovery_flag_check = false;
-    for (const auto& event : msg->event_log) {
-        if (event.current_status == "RUNNING") {
-            running_bt_nodes_.push_back(event.node_name);
-            if (recovery_sequence_nodes.count(event.node_name) > 0) {
-                 recovery_flag_check = true;
-            }
-        }
-    }
-    // is_in_recovery_context_ 플래그도 동기화 (다른 로직에서 사용될 경우 대비)
-    is_in_recovery_context_.store(recovery_flag_check);
-    
-    // Recovery 이벤트가 없었을 경우, 기존의 평가 로직을 호출
-
-    evaluate_and_publish_if_changed();
-
+  // 필요 시: evaluate( ) 호출
+  evaluate_and_publish_if_changed();
 }
+
+bool StatusManager::is_bt_node_running(const std::string& node_name) const {
+  auto it = bt_states_.find(node_name);
+  return it != bt_states_.end() && it->second == "RUNNING";
+}
+
+
+
+
+
+
+// void StatusManager::bt_log_callback(const BehaviorTreeLog::SharedPtr msg)
+// {
+//     std::lock_guard<std::recursive_mutex> lock(status_mutex_);
+
+//     // 추적할 Recovery 시퀀스 노드 이름 정의
+//     const static std::set<std::string> recovery_sequence_nodes = {
+//         "ShortRecoverySequence1",
+//         "ShortRecoverySequence2",
+//         "ShortRecoverySequenceTotal1",
+//     };
+
+//     bool status_changed_by_recovery = false;
+//     RobotStatus new_status = current_status_;
+
+//     // BT 이벤트 로그를 순회하며 Recovery 시퀀스의 상태 전이를 감지
+//     for (const auto& event : msg->event_log) {
+//         // Recovery 시퀀스 노드인지 확인
+//         if (recovery_sequence_nodes.count(event.node_name)) {
+//             // IDLE -> RUNNING: Recovery 시작
+//             // if (event.previous_status == "IDLE" && event.current_status == "RUNNING") {
+//             if (event.current_status == "RUNNING") {    
+//                 new_status = RobotStatus::RECOVERY_RUNNING;
+//                 status_changed_by_recovery = true;
+//             }
+//             // RUNNING -> SUCCEEDED: Recovery 성공
+//             // else if (event.previous_status == "RUNNING" && event.current_status == "SUCCESS") {
+//             else if (event.current_status == "SUCCESS") {    
+//                 new_status = RobotStatus::RECOVERY_SUCCESS;
+//                 status_changed_by_recovery = true;
+//             }
+//             // IDLE/RUNNING -> FAILURE: Recovery 실패
+//             // else if ((event.previous_status == "RUNNING" || event.previous_status == "IDLE") &&
+//             //          event.current_status == "FAILURE")
+//             else if (event.current_status == "FAILURE")            
+//             {
+//                 new_status = RobotStatus::RECOVERY_FAILURE;
+//                 status_changed_by_recovery = true;
+//             }
+//         }
+//     }
+
+//     // Recovery 이벤트에 의해 상태가 변경되었다면 즉시 적용 및 발행
+//     if (status_changed_by_recovery && current_status_ != new_status) {
+//         current_status_ = new_status;
+//         auto status_msg = std_msgs::msg::String();
+//         status_msg.data = status_to_string(current_status_);
+//         RCLCPP_INFO(this->get_logger(), "Robot Status Changed (by Recovery BT) -> %s", status_msg.data.c_str());
+//         status_publisher_->publish(status_msg);
+//     }
+
+//     // 현재 실행 중인 모든 BT 노드 목록 업데이트
+//     running_bt_nodes_.clear();
+//     bool recovery_flag_check = false;
+//     for (const auto& event : msg->event_log) {
+//         if (event.current_status == "RUNNING") {
+//             running_bt_nodes_.push_back(event.node_name);
+//             if (recovery_sequence_nodes.count(event.node_name) > 0) {
+//                  recovery_flag_check = true;
+//             }
+//         }
+//     }
+//     // is_in_recovery_context_ 플래그도 동기화 (다른 로직에서 사용될 경우 대비)
+//     is_in_recovery_context_.store(recovery_flag_check);
+    
+//     // Recovery 이벤트가 없었을 경우, 기존의 평가 로직을 호출
+
+//     evaluate_and_publish_if_changed();
+
+// }
 
 void StatusManager::odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
 {
@@ -485,15 +605,6 @@ void StatusManager::query_initial_node_states()
     evaluate_and_publish_if_changed();
 }
 
-bool StatusManager::is_bt_node_running(const std::string& node_name) const
-{
-    for (const auto& name : running_bt_nodes_) {
-        if (name == node_name) {
-            return true;
-        }
-    }
-    return false;
-}
 
 std::string StatusManager::status_to_string(RobotStatus status)
 {

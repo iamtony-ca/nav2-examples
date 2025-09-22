@@ -16,6 +16,7 @@
 #include <map>
 #include <atomic>
 // #include <set> // For storing previous BT node states
+#include <unordered_map>
 
 enum class RobotStatus : uint8_t {
     IDLE,
@@ -59,6 +60,7 @@ private:
     void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg);
     void collision_callback(const std_msgs::msg::Bool::SharedPtr msg);
     void pause_flag_callback(const std_msgs::msg::Bool::SharedPtr msg);
+    void reset_bt_state_cache_locked_();
 
     // --- 유틸리티 및 초기화 함수 ---
     void query_initial_node_states();
@@ -81,14 +83,19 @@ private:
     std::atomic<bool> is_driving_sub_action_executing_{false};
     std::vector<std::string> running_bt_nodes_;
     std::atomic<bool> is_in_recovery_context_{false};
+    bool flag_goal_accept_{false};
+
+
     std::optional<action_msgs::msg::GoalStatus> latest_terminal_status_;
     // 현재 활성 navigate_to_pose 목표의 ID를 추적하기 위한 변수 ***
     std::optional<unique_identifier_msgs::msg::UUID> active_nav_goal_id_;
     std::optional<unique_identifier_msgs::msg::UUID> active_waypoints_goal_id_;
     std::optional<unique_identifier_msgs::msg::UUID> active_nav_through_poses_goal_id_;
 
+    std::unordered_map<std::string, std::string> bt_states_;
     
     // --- ROS 인터페이스 ---
+    rclcpp::CallbackGroup::SharedPtr callback_group_; // 콜백 그룹 포인터
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_publisher_;
     rclcpp::Subscription<GoalStatusArray>::SharedPtr nav_to_pose_status_sub_;
     rclcpp::Subscription<GoalStatusArray>::SharedPtr waypoints_status_sub_;

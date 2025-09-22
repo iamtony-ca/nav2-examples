@@ -51,6 +51,8 @@ private:
     void timer_callback(); // 주기적 발행을 위한 콜백
     void nav_to_pose_status_callback(const GoalStatusArray::SharedPtr msg);
     void waypoints_status_callback(const GoalStatusArray::SharedPtr msg);
+    void nav_through_poses_status_callback(const GoalStatusArray::SharedPtr msg);
+    void compute_path_poses_status_callback(const GoalStatusArray::SharedPtr msg);
     void compute_path_status_callback(const GoalStatusArray::SharedPtr msg);
     void follow_path_status_callback(const GoalStatusArray::SharedPtr msg);
     void bt_log_callback(const BehaviorTreeLog::SharedPtr msg);
@@ -74,6 +76,7 @@ private:
     std::atomic<bool> is_paused_{false};
     std::atomic<bool> is_nav_executing_{false};
     std::atomic<bool> is_waypoints_executing_{false};
+    std::atomic<bool> is_nav_through_poses_executing_{false};
     std::atomic<bool> is_planning_sub_action_executing_{false};
     std::atomic<bool> is_driving_sub_action_executing_{false};
     std::vector<std::string> running_bt_nodes_;
@@ -81,12 +84,16 @@ private:
     std::optional<action_msgs::msg::GoalStatus> latest_terminal_status_;
     // 현재 활성 navigate_to_pose 목표의 ID를 추적하기 위한 변수 ***
     std::optional<unique_identifier_msgs::msg::UUID> active_nav_goal_id_;
+    std::optional<unique_identifier_msgs::msg::UUID> active_waypoints_goal_id_;
+    std::optional<unique_identifier_msgs::msg::UUID> active_nav_through_poses_goal_id_;
 
     
     // --- ROS 인터페이스 ---
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_publisher_;
     rclcpp::Subscription<GoalStatusArray>::SharedPtr nav_to_pose_status_sub_;
     rclcpp::Subscription<GoalStatusArray>::SharedPtr waypoints_status_sub_;
+    rclcpp::Subscription<GoalStatusArray>::SharedPtr nav_through_poses_status_sub_;
+    rclcpp::Subscription<GoalStatusArray>::SharedPtr compute_path_poses_status_sub_;
     rclcpp::Subscription<GoalStatusArray>::SharedPtr compute_path_status_sub_;
     rclcpp::Subscription<GoalStatusArray>::SharedPtr follow_path_status_sub_;
     rclcpp::Subscription<BehaviorTreeLog>::SharedPtr bt_log_sub_;
