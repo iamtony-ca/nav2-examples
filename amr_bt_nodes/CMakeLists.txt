@@ -363,6 +363,23 @@ target_include_directories(reactive_round_robin_control PUBLIC
   $<INSTALL_INTERFACE:include>)
 
 
+# ───── Build check_pause_reset_condition ─────
+add_library(check_pause_reset_condition SHARED
+  src/check_pause_reset_condition.cpp)
+
+ament_target_dependencies(check_pause_reset_condition
+  rclcpp
+  std_msgs
+  behaviortree_cpp
+  pluginlib)
+
+target_include_directories(check_pause_reset_condition PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+
+
+
+
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
 
@@ -393,6 +410,8 @@ install(TARGETS
   set_blackboard_bool_action
   set_blackboard_ushort_action
   reactive_round_robin_control
+  check_pause_reset_condition
+
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
