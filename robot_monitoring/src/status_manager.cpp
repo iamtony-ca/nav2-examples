@@ -447,35 +447,114 @@ void StatusManager::follow_path_status_callback(const GoalStatusArray::SharedPtr
 
 
 
-void StatusManager::bt_log_callback(const BehaviorTreeLog::SharedPtr msg) {
-  std::lock_guard<std::recursive_mutex> lk(status_mutex_);
-  bool recovery_changed = false;
-  RobotStatus new_status = current_status_;
 
-  static const std::unordered_set<std::string> recovery_seq = {
-    "ShortRecoverySequence1","ShortRecoverySequence2","ShortRecoverySequenceTotal1"
-  };
 
-  for (const auto& ev : msg->event_log) {
-    bt_states_[ev.node_name] = ev.current_status; // 누적 업데이트
 
-    if (recovery_seq.count(ev.node_name)) {
-      if (ev.current_status == "RUNNING")      { new_status = RobotStatus::RECOVERY_RUNNING; recovery_changed = true; }
-      else if (ev.current_status == "SUCCESS") { new_status = RobotStatus::RECOVERY_SUCCESS; recovery_changed = true; }
-      else if (ev.current_status == "FAILURE") { new_status = RobotStatus::RECOVERY_FAILURE; recovery_changed = true; }
+
+void StatusManager::bt_log_callback(const BehaviorTreeLog::SharedPtr msg)
+{
+    std::lock_guard<std::recursive_mutex> lock(status_mutex_);
+
+    static const std::unordered_set<std::string> recovery_seq = {
+        "ShortRecoverySequence1", "ShortRecoverySequence2", "ShortRecoverySequenceTotal1", "IntelligentRecovery"
+    };
+
+    // 1. 로그 메시지 내에 어떤 이벤트가 있었는지 먼저 스캔합니다.
+    bool running_found = false;
+    bool success_found = false;
+    bool failure_found = false;
+
+    for (const auto& ev : msg->event_log) {
+        // 모든 BT 노드의 최신 상태를 캐시에 누적 업데이트
+        bt_states_[ev.node_name] = ev.current_status;
+
+        if (recovery_seq.count(ev.node_name)) {
+            if (ev.current_status == "RUNNING") { running_found = true; }
+            else if (ev.current_status == "SUCCESS") { success_found = true; }
+            else if (ev.current_status == "FAILURE") { failure_found = true; }
+        }
     }
-  }
 
-  if (recovery_changed && current_status_ != new_status) {
-    current_status_ = new_status;
-    std_msgs::msg::String out; out.data = status_to_string(current_status_);
-    RCLCPP_INFO(get_logger(), "Robot Status Changed (by Recovery BT) -> %s", out.data.c_str());
-    status_publisher_->publish(out);
-  }
+    // 2. 우선순위에 따라 상태를 변경하고 즉시 발행합니다.
+    auto set_and_publish_recovery_status = [&](RobotStatus status_to_set) {
+        if (current_status_ != status_to_set) {
+            current_status_ = status_to_set;
+            auto status_msg = std_msgs::msg::String();
+            status_msg.data = status_to_string(current_status_);
+            RCLCPP_INFO(get_logger(), "Robot Status Changed (by Recovery BT) -> %s", status_msg.data.c_str());
+            status_publisher_->publish(status_msg);
+        }
+    };
 
-  // 필요 시: evaluate( ) 호출
-  evaluate_and_publish_if_changed();
+    // 2.1. Recovery 시작: 현재 상태가 Recovery 상태가 아닐 때 'RUNNING'이 발견되면 진입.
+    if (running_found &&
+        current_status_ != RobotStatus::RECOVERY_RUNNING &&
+        current_status_ != RobotStatus::RECOVERY_SUCCESS &&
+        current_status_ != RobotStatus::RECOVERY_FAILURE)
+    {
+        set_and_publish_recovery_status(RobotStatus::RECOVERY_RUNNING);
+    }
+
+    // 2.2. Recovery 종료: FAILURE를 SUCCESS보다 높은 우선순위로 처리
+    if (failure_found) {
+        set_and_publish_recovery_status(RobotStatus::RECOVERY_FAILURE);
+    } else if (success_found) {
+        set_and_publish_recovery_status(RobotStatus::RECOVERY_SUCCESS);
+    }
+    
+    // 3. is_in_recovery_context_ 플래그 및 running_bt_nodes_ 목록 업데이트
+    //    (이 로직은 determine_current_status에서 사용될 수 있으므로 유지합니다)
+    running_bt_nodes_.clear();
+    bool recovery_context_flag = false;
+    for(const auto& pair : bt_states_) {
+        if (pair.second == "RUNNING") {
+            running_bt_nodes_.push_back(pair.first);
+            if (recovery_seq.count(pair.first) > 0) {
+                recovery_context_flag = true;
+            }
+        }
+    }
+    is_in_recovery_context_.store(recovery_context_flag);
+    
+    // 4. Recovery 이벤트 처리 후, 메인 상태 결정 로직을 호출하여
+    //    다음 상태(예: DRIVING, IDLE)로 자연스럽게 넘어갈 수 있도록 함
+    evaluate_and_publish_if_changed();
 }
+
+
+
+
+
+
+// void StatusManager::bt_log_callback(const BehaviorTreeLog::SharedPtr msg) {
+//   std::lock_guard<std::recursive_mutex> lk(status_mutex_);
+//   bool recovery_changed = false;
+//   RobotStatus new_status = current_status_;
+
+//   static const std::unordered_set<std::string> recovery_seq = {
+//     "ShortRecoverySequence1","ShortRecoverySequence2","ShortRecoverySequenceTotal1"
+//   };
+
+//   for (const auto& ev : msg->event_log) {
+//     bt_states_[ev.node_name] = ev.current_status; // 누적 업데이트
+
+//     if (recovery_seq.count(ev.node_name)) {
+//       if (ev.current_status == "RUNNING")      { new_status = RobotStatus::RECOVERY_RUNNING; recovery_changed = true; }
+//       else if (ev.current_status == "SUCCESS") { new_status = RobotStatus::RECOVERY_SUCCESS; recovery_changed = true; }
+//       else if (ev.current_status == "FAILURE") { new_status = RobotStatus::RECOVERY_FAILURE; recovery_changed = true; }
+//     }
+//   }
+
+//   if (recovery_changed && current_status_ != new_status) {
+//     current_status_ = new_status;
+//     std_msgs::msg::String out; out.data = status_to_string(current_status_);
+//     RCLCPP_INFO(get_logger(), "Robot Status Changed (by Recovery BT) -> %s", out.data.c_str());
+//     status_publisher_->publish(out);
+//   }
+
+//   // 필요 시: evaluate( ) 호출
+//   evaluate_and_publish_if_changed();
+// }
 
 bool StatusManager::is_bt_node_running(const std::string& node_name) const {
   auto it = bt_states_.find(node_name);
