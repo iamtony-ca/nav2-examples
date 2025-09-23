@@ -449,8 +449,9 @@ void StatusManager::follow_path_status_callback(const GoalStatusArray::SharedPtr
 
 
 
-
-
+//////// bt_log_callback 버그 없는지 테스트 필요.
+/// @brief / behavior_tree_log 구독 콜백
+/// @param msg 
 void StatusManager::bt_log_callback(const BehaviorTreeLog::SharedPtr msg)
 {
     std::lock_guard<std::recursive_mutex> lock(status_mutex_);
