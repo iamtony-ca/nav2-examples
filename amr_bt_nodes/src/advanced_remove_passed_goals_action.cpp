@@ -18,15 +18,18 @@ inline double euclidean_distance(
   return std::hypot(p1.position.x - p2.position.x, p1.position.y - p2.position.y);
 }
 
+// MODIFIED: 생성자 초기화 리스트에서 logger_와 transform_tolerance_를 올바르게 초기화합니다.
 AdvancedRemovePassedGoalsAction::AdvancedRemovePassedGoalsAction(
   const std::string & xml_tag_name,
   const BT::NodeConfiguration & conf)
-: BT::StatefulActionNode(xml_tag_name, conf)
+: BT::StatefulActionNode(xml_tag_name, conf),
+  logger_(rclcpp::get_logger("AdvancedRemovePassedGoalsAction")),
+  transform_tolerance_(rclcpp::Duration::from_seconds(0.0))
 {
   node_ = config().blackboard->get<rclcpp::Node::SharedPtr>("node");
   tf_ = config().blackboard->get<std::shared_ptr<tf2_ros::Buffer>>("tf_buffer");
   clock_ = node_->get_clock();
-  logger_ = node_->get_logger();
+  logger_ = node_->get_logger(); // 올바른 logger로 다시 할당
 
   getInput("search_radius", search_radius_);
   int hysteresis_int;
@@ -59,7 +62,6 @@ BT::NodeStatus AdvancedRemovePassedGoalsAction::onStart()
 {
   RCLCPP_DEBUG(logger_, "AdvancedRemovePassedGoalsAction: onStart");
 
-  // Reset all state variables when the node is started
   last_path_hash_ = 0;
   waypoint_to_path_index_map_.clear();
   last_progress_index_ = 0;
@@ -78,7 +80,6 @@ void AdvancedRemovePassedGoalsAction::onHalted()
 
 BT::NodeStatus AdvancedRemovePassedGoalsAction::onRunning()
 {
-  // 1. Get inputs from blackboard
   std::vector<geometry_msgs::msg::PoseStamped> current_goals;
   nav_msgs::msg::Path path;
 
@@ -87,7 +88,6 @@ BT::NodeStatus AdvancedRemovePassedGoalsAction::onRunning()
     return BT::NodeStatus::FAILURE;
   }
 
-  // 2. Defensive checks
   if (current_goals.empty()) {
     setOutput("output_goals", current_goals);
     return BT::NodeStatus::SUCCESS;
@@ -95,28 +95,23 @@ BT::NodeStatus AdvancedRemovePassedGoalsAction::onRunning()
   if (path.poses.size() < 2) {
     RCLCPP_WARN(logger_, "Path is too short to process. Passing goals through.");
     setOutput("output_goals", current_goals);
-    return BT::NodeStatus::SUCCESS; // Not a failure, just can't process
+    return BT::NodeStatus::SUCCESS;
   }
 
-  // 3. Path Validation: Check if the path has been replanned
   if (isPathUpdated(path)) {
     RCLCPP_INFO(logger_, "New path detected. Re-initializing waypoint-to-path index map.");
     last_progress_index_ = 0;
-    // Use the original full list of goals for mapping
     createWaypointIndexMapping(path, initial_goals_);
   }
 
-  // 4. Get current robot pose
   geometry_msgs::msg::PoseStamped robot_pose;
   if (!updateRobotPose(robot_pose)) {
     return BT::NodeStatus::FAILURE;
   }
   
-  // 5. Find robot's progress along the path using the search window
   size_t current_progress_index = findCurrentProgressIndex(path, robot_pose);
-  last_progress_index_ = current_progress_index; // Update anchor for next tick
+  last_progress_index_ = current_progress_index;
 
-  // 6. Max Path Deviation Check
   double deviation = euclidean_distance(
     robot_pose.pose, path.poses[current_progress_index].pose);
   if (deviation > max_path_deviation_) {
@@ -126,7 +121,6 @@ BT::NodeStatus AdvancedRemovePassedGoalsAction::onRunning()
     return BT::NodeStatus::FAILURE;
   }
 
-  // 7. Main goal removal logic
   size_t initial_goals_passed = initial_goals_.size() - current_goals.size();
   while (!current_goals.empty()) {
       size_t current_goal_original_index = initial_goals_passed;
@@ -138,27 +132,25 @@ BT::NodeStatus AdvancedRemovePassedGoalsAction::onRunning()
       
       size_t target_path_index = waypoint_to_path_index_map_.at(current_goal_original_index);
       
-      // Hysteresis Check
       if (current_progress_index > target_path_index + hysteresis_indices_) {
           RCLCPP_INFO(logger_, "Goal %zu passed. Progress index %zu > target index %zu + hysteresis %u.",
               current_goal_original_index, current_progress_index, target_path_index, hysteresis_indices_);
           current_goals.erase(current_goals.begin());
           initial_goals_passed++;
       } else {
-          // If the first goal isn't passed, none of the subsequent ones can be.
           break;
       }
   }
 
-  // 8. Set output and return success
   setOutput("output_goals", current_goals);
   return BT::NodeStatus::SUCCESS;
 }
 
 bool AdvancedRemovePassedGoalsAction::updateRobotPose(geometry_msgs::msg::PoseStamped & robot_pose)
 {
+  // MODIFIED: nav2_util::getCurrentPose에 transform_tolerance를 double 타입으로 전달
   if (!nav2_util::getCurrentPose(
-      robot_pose, *tf_, global_frame_, robot_base_frame_, transform_tolerance_))
+      robot_pose, *tf_, global_frame_, robot_base_frame_, transform_tolerance_.seconds()))
   {
     RCLCPP_WARN(logger_, "Failed to get robot pose in %s frame.", global_frame_.c_str());
     return false;
@@ -168,9 +160,8 @@ bool AdvancedRemovePassedGoalsAction::updateRobotPose(geometry_msgs::msg::PoseSt
 
 bool AdvancedRemovePassedGoalsAction::isPathUpdated(const nav_msgs::msg::Path & path)
 {
-  // Hash the path to get a unique identifier
   std::string path_str;
-  path_str.reserve(path.poses.size() * 50); // Pre-allocate for efficiency
+  path_str.reserve(path.poses.size() * 50);
   for (const auto & pose : path.poses) {
     path_str += std::to_string(pose.pose.position.x) +
                 std::to_string(pose.pose.position.y) +
@@ -199,8 +190,9 @@ void AdvancedRemovePassedGoalsAction::createWaypointIndexMapping(
     double min_dist_sq = std::numeric_limits<double>::max();
     size_t best_index = 0;
     for (size_t j = 0; j < path.poses.size(); ++j) {
-      double dist_sq = nav2_util::geometry_utils::euclidean_distance_sq(
-        goals[i].pose, path.poses[j].pose);
+      // MODIFIED: euclidean_distance_sq가 없으므로 euclidean_distance를 사용하고 결과를 제곱
+      double dist = euclidean_distance(goals[i].pose, path.poses[j].pose);
+      double dist_sq = dist * dist;
       if (dist_sq < min_dist_sq) {
         min_dist_sq = dist_sq;
         best_index = j;
@@ -215,7 +207,6 @@ size_t AdvancedRemovePassedGoalsAction::findCurrentProgressIndex(
   const nav_msgs::msg::Path & path,
   const geometry_msgs::msg::PoseStamped & robot_pose)
 {
-  // 1. Determine search window boundaries based on physical distance
   size_t lower_bound = last_progress_index_;
   double cumulative_dist = 0.0;
   for (size_t i = last_progress_index_; i > 0; --i) {
@@ -236,13 +227,13 @@ size_t AdvancedRemovePassedGoalsAction::findCurrentProgressIndex(
     upper_bound = i + 1;
   }
 
-  // 2. Find the closest point within the determined window
   double min_dist_sq = std::numeric_limits<double>::max();
   size_t best_index = lower_bound;
 
   for (size_t i = lower_bound; i <= upper_bound; ++i) {
-    double dist_sq = nav2_util::geometry_utils::euclidean_distance_sq(
-      robot_pose.pose, path.poses[i].pose);
+    // MODIFIED: euclidean_distance_sq가 없으므로 euclidean_distance를 사용하고 결과를 제곱
+    double dist = euclidean_distance(robot_pose.pose, path.poses[i].pose);
+    double dist_sq = dist * dist;
     if (dist_sq < min_dist_sq) {
       min_dist_sq = dist_sq;
       best_index = i;
@@ -254,11 +245,13 @@ size_t AdvancedRemovePassedGoalsAction::findCurrentProgressIndex(
 
 }  // namespace amr_bt_nodes
 
-
-// This is the Behavior Tree plugin registration.
-// You must in your CMakeLists.txt link this library to BehaviorTreeFactory
 #include "behaviortree_cpp/bt_factory.h"
-BT_REGISTER_NODES(factory)
+// BT_REGISTER_NODES(factory)
+// {
+//   factory.registerNodeType<amr_bt_nodes::AdvancedRemovePassedGoalsAction>("AdvancedRemovePassedGoalsAction");
+// }
+
+extern "C" void BT_RegisterNodesFromPlugin(BT::BehaviorTreeFactory &factory)
 {
   factory.registerNodeType<amr_bt_nodes::AdvancedRemovePassedGoalsAction>("AdvancedRemovePassedGoalsAction");
 }

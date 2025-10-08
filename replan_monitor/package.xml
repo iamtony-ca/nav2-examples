@@ -2,7 +2,7 @@
 <package format="3">
   <name>replan_monitor</name>
   <version>0.1.0</version>
-  <description>Global path replan monitor & Path Validator node for Nav2</description>
+  <description>Global path replan monitor and Path Validator node for Nav2</description>
 
   <maintainer email="you@example.com">Your Name</maintainer>
   <license>Apache-2.0</license>
@@ -58,5 +58,3 @@
     <build_type>ament_cmake</build_type>
   </export>
 </package> -->
-
-

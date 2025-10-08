@@ -33,11 +33,14 @@ PathValidatorNode::PathValidatorNode()
   this->declare_parameter("flag_pulse_ms", 120);
 
 
-consecutive_threshold_      = 
-db_stride_                  = std::max<int>(1, static_cast<int>(this->get_parameter("db_stride").as_int()));
-cone_angle_deg_             = 
-kernel_half_size_           = 
-flag_pulse_ms_              = 
+
+
+  consecutive_threshold_      = static_cast<size_t>(this->get_parameter("consecutive_threshold").as_int());
+  db_stride_                  = std::max<int>(1, static_cast<int>(this->get_parameter("db_stride").as_int()));
+  cone_angle_deg_             = this->get_parameter("cone_angle_deg").as_double();
+  kernel_half_size_           = std::max<int>(0, static_cast<int>(this->get_parameter("kernel_half_size").as_int()));
+  flag_pulse_ms_              = static_cast<int>(this->get_parameter("flag_pulse_ms").as_int());
+
 
 
 

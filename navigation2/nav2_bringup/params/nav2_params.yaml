@@ -47,10 +47,11 @@ bt_navigator:
     default_server_timeout: 20
     wait_for_service_timeout: 1000
     action_server_result_timeout: 900.0
-    # default_nav_to_pose_bt_xml: "/root/test1_ws/src/navigation2/nav2_bt_navigator/behavior_trees/tests/test2.xml"
-    # default_nav_to_pose_bt_xml: "/root/test1_ws/src/navigation2/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery_goal_updator_decor_recovery.xml"
-    default_nav_to_pose_bt_xml: "/root/test1_ws/src/navigation2/nav2_bt_navigator/behavior_trees/tests/pipelinesequence_check_flag_condition_test.xml"
-    # default_nav_to_pose_bt_xml: "/root/test1_ws/src/navigation2/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery_org.xml"
+    # default_nav_to_pose_bt_xml: "/root/amr_ws/src/navigation2/nav2_bt_navigator/behavior_trees/tests/test2.xml"
+    # default_nav_to_pose_bt_xml: "/root/amr_ws/src/navigation2/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery_goal_updator_decor_recovery.xml"
+    # default_nav_to_pose_bt_xml: "/root/amr_ws/src/navigation2/nav2_bt_navigator/behavior_trees/tests/pipelinesequence_check_flag_condition_test.xml"
+    # default_nav_to_pose_bt_xml: "/root/amr_ws/src/nav2-examples/navigation2/nav2_bringup/behavior_trees/navigate_to_pose_w_replanning_and_recovery_org.xml"
+    default_nav_through_poses_bt_xml: "/root/amr_ws/src/nav2-examples/navigation2/nav2_bringup/behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml"
     navigators: ["navigate_to_pose", "navigate_through_poses"]
     navigate_to_pose:
       plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
@@ -69,7 +70,7 @@ bt_navigator:
       - "check_flag_condition"
       - "smart_recovery_action_node"
       - "set_truncated_goal_from_path"
-      - "is_path_valid_condition"
+      # - "is_path_valid_custom_condition"
       - "prune_passed_path_action"
       - "log_text_action"
       - "path_publisher_action"
@@ -336,7 +337,8 @@ local_costmap:
       width: 7  #3
       height: 7 #3
       resolution: 0.05
-      robot_radius: 0.22
+      footprint: "[[0.325, 0.325], [-0.325, 0.325], [-0.325, -0.325], [0.325, -0.325]]"
+      # robot_radius: 0.22
       plugins: ["voxel_layer", "inflation_layer"]
       # plugins: ["voxel_layer", "custom"]
       # custom:
@@ -354,7 +356,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.3 #0.70
+        inflation_radius: 0.5 #0.70
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: True
@@ -387,7 +389,8 @@ global_costmap:
       publish_frequency: 1.0
       global_frame: map
       robot_base_frame: base_link
-      robot_radius: 0.22
+      footprint: "[[0.325, 0.325], [-0.325, 0.325], [-0.325, -0.325], [0.325, -0.325]]"
+      # robot_radius: 0.22
       resolution: 0.05
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]

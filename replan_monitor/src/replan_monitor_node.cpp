@@ -4,6 +4,12 @@
 
 ReplanMonitorNode::ReplanMonitorNode() : Node("replan_monitor_node") 
 {
+    // ADDED: 파라미터 선언 및 초기화
+    this->declare_parameter<std::string>("source_frame", "base_link");
+    this->declare_parameter<std::string>("target_frame", "map");
+    this->get_parameter("source_frame", source_frame_);
+    this->get_parameter("target_frame", target_frame_);
+
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 

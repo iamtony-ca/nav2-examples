@@ -37,7 +37,7 @@ add_library(replan_monitor_node SHARED
   src/replan_monitor_node.cpp
 )
 ament_target_dependencies(replan_monitor_node
-  rclcpp std_msgs nav_msgs geometry_msgs nav2_costmap_2d
+  rclcpp std_msgs nav_msgs geometry_msgs nav2_costmap_2d tf2_ros
 )
 target_include_directories(replan_monitor_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -52,7 +52,7 @@ target_link_libraries(replan_monitor_main
   replan_monitor_node
 )
 ament_target_dependencies(replan_monitor_main
-  rclcpp std_msgs nav_msgs geometry_msgs nav2_costmap_2d
+  rclcpp std_msgs nav_msgs geometry_msgs nav2_costmap_2d tf2_ros
 )
 
 # ── path_validator_node ────────────────────────────────────────────

@@ -59,6 +59,10 @@ private:
     std::mutex data_mutex_;
     size_t closest_index = 0;
     
+    std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+    std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+    std::string source_frame_; // 로봇의 base_link 프레임
+    std::string target_frame_; // costmap의 global 프레임 (e.g., "map")
     
     double cooldown_sec_ = 1.0;
     size_t blocked_threshold_ = 2;

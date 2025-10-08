@@ -106,7 +106,7 @@ NavigateToPoseNavigator::goalReceived(ActionT::Goal::ConstSharedPtr goal)
   bt_action_server_->getEngine()->addStdCoutLogger(tree);
   
     // 2. 전체 내용을 파일에 로깅 (btlog)
-  // bt_action_server_->getEngine()->addFileLogger2(tree, "/root/test1_ws/src/bt_loggings/nav2_trace.btlog");
+  // bt_action_server_->getEngine()->addFileLogger2(tree, "/root/amr_ws/src/bt_loggings/nav2_trace.btlog");
   
 
   // bt_action_server_->getEngine()->addStdCoutLogger(
