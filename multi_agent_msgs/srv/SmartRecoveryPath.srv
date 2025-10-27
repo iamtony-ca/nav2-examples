@@ -1,0 +1,8 @@
+# ---- Request -------------------------------------------------
+geometry_msgs/PoseStamped goal       # 내비게이션 최종 목표 pose
+
+---
+# ---- Response ------------------------------------------------
+nav_msgs/Path path                   # 생성된 최적 회피 경로
+bool        success                  # 생성 성공 여부
+string      message                  # 설명 / 오류 메시지

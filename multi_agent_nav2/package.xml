@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>multi_agent_nav2</name>
+  <version>0.1.0</version>
+  <description>AgentLayer costmap_2d plugin</description>
+  <maintainer email="you@example.com">you</maintainer>
+  <license>Apache-2.0</license>
+
+  <!-- 빌드툴 -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- 빌드/런타임 의존성 -->
+  <depend>rclcpp</depend>
+  <depend>nav2_costmap_2d</depend>
+  <depend>pluginlib</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>multi_agent_msgs</depend>
+  <depend>rclcpp_lifecycle</depend>
+
+
+  <!-- pluginlib export -->
+  <export>
+    <!-- ament index에 플러그인 XML 등록 -->
+
+    <build_type>ament_cmake</build_type>
+    <!-- <costmap_2d plugin="${prefix}/agent_layer_plugin.xml" />       -->
+
+    <pluginlib plugin="${prefix}/share/multi_agent_nav2/agent_layer_plugin.xml"/>
+    <nav2_costmap_2d plugin="${prefix}/share/multi_agent_nav2/agent_layer_plugin.xml"/>
+    <costmap_2d plugin="${prefix}/share/multi_agent_nav2/agent_layer_plugin.xml"/>    
+  </export>
+</package>
