@@ -3,11 +3,12 @@
 #include <pluginlib/class_list_macros.hpp>
 #include <tf2/utils.h>
 
-
 #include <geometry_msgs/msg/point32.hpp>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <multi_agent_msgs/msg/agent_status.hpp>
 #include <multi_agent_msgs/msg/agent_layer_cell_meta.hpp>
+
+PLUGINLIB_EXPORT_CLASS(multi_agent_nav2::AgentLayer, nav2_costmap_2d::Layer)
+
 
 namespace multi_agent_nav2
 {
@@ -42,14 +43,6 @@ void AgentLayer::onInitialize()
   node_shared_->declare_parameter("max_poses", rclcpp::ParameterValue(40));
   node_shared_->declare_parameter("qos_reliable", rclcpp::ParameterValue(true));
 
-  // Path soft-field params (new)
-  node_shared_->declare_parameter("soft_path_only_when_moving", rclcpp::ParameterValue(true));
-  node_shared_->declare_parameter("path_sigma_lat_m", rclcpp::ParameterValue(0.25));
-  node_shared_->declare_parameter("path_lambda_long_m", rclcpp::ParameterValue(1.5));
-  node_shared_->declare_parameter("path_cost_base", rclcpp::ParameterValue(180));
-  node_shared_->declare_parameter("path_cost_cap",  rclcpp::ParameterValue(230));
-  node_shared_->declare_parameter("path_cone_boost", rclcpp::ParameterValue(0.0));
-
   // Get parameters
   node_shared_->get_parameter("enabled", enabled_);
   node_shared_->get_parameter("topic", topic_);
@@ -83,13 +76,6 @@ void AgentLayer::onInitialize()
   node_shared_->get_parameter("freshness_timeout_ms", freshness_timeout_ms_);
   node_shared_->get_parameter("max_poses", max_poses_);
   node_shared_->get_parameter("qos_reliable", qos_reliable_);
-
-  node_shared_->get_parameter("soft_path_only_when_moving", soft_path_only_when_moving_);
-  node_shared_->get_parameter("path_sigma_lat_m", path_sigma_lat_m_);
-  node_shared_->get_parameter("path_lambda_long_m", path_lambda_long_m_);
-  node_shared_->get_parameter("path_cost_base", path_cost_base_);
-  node_shared_->get_parameter("path_cost_cap",  path_cost_cap_);
-  node_shared_->get_parameter("path_cone_boost", path_cone_boost_);
 
   current_ = true;
   matchSize();
@@ -153,19 +139,14 @@ unsigned char AgentLayer::computeCost(const multi_agent_msgs::msg::MultiAgentInf
   return base;
 }
 
-bool inline AgentLayer::isMovingPhase(uint8_t phase)
-{
-  using S = multi_agent_msgs::msg::AgentStatus;
-  return (phase == S::STATUS_MOVING) || (phase == S::STATUS_PATH_SEARCHING);
-}
-
 double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo & a) const
 {
   double r = dilation_m_;
   // 위치 불확실도 반영
   if (a.pos_std_m >= 0.0) r += sigma_k_ * a.pos_std_m;
-  // 진행방향 스미어: 이동중일 때만
-  if (forward_smear_m_ > 0.0 && isMovingPhase(a.status.phase)) {
+  // 진행방향 스미어(단순 가산)
+  if (forward_smear_m_ > 0.0 &&
+      a.status.phase == multi_agent_msgs::msg::AgentStatus::STATUS_MOVING) {
     r += forward_smear_m_;
   }
   return r;
@@ -202,21 +183,14 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
       continue;
     }
 
-    // 현재 pose와 truncated path 둘 다 bounds 반영
-    const auto consider_point = [&](double x, double y){
-      if (x < touch_min_x_) touch_min_x_ = x;
-      if (y < touch_min_y_) touch_min_y_ = y;
-      if (x > touch_max_x_) touch_max_x_ = x;
-      if (y > touch_max_y_) touch_max_y_ = y;
-      touched_ = true;
-    };
-
-    consider_point(a.current_pose.pose.position.x, a.current_pose.pose.position.y);
-
     const int limit = std::min<int>(a.truncated_path.poses.size(), max_poses_);
     for (int i = 0; i < limit; ++i) {
       const auto & p = a.truncated_path.poses[i].pose.position;
-      consider_point(p.x, p.y);
+      if (p.x < touch_min_x_) touch_min_x_ = p.x;
+      if (p.y < touch_min_y_) touch_min_y_ = p.y;
+      if (p.x > touch_max_x_) touch_max_x_ = p.x;
+      if (p.y > touch_max_y_) touch_max_y_ = p.y;
+      touched_ = true;
     }
   }
 
@@ -259,7 +233,7 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
       multi_agent_msgs::msg::AgentLayerCellMeta cm;
       cm.header = arr.header;
 
-      // (간략 메타; 필요시 agent id 등 확장 가능)
+      // 간단 채움(원하면 rasterize에서 셀별 주체 agent 식별 추가 가능)
       cm.machine_id = 0;
       cm.phase = 0;
       cm.mode = "";
@@ -309,76 +283,16 @@ void AgentLayer::rasterizeAgentPath(
   nav2_costmap_2d::Costmap2D * grid,
   std::vector<std::pair<unsigned int,unsigned int>> & meta_hits)
 {
-  // 1) 현재 footprint는 항상 표기 (정지/이동 공통)
-  const unsigned char cost_now = computeCost(a);
-  const double extra_now = computeDilation(a);
-  fillFootprintAt(a.footprint, a.current_pose.pose, extra_now, grid, cost_now, &meta_hits);
-
-  // 2) 경로 소프트필드는 "이동 중"일 때만 적용(옵션)
-  if (soft_path_only_when_moving_ && !isMovingPhase(a.status.phase)) {
-    // 정지 로봇은 footprint만. 콘/경로 소프트필드 생성 안 함.
-    return;
-  }
-
   if (a.truncated_path.poses.empty()) return;
 
-  // === 경로 소프트 코스트 쓰기 ===
+  const unsigned char cost = computeCost(a);
+  const double extra = computeDilation(a);
+  const auto & fp = a.footprint;
   const int limit = std::min<int>(a.truncated_path.poses.size(), max_poses_);
+
   for (int i = 0; i < limit; ++i) {
     const auto & ps = a.truncated_path.poses[i].pose;
-
-    const double cx = ps.position.x;
-    const double cy = ps.position.y;
-    const double yaw = tf2::getYaw(ps.orientation);
-    const double c = std::cos(yaw), s = std::sin(yaw);
-
-    // 영향 반경(3시그마) → 좁은 띠
-    const double r = 3.0 * path_sigma_lat_m_;
-
-    // bbox(world)
-    const double minx = cx - r, maxx = cx + r;
-    const double miny = cy - r, maxy = cy + r;
-
-    int min_i, min_j, max_i, max_j;
-    grid->worldToMapEnforceBounds(minx, miny, min_i, min_j);
-    grid->worldToMapEnforceBounds(maxx, maxy, max_i, max_j);
-
-    for (int j = min_j; j <= max_j; ++j) {
-      for (int ii = min_i; ii <= max_i; ++ii) {
-        double wx, wy; grid->mapToWorld(ii, j, wx, wy);
-
-        // 경로 좌표계로 회전하여 횡/종 분해
-        const double dx = wx - cx;
-        const double dy = wy - cy;
-        const double x_local =  c * dx + s * dy; // 진행방향
-        const double y_local = -s * dx + c * dy; // 횡방향
-
-        // 횡방향 가우시안, 종방향 지수감쇠
-        const double g_lat  = std::exp(-(y_local * y_local) / (2.0 * path_sigma_lat_m_ * path_sigma_lat_m_));
-        const double g_long = std::exp(-std::max(0.0, std::abs(x_local)) / std::max(1e-6, path_lambda_long_m_));
-
-        // 앞쪽 콘 부스팅(기본 0 → 비활성)
-        double cone = 1.0;
-        if (path_cone_boost_ > 1e-6 && x_local > 0.0) {
-          cone += path_cone_boost_ * std::exp(-x_local / std::max(1e-6, path_lambda_long_m_));
-        }
-
-        int raw = static_cast<int>(std::round(path_cost_base_ * g_lat * g_long * cone));
-        raw = std::clamp(raw, 0, path_cost_cap_);
-        if (raw <= 0) continue;
-
-        const unsigned char cand = static_cast<unsigned char>(raw);
-
-        // Max-merge with NO_INFORMATION(255) 보정
-        const unsigned char old_raw = grid->getCost(ii, j);
-        const int old = (old_raw == nav2_costmap_2d::NO_INFORMATION) ? 0 : static_cast<int>(old_raw);
-        if (static_cast<int>(cand) > old) {
-          grid->setCost(static_cast<unsigned int>(ii),
-                        static_cast<unsigned int>(j), cand);
-          meta_hits.emplace_back(static_cast<unsigned int>(ii), static_cast<unsigned int>(j));
-        }
-      }
-    }
+    fillFootprintAt(fp, ps, extra, grid, cost, &meta_hits);
   }
 }
 
@@ -432,15 +346,8 @@ void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
       }
 
       if (inside) {
-        // 치사 또는 강한 footprint 코스트: TrueOverwrite(footprint 우선) 느낌으로 덮되
-        // Max-merge로도 충분히 강함
-        const unsigned char old_raw = grid->getCost(i, j);
-        const int old = (old_raw == nav2_costmap_2d::NO_INFORMATION) ? 0 : static_cast<int>(old_raw);
-        const int cand = static_cast<int>(cost);
-        if (cand > old) {
-          grid->setCost(static_cast<unsigned int>(i),
-                        static_cast<unsigned int>(j), cost);
-        }
+        grid->setCost(static_cast<unsigned int>(i),
+                      static_cast<unsigned int>(j), cost);
         if (meta_hits) meta_hits->emplace_back(
             static_cast<unsigned int>(i), static_cast<unsigned int>(j));
       }
@@ -478,4 +385,5 @@ bool AgentLayer::pointInPolygon(const std::vector<geometry_msgs::msg::Point> & p
 } // namespace multi_agent_nav2
 
 // pluginlib export (cpp 마지막에 단 한 번)
-PLUGINLIB_EXPORT_CLASS(multi_agent_nav2::AgentLayer, nav2_costmap_2d::Layer)
+// PLUGINLIB_EXPORT_CLASS(multi_agent_nav2::AgentLayer, nav2_costmap_2d::Layer)
+
