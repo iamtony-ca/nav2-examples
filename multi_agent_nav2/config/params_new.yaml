@@ -1,0 +1,267 @@
+좋지요! 아래는 TurtleBot3 시뮬( `tb3_simulation_launch.py` ) 기준으로 바로 넣어 쓸 수 있는 **`nav2_params.yaml` 샘플**입니다.
+핵심은 `global_costmap`(필수) + `local_costmap`(선택) 둘 다에 `agent_layer`를 플러그인으로 등록하고, 레이어별 파라미터 블록을 분리해 두는 것입니다.
+
+---
+
+# 샘플 `nav2_params.yaml`
+
+```yaml
+# =====================================================================
+# Nav2 core params (생략 가능: 기존 파일에 그대로 두고 costmap 부분만 병합해도 됨)
+# =====================================================================
+amcl:
+  ros__parameters:
+    use_sim_time: true
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: true
+
+controller_server:
+  ros__parameters:
+    use_sim_time: true
+
+planner_server:
+  ros__parameters:
+    use_sim_time: true
+
+smoother_server:
+  ros__parameters:
+    use_sim_time: true
+
+# =====================================================================
+# GLOBAL COSTMAP
+# =====================================================================
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: true
+      footprint: "[[0.22, 0.22], [0.22, -0.22], [-0.22, -0.22], [-0.22, 0.22]]"
+      global_frame: map
+      robot_base_frame: base_link
+      rolling_window: false
+      track_unknown_space: true
+      resolution: 0.05
+      width: 50.0
+      height: 50.0
+
+      # 순서 중요: static -> obstacle -> agent -> inflation
+      plugins: ["static_layer", "obstacle_layer", "agent_layer", "inflation_layer"]
+
+      static_layer:
+        plugin: nav2_costmap_2d::StaticLayer
+        map_subscribe_transient_local: true
+
+      obstacle_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        observation_sources: scan
+        scan:
+          topic: /scan
+          clearing: true
+          marking: true
+          data_type: LaserScan
+          expected_update_rate: 0.0
+          obstacle_range: 2.5
+          raytrace_range: 3.0
+
+      # ================================
+      # AgentLayer (여기가 우리의 플러그인)
+      # ================================
+      agent_layer:
+        plugin: multi_agent_nav2::AgentLayer
+
+        # 기본 동작 스위치
+        enabled: true
+        qos_reliable: true
+
+        # 입력 토픽 및 좌표계 체크
+        topic: /multi_agent_infos
+        use_path_header_frame: true     # path.header.frame_id가 global_frame과 같을 때만 반영
+        roi_range_m: 12.0               # 우리 로봇 기준 반경 ROI (성능/노이즈 필터링용)
+
+        # 자기 식별(내 로봇은 무시)
+        self_machine_id: 0              # 내 robot의 machine_id
+        self_type_id: ""                # 내 robot의 type_id (문자열)
+
+        # 신선도/수신 실패 대비
+        freshness_timeout_ms: 800       # 최근 수신 기준 밀리초
+        max_poses: 40                   # 각 agent truncated_path에서 사용할 최대 포즈 수
+
+        # 비용/도형 관련
+        lethal_cost: 254                # 정지/치명적 상황의 코스트
+        waiting_cost: 200               # 대기/작업 등의 기본 코스트
+        moving_cost: 180                # 이동중 코스트
+        manual_cost_bias: 30            # mode=="manual" 시 가산치(클램프됨)
+
+        # 팽창(등방성)과 전방 스미어(이동중에만 +x방향)
+        dilation_m: 0.05                # 항상 적용되는 등방성 여유(모든 방향)
+        sigma_k: 2.0                    # pos_std_m * sigma_k 만큼 추가 여유
+        forward_smear_m: 0.25           # 이동중일 때만 전방(+x)으로 늘리는 길이
+
+        # 메타 퍼블리시(디버그/시각화용)
+        publish_meta: true
+        meta_stride: 3
+
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.55   # TB3 환경에 맞게 필요 시 조정
+
+# =====================================================================
+# LOCAL COSTMAP  (선택) - 로컬에서도 agent를 보고 싶다면 켜기
+# =====================================================================
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: true
+      global_frame: odom
+      robot_base_frame: base_link
+      rolling_window: true
+      width: 6.0
+      height: 6.0
+      resolution: 0.05
+
+      # 순서 중요: obstacle -> agent -> inflation
+      plugins: ["obstacle_layer", "agent_layer", "inflation_layer"]
+
+      obstacle_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        observation_sources: scan
+        scan:
+          topic: /scan
+          clearing: true
+          marking: true
+          data_type: LaserScan
+          expected_update_rate: 0.0
+          obstacle_range: 2.5
+          raytrace_range: 3.0
+
+      # Local도 동일 파라미터를 가질 수 있지만 상황에 맞게 더 보수/보급적으로 변경 가능
+      agent_layer:
+        plugin: multi_agent_nav2::AgentLayer
+        enabled: true
+        qos_reliable: true
+        topic: /multi_agent_infos
+        use_path_header_frame: true
+        roi_range_m: 8.0
+        self_machine_id: 0
+        self_type_id: ""
+        freshness_timeout_ms: 800
+        max_poses: 25
+        lethal_cost: 254
+        waiting_cost: 200
+        moving_cost: 190
+        manual_cost_bias: 30
+        dilation_m: 0.07
+        sigma_k: 2.0
+        forward_smear_m: 0.20
+        publish_meta: false     # 로컬은 OFF로도 충분
+        meta_stride: 3
+
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.50
+```
+
+---
+
+# 파라미터 상세 & 튜닝 가이드
+
+### 공통/입출력
+
+* **`enabled`** (bool): 레이어 활성/비활성 스위치.
+* **`plugin`** (string): pluginlib 등록 타입. 반드시 `multi_agent_nav2::AgentLayer`.
+* **`topic`** (string): 다른 로봇 상태를 담은 `MultiAgentInfoArray` 토픽 이름.
+* **`qos_reliable`** (bool): `true`면 Reliable QoS(유실 적고 지연↑), `false`면 BestEffort(유실 가능, 지연↓).
+
+### 좌표/프레임 & ROI
+
+* **`use_path_header_frame`** (bool): `true`면 `truncated_path.header.frame_id`가 `global_frame`과 같을 때만 반영합니다. 프레임 불일치에 의한 오표시 방지.
+* **`roi_range_m`** (double): 우리 로봇 기준의 반경 ROI. 멀리 떨어진 agent는 무시하여 성능/잡음 개선.
+
+  * 혼잡 환경: 8~12 m
+  * 넓은 맵/적은 로봇: 15~25 m
+
+### 자기 식별(자기 로봇은 무시)
+
+* **`self_machine_id`** (uint16), **`self_type_id`** (string): `MultiAgentInfo`의 `(machine_id,type_id)`가 여기와 같으면 **무시**합니다. (중복 반영 방지)
+
+### 데이터 신선도 & 경로 길이
+
+* **`freshness_timeout_ms`** (int): 이 시간 이상 지난 메시지는 **무시**. 통신 끊김시 고정 장애물처럼 남는 문제를 예방.
+* **`max_poses`** (int): 각 agent의 `truncated_path.poses` 중 최대 몇 개를 사용할지. 값이 크면 계산량↑.
+
+  * 전역맵: 25~60
+  * 로컬맵: 15~30
+
+### 비용(코스트) 정책
+
+* **`lethal_cost`** (0~254): 치명적/절대 회피해야 하는 상황에 부여할 비용. 기본 254.
+* **`waiting_cost`** (0~254): 정지/작업 상태 등에서의 기본 비용. 보통 200 근처.
+* **`moving_cost`** (0~254): 이동 중인 로봇의 비용. 보통 170~200 사이(너무 높으면 전역경로가 돌아가다 막힘).
+* **`manual_cost_bias`** (int): `mode=="manual"`일 때 가산치. 결과는 0~254로 클램프.
+
+  * 수동 주행 로봇을 더 피하고 싶다면 30~60.
+
+> 정책 추천
+>
+> * **정지 로봇**: footprint만 **lethal**(254)로 두는 것이 명확합니다.
+> * **이동 로봇**: footprint는 `moving_cost`(180±)로 **높게** 주되, 필요 시 인플레이션 레이어가 “사이즈 여유”를 제공하도록 합니다.
+> * 전역 플래너가 관통한다면: `moving_cost`/`waiting_cost`를 올리거나, 인플레이션 반경을 키워 주세요.
+
+### 형태(도형) 파라미터
+
+* **`dilation_m`** (double): **등방성(모든 방향) 기본 여유**. footprint 외곽을 균일하게 키웁니다.
+
+  * 측정 잡음/동적 오차가 있다면 0.03~0.10 m 권장.
+* **`sigma_k`** (double): `pos_std_m`(메시지 내 위치 표준편차) × `sigma_k` 만큼 **추가 여유**. 추정치가 불안정한 로봇일수록 자연스럽게 더 크게 잡힙니다.
+* **`forward_smear_m`** (double): **이동 중일 때만** 로컬 프레임의 +x(전방)으로 footprint를 **길게** 늘립니다.
+
+  * 추천: 0.1~0.4 m. 너무 크면 통로를 막아 Planner가 경로를 찾지 못할 수 있습니다.
+  * **정지 상태**에선 0으로 자동 적용(코드상).
+
+> 동작 요약
+>
+> * **정지 로봇**: 등방성 + `lethal_cost`; **전방 스미어 없음** → 콘 모양 확장 방지.
+> * **이동 로봇**: 등방성 + **전방(+x) 스미어** + `moving_cost`.
+
+### 메타(디버그)
+
+* **`publish_meta`** (bool): 셀 타격 메타 정보를 퍼블리시.
+* **`meta_stride`** (int): 퍼블리시 샘플링 간격(계산/대역 감소용).
+
+---
+
+## 튜닝 순서 제안
+
+1. **보이기부터**
+
+   * `agent_layer.enabled=true`로 켭니다.
+   * `waiting_cost=254`, `moving_cost=180`, `dilation_m=0.05`, `forward_smear_m=0.2`로 시작.
+   * RViz에서 `Global Costmap`의 Layer 체크박스 ON.
+
+2. **Planner가 관통하면**
+
+   * `moving_cost`/`waiting_cost` ↑ (예: 200/254),
+   * 또는 `inflation_layer.inflation_radius` ↑(0.45→0.60m),
+   * 또는 `forward_smear_m` ↑(0.2→0.3m) — 단, 과도하면 막힘.
+
+3. **경로가 너무 우회/막힘**
+
+   * `forward_smear_m` ↓, `moving_cost` ↓, 인플레이션 반경 ↓.
+   * `roi_range_m`를 줄여 불필요한 원거리 agent 영향 제거.
+
+4. **측위 잡음/깜빡임**
+
+   * `sigma_k` ↑ 또는 `dilation_m` ↑.
+   * `freshness_timeout_ms` 재검토(값이 너무 짧아 깜빡일 수 있음).
+
+5. **성능 이슈**
+
+   * `max_poses` ↓, `roi_range_m` ↓, `publish_meta=false`.
+
+---
+
+필요하면 이 YAML을 현재 쓰시는 파일에 **global/local costmap 블록만 병합**해서 써도 됩니다.
+혹시 TB3가 아닌 실제 로봇이라 Lidar FoV나 footprint가 다르면, `footprint`, `inflation_radius`, `obstacle_range`를 먼저 맞춰 주세요.
