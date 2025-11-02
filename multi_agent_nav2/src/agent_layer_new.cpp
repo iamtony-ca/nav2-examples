@@ -299,10 +299,16 @@ void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
       }
 
       if (inside) {
-        const unsigned char old = grid->getCost(i, j);
-        if (cost > old) {
+        // const unsigned char old = grid->getCost(i, j);
+        // if (cost > old) {
+        // 치사 또는 강한 footprint 코스트: TrueOverwrite(footprint 우선) 느낌으로 덮되
+        // Max-merge로도 충분히 강함
+        const unsigned char old_raw = grid->getCost(i, j);
+        const int old = (old_raw == nav2_costmap_2d::NO_INFORMATION) ? 0 : static_cast<int>(old_raw);
+        const int cand = static_cast<int>(cost);
+        if (cand > old) {        
           grid->setCost(static_cast<unsigned int>(i),
-                        static_cast<unsigned int>(j), cost);
+                        static_cast<unsigned int>(j), cand);
         }
         if (meta_hits) meta_hits->emplace_back(
             static_cast<unsigned int>(i), static_cast<unsigned int>(j));
