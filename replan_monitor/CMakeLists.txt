@@ -18,6 +18,7 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
+find_package(multi_robot_msgs REQUIRED)
 # find_package(nav2_common REQUIRED)
 # (nav2_common, launch, launch_ros는 여기선 필요X)
 
@@ -70,6 +71,7 @@ ament_target_dependencies(path_validator_node
   tf2_geometry_msgs
   nav2_msgs
   nav2_costmap_2d
+  multi_robot_msgs
 )
 
 # ── Install ────────────────────────────────────────────────────────
