@@ -167,44 +167,67 @@ class FleetDecisionNode(Node):
         self.declare_parameter("topic_request_reroute", "/request_reroute")
         self.declare_parameter("topic_debug", "/decision_debug")
 
+
+        # __init__ 내 파라미터
+        self.declare_parameter("release_idle_sec", 1.5)
+        self.declare_parameter("T_yield_enter", 2.5)
+        self.declare_parameter("T_yield_exit", 3.5)
+        self.declare_parameter("Y_enter", 0.8)
+        self.declare_parameter("Y_exit", 0.5)
+        self.declare_parameter("clean_tick_sec", 0.2)
+        self.declare_parameter("K_clean", 5)
+
+
+
+
         # ---- get params ----
+        self.release_idle_sec = self.get_parameter("release_idle_sec").value
+        self.T_yield_enter = self.get_parameter("T_yield_enter").value
+        self.T_yield_exit  = self.get_parameter("T_yield_exit").value
+        self.Y_enter = self.get_parameter("Y_enter").value
+        self.Y_exit  = self.get_parameter("Y_exit").value
+        self.clean_tick_sec = self.get_parameter("clean_tick_sec").value
+        self.K_clean = int(self.get_parameter("K_clean").value)
+
+
+
         self.global_frame = self.get_parameter("global_frame").get_parameter_value().string_value
         self.my_id = self.get_parameter("my_machine_id").get_parameter_value().integer_value
 
-        self.w1_ttc = self.get_parameter("w1_ttc").get_parameter_value().duoble_value
-        self.w2_alt = self.get_parameter("w2_alt").get_parameter_value().duoble_value
-        self.T_min = self.get_parameter("T_min").get_parameter_value().duoble_value
-        self.d_min = self.get_parameter("d_min").get_parameter_value().duoble_value
+        self.w1_ttc = self.get_parameter("w1_ttc").get_parameter_value().double_value
+        self.w2_alt = self.get_parameter("w2_alt").get_parameter_value().double_value
+        self.T_min = self.get_parameter("T_min").get_parameter_value().double_value
+        self.d_min = self.get_parameter("d_min").get_parameter_value().double_value
 
-        self.a1 = self.get_parameter("a1_invT").get_parameter_value().duoble_value
-        self.a2 = self.get_parameter("a2_invd").get_parameter_value().duoble_value
-        self.a3 = self.get_parameter("a3_heading").get_parameter_value().duoble_value
-        self.a4 = self.get_parameter("a4_vclosing").get_parameter_value().duoble_value
+        self.a1 = self.get_parameter("a1_invT").get_parameter_value().double_value
+        self.a2 = self.get_parameter("a2_invd").get_parameter_value().double_value
+        self.a3 = self.get_parameter("a3_heading").get_parameter_value().double_value
+        self.a4 = self.get_parameter("a4_vclosing").get_parameter_value().double_value
 
-        self.b1 = self.get_parameter("b1_mode").get_parameter_value().duoble_value
-        self.b2 = self.get_parameter("b2_rowgap").get_parameter_value().duoble_value
-        self.b3 = self.get_parameter("b3_reroute").get_parameter_value().duoble_value
-        self.b4 = self.get_parameter("b4_pathsearch").get_parameter_value().duoble_value
-        self.b5 = self.get_parameter("b5_occupancy").get_parameter_value().duoble_value
-        self.b6 = self.get_parameter("b6_id").get_parameter_value().duoble_value
-        self.kappa = self.get_parameter("kappa").get_parameter_value().duoble_value
+        self.b1 = self.get_parameter("b1_mode").get_parameter_value().double_value
+        self.b2 = self.get_parameter("b2_rowgap").get_parameter_value().double_value
+        self.b3 = self.get_parameter("b3_reroute").get_parameter_value().double_value
+        self.b4 = self.get_parameter("b4_pathsearch").get_parameter_value().double_value
+        self.b5 = self.get_parameter("b5_occupancy").get_parameter_value().double_value
+        self.b6 = self.get_parameter("b6_id").get_parameter_value().double_value
+        self.kappa = self.get_parameter("kappa").get_parameter_value().double_value
 
-        self.same_lane_deg = self.get_parameter("same_lane_deg").get_parameter_value().duoble_value
-        self.cross_lane_deg = self.get_parameter("cross_lane_deg").get_parameter_value().duoble_value
+        self.same_lane_deg = self.get_parameter("same_lane_deg").get_parameter_value().double_value
+        self.cross_lane_deg = self.get_parameter("cross_lane_deg").get_parameter_value().double_value
 
-        self.T_slow = self.get_parameter("T_slow").get_parameter_value().duoble_value
-        self.T_yield = self.get_parameter("T_yield").get_parameter_value().duoble_value
-        self.Y_th = self.get_parameter("yield_priority_thresh").get_parameter_value().duoble_value
+        self.T_slow = self.get_parameter("T_slow").get_parameter_value().double_value
+        self.T_yield = self.get_parameter("T_yield").get_parameter_value().double_value
+        self.Y_th = self.get_parameter("yield_priority_thresh").get_parameter_value().double_value
 
-        self.hold_sec = self.get_parameter("hold_sec").get_parameter_value().duoble_value
-        self.behavior_min = self.get_parameter("behavior_min").get_parameter_value().duoble_value
-        self.release_hys = self.get_parameter("release_hys").get_parameter_value().duoble_value
-        self.deadlock_window = self.get_parameter("deadlock_window").get_parameter_value().duoble_value
+        self.hold_sec = self.get_parameter("hold_sec").get_parameter_value().double_value
+        self.behavior_min = self.get_parameter("behavior_min").get_parameter_value().double_value
+        self.release_hys = self.get_parameter("release_hys").get_parameter_value().double_value
+        self.deadlock_window = self.get_parameter("deadlock_window").get_parameter_value().double_value
 
-        self.v_nom = self.get_parameter("v_nom").get_parameter_value().duoble_value
-        self.v_slow = self.get_parameter("v_slow").get_parameter_value().duoble_value
-        self.v_yield = self.get_parameter("v_yield").get_parameter_value().duoble_value
-        self.w_slow = self.get_parameter("w_slow").get_parameter_value().duoble_value
+        self.v_nom = self.get_parameter("v_nom").get_parameter_value().double_value
+        self.v_slow = self.get_parameter("v_slow").get_parameter_value().double_value
+        self.v_yield = self.get_parameter("v_yield").get_parameter_value().double_value
+        self.w_slow = self.get_parameter("w_slow").get_parameter_value().double_value
 
         self.topic_collision = self.get_parameter("topic_collision").get_parameter_value().string_value
         self.topic_agents = self.get_parameter("topic_agents").get_parameter_value().string_value
@@ -214,6 +237,11 @@ class FleetDecisionNode(Node):
         self.topic_request_replan = self.get_parameter("topic_request_replan").get_parameter_value().string_value
         self.topic_request_reroute = self.get_parameter("topic_request_reroute").get_parameter_value().string_value
         self.topic_debug = self.get_parameter("topic_debug").get_parameter_value().string_value
+
+
+        # 상태 부가 변수
+        self.last_collision_stamp = None
+        self.clean_count = 0
 
         # ---- state machine ----
         self.state = "RUN"
@@ -266,29 +294,63 @@ class FleetDecisionNode(Node):
                 # 이미 YIELD/REPLAN/REROUTE/STOP 중이면 무시하거나 로그만
                 self.get_logger().info(f"replan_flag received but state={self.state}; ignored")
 
-    def on_collision(self, msg: PathAgentCollisionInfo):
+
+    def on_collision(self, msg):
         now = self.get_clock().now()
-        # Agent-hold 갱신: hold_sec 동안은 외부 replan_flag 무시
+        self.last_collision_stamp = now
         self.agent_hold_until = now + Duration(seconds=self.hold_sec)
 
         cands = self.build_candidates(msg)
         if not cands:
-            # 충돌 후보가 없으면 완화 시도
             self.release_if_safe("no candidates from collision msg")
             return
 
-        # 우선 대상(최대 score) 선택
         primary = max(cands, key=lambda c: c.score)
-        decision = self.decide_with_primary(primary)
 
-        # 상태 및 속도/요청 반영
+        # --- hysteresis 판단 변경 ---
+        # 진입/이탈 임계 분리
+        if self.state in ("YIELD", "SLOWDOWN"):
+            # 이탈 조건
+            if primary.T_eff > self.T_yield_exit and primary.yprio < self.Y_exit:
+                decision = "RUN"
+            else:
+                # 기존 로직 유지
+                decision = self.decide_with_primary(primary)
+        else:
+            # 진입 조건
+            if primary.T_eff < self.T_yield_enter or primary.yprio >= self.Y_enter:
+                decision = "YIELD"
+            elif primary.T_eff < self.T_slow:
+                decision = "SLOWDOWN"
+            else:
+                decision = "RUN"
+
         self.apply_decision(decision, reason=f"primary(mid={primary.machine_id}) score={primary.score:.2f}")
 
-        # 디버그 출력
-        dbg = f"Primary(mid={primary.machine_id},type={primary.type_id}) " \
-              f"T_eff={primary.T_eff:.2f} sev={primary.severity:.2f} yprio={primary.yprio:.2f} " \
-              f"score={primary.score:.2f} note={primary.note}"
-        self.pub_debug.publish(String(data=dbg))
+
+    # def on_collision(self, msg: PathAgentCollisionInfo):
+    #     now = self.get_clock().now()
+    #     # Agent-hold 갱신: hold_sec 동안은 외부 replan_flag 무시
+    #     self.agent_hold_until = now + Duration(seconds=self.hold_sec)
+
+    #     cands = self.build_candidates(msg)
+    #     if not cands:
+    #         # 충돌 후보가 없으면 완화 시도
+    #         self.release_if_safe("no candidates from collision msg")
+    #         return
+
+    #     # 우선 대상(최대 score) 선택
+    #     primary = max(cands, key=lambda c: c.score)
+    #     decision = self.decide_with_primary(primary)
+
+    #     # 상태 및 속도/요청 반영
+    #     self.apply_decision(decision, reason=f"primary(mid={primary.machine_id}) score={primary.score:.2f}")
+
+    #     # 디버그 출력
+    #     dbg = f"Primary(mid={primary.machine_id},type={primary.type_id}) " \
+    #           f"T_eff={primary.T_eff:.2f} sev={primary.severity:.2f} yprio={primary.yprio:.2f} " \
+    #           f"score={primary.score:.2f} note={primary.note}"
+    #     self.pub_debug.publish(String(data=dbg))
 
     # --------- Core building blocks ---------
 
@@ -529,16 +591,43 @@ class FleetDecisionNode(Node):
             self.get_logger().info(f"Release to RUN: {why}")
         self.publish_speed_cap(self.state)
 
-    # 주기적 점검: 상태 유지, 히스테리시스, deadlock escalate
+    # # 주기적 점검: 상태 유지, 히스테리시스, deadlock escalate
+    # def on_timer(self):
+    #     self.publish_speed_cap(self.state)
+
+    #     # deadlock escalate to REROUTE (두 번째 윈도우도 초과)
+    #     if self.state == "REPLAN" and self.deadlock_start is not None:
+    #         now = self.get_clock().now()
+    #         dsec = (now - self.deadlock_start).nanoseconds / 1e9
+    #         if dsec >= self.deadlock_window:
+    #             self.request_reroute("deadlock persists after replan")
     def on_timer(self):
         self.publish_speed_cap(self.state)
 
-        # deadlock escalate to REROUTE (두 번째 윈도우도 초과)
+        # Idle-time release + K-consecutive clean
+        if self.state in ("YIELD", "SLOWDOWN"):
+            now = self.get_clock().now()
+            no_collision = (self.last_collision_stamp is None) or \
+                        ((now - self.last_collision_stamp).nanoseconds * 1e-9 > self.release_idle_sec)
+
+            if no_collision:
+                self.clean_count += 1
+            else:
+                self.clean_count = 0
+
+            if no_collision and self.clean_count * self.clean_tick_sec >= self.release_idle_sec:
+                self.release_if_safe("idle no collision")
+                self.clean_count = 0
+
+        # deadlock escalate (기존 로직 유지)
         if self.state == "REPLAN" and self.deadlock_start is not None:
             now = self.get_clock().now()
             dsec = (now - self.deadlock_start).nanoseconds / 1e9
             if dsec >= self.deadlock_window:
                 self.request_reroute("deadlock persists after replan")
+
+
+
 
 
 def main():
