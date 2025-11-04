@@ -1,0 +1,36 @@
+global_costmap:
+  global_costmap:
+    plugins: ["static_layer", "obstacle_layer", "agent_layer"]
+    agent_layer:
+      plugin: multi_agent_nav2::AgentLayer
+      enabled: true
+      topic: /multi_agent_infos
+      roi_range_m: 12.0
+      freshness_timeout_ms: 800
+      max_poses: 40
+      qos_reliable: true
+
+      # footprint 강도
+      fp_cost_wait_like: 254
+      fp_cost_arrived_like: 254
+      fp_cost_error_like: 254
+      fp_cost_moving_like: 254
+      fp_cost_default: 240
+
+      # 경로 소프트 필드
+      path_cost_base: 170
+      path_cost_cap: 253
+      path_soft_cmax: 110
+      lambda_m: 2.0
+      sigma_lat_m: 0.45
+
+      # 상태별 dilation + 불확실도 가산
+      dilate_wait_m: 0.2
+      dilate_arrived_m: 0.35
+      dilate_error_m: 0.5
+      dilate_moving_curr_m: 0.1
+      pos_sigma_k: 2.0
+
+      # 진행방향 콘
+      heading_cone_deg: 40.0
+      cone_boost: 40

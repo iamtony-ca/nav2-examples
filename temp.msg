@@ -14,7 +14,6 @@ geometry_msgs/Twist       current_twist   # 없으면 (0,0,0)로 발행 권장
 geometry_msgs/msg/PolygonStamped footprint
 
 # 상위 상태(phase 등): 기존 RobotStatus를 그대로 사용
-# (주의) 아래 mode/reroute/re_path_search/transferring와 중복될 수 있음.
 multi_robot_msgs/RobotStatus status
 
 bool   reroute                # 기존 goal cancel 후 새 waypoints 할당~첫 waypoint 도달 전까지 true
@@ -26,8 +25,6 @@ uint8  next_waypoint
 # 0~5 m 전방 경로 프리뷰(선택)
 geometry_msgs/PoseStamped[] truncated_path  # frame_id: header.frame_id
 
-# 근미래 예측 궤적(있으면 RobotLayer가 우선 사용)
-multi_robot_msgs/TimedTrajectory trajectory  # frame_id: header.frame_id
 
 # --- 상호 관계/교차 인지 ---
 uint16[] cross_agent_ids      # 교차 가능성이 높은 다른 AGV/AMR의 machine_id 목록
