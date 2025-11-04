@@ -168,52 +168,52 @@ class FleetDecisionNode(Node):
         self.declare_parameter("topic_debug", "/decision_debug")
 
         # ---- get params ----
-        self.global_frame = self.get_parameter("global_frame").as_string()
-        self.my_id = self.get_parameter("my_machine_id").as_int()
+        self.global_frame = self.get_parameter("global_frame").get_parameter_value().string_value
+        self.my_id = self.get_parameter("my_machine_id").get_parameter_value().integer_value
 
-        self.w1_ttc = self.get_parameter("w1_ttc").as_double()
-        self.w2_alt = self.get_parameter("w2_alt").as_double()
-        self.T_min = self.get_parameter("T_min").as_double()
-        self.d_min = self.get_parameter("d_min").as_double()
+        self.w1_ttc = self.get_parameter("w1_ttc").get_parameter_value().duoble_value
+        self.w2_alt = self.get_parameter("w2_alt").get_parameter_value().duoble_value
+        self.T_min = self.get_parameter("T_min").get_parameter_value().duoble_value
+        self.d_min = self.get_parameter("d_min").get_parameter_value().duoble_value
 
-        self.a1 = self.get_parameter("a1_invT").as_double()
-        self.a2 = self.get_parameter("a2_invd").as_double()
-        self.a3 = self.get_parameter("a3_heading").as_double()
-        self.a4 = self.get_parameter("a4_vclosing").as_double()
+        self.a1 = self.get_parameter("a1_invT").get_parameter_value().duoble_value
+        self.a2 = self.get_parameter("a2_invd").get_parameter_value().duoble_value
+        self.a3 = self.get_parameter("a3_heading").get_parameter_value().duoble_value
+        self.a4 = self.get_parameter("a4_vclosing").get_parameter_value().duoble_value
 
-        self.b1 = self.get_parameter("b1_mode").as_double()
-        self.b2 = self.get_parameter("b2_rowgap").as_double()
-        self.b3 = self.get_parameter("b3_reroute").as_double()
-        self.b4 = self.get_parameter("b4_pathsearch").as_double()
-        self.b5 = self.get_parameter("b5_occupancy").as_double()
-        self.b6 = self.get_parameter("b6_id").as_double()
-        self.kappa = self.get_parameter("kappa").as_double()
+        self.b1 = self.get_parameter("b1_mode").get_parameter_value().duoble_value
+        self.b2 = self.get_parameter("b2_rowgap").get_parameter_value().duoble_value
+        self.b3 = self.get_parameter("b3_reroute").get_parameter_value().duoble_value
+        self.b4 = self.get_parameter("b4_pathsearch").get_parameter_value().duoble_value
+        self.b5 = self.get_parameter("b5_occupancy").get_parameter_value().duoble_value
+        self.b6 = self.get_parameter("b6_id").get_parameter_value().duoble_value
+        self.kappa = self.get_parameter("kappa").get_parameter_value().duoble_value
 
-        self.same_lane_deg = self.get_parameter("same_lane_deg").as_double()
-        self.cross_lane_deg = self.get_parameter("cross_lane_deg").as_double()
+        self.same_lane_deg = self.get_parameter("same_lane_deg").get_parameter_value().duoble_value
+        self.cross_lane_deg = self.get_parameter("cross_lane_deg").get_parameter_value().duoble_value
 
-        self.T_slow = self.get_parameter("T_slow").as_double()
-        self.T_yield = self.get_parameter("T_yield").as_double()
-        self.Y_th = self.get_parameter("yield_priority_thresh").as_double()
+        self.T_slow = self.get_parameter("T_slow").get_parameter_value().duoble_value
+        self.T_yield = self.get_parameter("T_yield").get_parameter_value().duoble_value
+        self.Y_th = self.get_parameter("yield_priority_thresh").get_parameter_value().duoble_value
 
-        self.hold_sec = self.get_parameter("hold_sec").as_double()
-        self.behavior_min = self.get_parameter("behavior_min").as_double()
-        self.release_hys = self.get_parameter("release_hys").as_double()
-        self.deadlock_window = self.get_parameter("deadlock_window").as_double()
+        self.hold_sec = self.get_parameter("hold_sec").get_parameter_value().duoble_value
+        self.behavior_min = self.get_parameter("behavior_min").get_parameter_value().duoble_value
+        self.release_hys = self.get_parameter("release_hys").get_parameter_value().duoble_value
+        self.deadlock_window = self.get_parameter("deadlock_window").get_parameter_value().duoble_value
 
-        self.v_nom = self.get_parameter("v_nom").as_double()
-        self.v_slow = self.get_parameter("v_slow").as_double()
-        self.v_yield = self.get_parameter("v_yield").as_double()
-        self.w_slow = self.get_parameter("w_slow").as_double()
+        self.v_nom = self.get_parameter("v_nom").get_parameter_value().duoble_value
+        self.v_slow = self.get_parameter("v_slow").get_parameter_value().duoble_value
+        self.v_yield = self.get_parameter("v_yield").get_parameter_value().duoble_value
+        self.w_slow = self.get_parameter("w_slow").get_parameter_value().duoble_value
 
-        self.topic_collision = self.get_parameter("topic_collision").as_string()
-        self.topic_agents = self.get_parameter("topic_agents").as_string()
-        self.topic_replan_flag = self.get_parameter("topic_replan_flag").as_string()
-        self.topic_decision_state = self.get_parameter("topic_decision_state").as_string()
-        self.topic_decision_speed = self.get_parameter("topic_decision_speed").as_string()
-        self.topic_request_replan = self.get_parameter("topic_request_replan").as_string()
-        self.topic_request_reroute = self.get_parameter("topic_request_reroute").as_string()
-        self.topic_debug = self.get_parameter("topic_debug").as_string()
+        self.topic_collision = self.get_parameter("topic_collision").get_parameter_value().string_value
+        self.topic_agents = self.get_parameter("topic_agents").get_parameter_value().string_value
+        self.topic_replan_flag = self.get_parameter("topic_replan_flag").get_parameter_value().string_value
+        self.topic_decision_state = self.get_parameter("topic_decision_state").get_parameter_value().string_value
+        self.topic_decision_speed = self.get_parameter("topic_decision_speed").get_parameter_value().string_value
+        self.topic_request_replan = self.get_parameter("topic_request_replan").get_parameter_value().string_value
+        self.topic_request_reroute = self.get_parameter("topic_request_reroute").get_parameter_value().string_value
+        self.topic_debug = self.get_parameter("topic_debug").get_parameter_value().string_value
 
         # ---- state machine ----
         self.state = "RUN"
