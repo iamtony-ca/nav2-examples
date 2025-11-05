@@ -9,23 +9,22 @@ class CostExplorerNode(Node):
     """
     Costmap 데이터를 구독하여 특정 world 좌표나 영역의 cost 값을 로깅하는 노드.
     /global_costmap/costmap_raw (nav2_msgs/msg/Costmap) 토픽을 사용합니다.
+    [수정됨] width/height 대신 size_x/size_y 사용
     """
 
     def __init__(self):
         super().__init__('cost_explorer_node')
         self.costmap = None
 
-        # Costmap과 같은 'latching' 토픽을 위한 QoS 설정
         qos_profile = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL
         )
 
-        # nav2_msgs/msg/Costmap 타입을 구독
         self.subscription = self.create_subscription(
             Costmap,
-            '/global_costmap/costmap_raw',  # 원본 costmap (0-255)
+            '/global_costmap/costmap_raw',
             self.costmap_callback,
             qos_profile
         )
@@ -34,7 +33,9 @@ class CostExplorerNode(Node):
     def costmap_callback(self, msg):
         """Costmap 메시지를 수신하면 노드의 멤버 변수에 저장합니다."""
         if self.costmap is None:
-            self.get_logger().info(f"Costmap 수신 완료! (크기: {msg.metadata.width}x{msg.metadata.height})")
+            # [수정] msg.metadata.width -> msg.metadata.size_x
+            # [수정] msg.metadata.height -> msg.metadata.size_y
+            self.get_logger().info(f"Costmap 수신 완료! (크기: {msg.metadata.size_x}x{msg.metadata.size_y})")
         self.costmap = msg
 
     def world_to_grid(self, wx, wy):
@@ -47,28 +48,29 @@ class CostExplorerNode(Node):
         origin_y = info.origin.position.y
         resolution = info.resolution
 
-        # World -> Grid 변환
         gx = int((wx - origin_x) / resolution)
         gy = int((wy - origin_y) / resolution)
 
-        # 맵 범위 확인
-        if 0 <= gx < info.width and 0 <= gy < info.height:
+        # [수정] info.width -> info.size_x
+        # [수정] info.height -> info.size_y
+        if 0 <= gx < info.size_x and 0 <= gy < info.size_y:
             return (gx, gy)
         else:
-            return None  # 맵 범위 밖
+            return None
 
     def get_grid_cost(self, gx, gy):
         """Grid 좌표의 cost 값을 1D 데이터 배열에서 가져옵니다."""
         if not self.costmap:
-            return -1  # costmap이 없음
+            return -1
 
         info = self.costmap.metadata
-        index = gy * info.width + gx
+        # [수정] info.width -> info.size_x
+        index = gy * info.size_x + gx
 
         if 0 <= index < len(self.costmap.data):
             return self.costmap.data[index]
         else:
-            return -1  # 유효하지 않은 인덱스
+            return -1
 
     def log_cost_at_point(self, world_x, world_y):
         """[요청 1] 단일 world 좌표의 cost 값을 로깅합니다."""
@@ -89,7 +91,6 @@ class CostExplorerNode(Node):
     def log_costs_in_region(self, world_x1, world_y1, world_x2, world_y2):
         """
         [요청 2] 두 world 좌표로 정의된 사각 영역의 모든 cost 값을 로깅합니다.
-        (x1, y1)과 (x2, y2)는 영역의 두 대각선 모서리입니다.
         """
         if not self.costmap:
             self.get_logger().warn("Costmap이 아직 수신되지 않았습니다.")
@@ -100,7 +101,6 @@ class CostExplorerNode(Node):
             f"to ({world_x2:.2f}, {world_y2:.2f})] ---"
         )
 
-        # 1. 두 World 좌표를 Grid 좌표로 변환
         grid_p1 = self.world_to_grid(world_x1, world_y1)
         grid_p2 = self.world_to_grid(world_x2, world_y2)
 
@@ -111,7 +111,6 @@ class CostExplorerNode(Node):
         gx1, gy1 = grid_p1
         gx2, gy2 = grid_p2
 
-        # 2. 반복을 위한 그리드 범위 설정 (순서에 상관없이 min/max 사용)
         start_x = min(gx1, gx2)
         end_x = max(gx1, gx2)
         start_y = min(gy1, gy2)
@@ -119,14 +118,12 @@ class CostExplorerNode(Node):
 
         self.get_logger().info(f"  -> Grid (col=[{start_x}...{end_x}], row=[{start_y}...{end_y}])")
 
-        # 3. 영역 순회 (Row-major order, 즉 Y(row)부터 순회)
         for y in range(start_y, end_y + 1):
             row_costs = []
             for x in range(start_x, end_x + 1):
                 cost = self.get_grid_cost(x, y)
                 row_costs.append(str(cost))
             
-            # Row(행) 단위로 cost 값들을 로그에 출력
             self.get_logger().info(f"  Row {y:03d}: [{' '.join(row_costs)}]")
 
 
@@ -134,9 +131,6 @@ def main(args=None):
     rclpy.init(args=args)
     node = CostExplorerNode()
 
-    # Costmap을 수신할 때까지 잠시 대기 (spin)
-    # 실제 환경에서는 노드가 계속 실행(spin)되어야 하지만,
-    # 여기서는 테스트를 위해 costmap을 받을 때까지만 spin합니다.
     timeout_sec = 10.0
     start_time = node.get_clock().now()
     while rclpy.ok() and node.costmap is None:
@@ -147,7 +141,6 @@ def main(args=None):
             rclpy.shutdown()
             return
 
-    # Costmap 수신 성공
     if node.costmap:
         # --- 테스트할 좌표를 여기에 입력 ---
 
@@ -161,8 +154,6 @@ def main(args=None):
         # 3. 맵 밖의 영역 테스트
         node.log_costs_in_region(1000.0, 1000.0, 1001.0, 1001.0)
 
-
-    # 노드 정리
     node.destroy_node()
     rclpy.shutdown()
 
