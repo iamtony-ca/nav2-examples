@@ -10,20 +10,26 @@ from nav_msgs.msg import Path
 
 from multi_agent_msgs.msg import MultiAgentInfoArray, MultiAgentInfo, AgentStatus
 
-FRAME = "map"
+FRAME_MAP = "map"         # 월드 좌표
+FOOTPRINT_FRAME = "base_link"  # 로봇 로컬 좌표
 PUB_TOPIC = "/multi_agent_infos"
 HZ = 10.0
 MAX_POSES = 20
 
 def rect_footprint(w: float, l: float) -> PolygonStamped:
+    """
+    로봇 로컬 프레임(FOOTPRINT_FRAME) 기준 직사각형 footprint (w:폭, l:길이)
+    점 순서는 REP-103 기준 CCW (x:전방, y:좌측)
+    """
     fp = PolygonStamped()
-    fp.header.frame_id = FRAME
+    fp.header.frame_id = FOOTPRINT_FRAME
     hw, hl = w * 0.5, l * 0.5
+    # CCW: (앞-좌) -> (뒤-좌) -> (뒤-우) -> (앞-우)
     fp.polygon.points = [
-        Point32(x= hl, y= hw, z=0.0),
-        Point32(x= hl, y=-hw, z=0.0),
-        Point32(x=-hl, y=-hw, z=0.0),
-        Point32(x=-hl, y= hw, z=0.0),
+        Point32(x= hl, y= hw, z=0.0),   # front-left
+        Point32(x=-hl, y= hw, z=0.0),   # rear-left
+        Point32(x=-hl, y=-hw, z=0.0),   # rear-right
+        Point32(x= hl, y=-hw, z=0.0),   # front-right
     ]
     return fp
 
@@ -44,18 +50,15 @@ def pose_xyth(x: float, y: float, th: float) -> Pose:
 
 def make_path_with_stamps(start_stamp, poses: List[Pose], dt: float) -> Path:
     path = Path()
-    path.header.frame_id = FRAME
-    # 각 포즈에 증가하는 stamp를 넣어줌(시각 의미 부여, 일부 레이어에서 유용)
-    tsec = start_stamp.sec
-    tnsec = start_stamp.nanosec
-    cur = tsec + tnsec * 1e-9
+    path.header.frame_id = FRAME_MAP
+    path.header.stamp = start_stamp
+    base = start_stamp.sec + start_stamp.nanosec * 1e-9
     for i, po in enumerate(poses):
-        ps = PoseStamped()
-        ps.header.frame_id = FRAME
-        # 간단한 부동소수 누적 → sec/nsec 재분해
-        ts = cur + i * dt
+        ts = base + i * dt
         sec = int(ts)
         nsec = int((ts - sec) * 1e9)
+        ps = PoseStamped()
+        ps.header.frame_id = FRAME_MAP
         ps.header.stamp.sec = sec
         ps.header.stamp.nanosec = nsec
         ps.pose = po
@@ -71,7 +74,7 @@ class MultiAgentMockLineCirclePub(Node):
         self.dt = 1.0 / HZ
         self.timer = self.create_timer(self.dt, self.on_timer)
 
-        # 공통 footprint
+        # 공통 footprint (로컬 프레임)
         self.fp = rect_footprint(0.50, 0.70)
 
         # IDs
@@ -84,7 +87,6 @@ class MultiAgentMockLineCirclePub(Node):
         self.A_pt = (-2.0, 0.0)
         self.B_pt = (0.0, 0.0)
         self.v = 0.25  # m/s
-
         ax, ay = self.A_pt
         bx, by = self.B_pt
         dx, dy = (bx - ax), (by - ay)
@@ -127,24 +129,21 @@ class MultiAgentMockLineCirclePub(Node):
     # ----- C: 반원 왕복 -----
     def _pose_on_semicircle(self, t: float) -> Pose:
         """
-        반지름 R_c, 각도 [theta0, theta0+π] 구간을 선속도 v_c로 왕복.
+        [theta0, theta0+π] 구간을 v_c로 왕복.
         정방향: theta0 → theta0+π, 역방향: theta0+π → theta0
         """
         s = max(0.0, self.v_c * t)
         s_prime, direction = self._wrap_bounce(s, self.arc_len)  # [0, πR]
         dtheta = s_prime / self.R_c  # [0, π]
 
-        # *** 중요: 방향에 따라 theta 증가/감소 ***
-        if direction >= 0:
-            theta = self.theta0 + dtheta           # 정방향
-        else:
-            theta = self.theta0 + math.pi - dtheta # 역방향
+        # 방향에 따라 theta 증가/감소
+        theta = (self.theta0 + dtheta) if direction >= 0 else (self.theta0 + math.pi - dtheta)
 
         # 위치
         x = self.cx + self.R_c * math.cos(theta)
         y = self.cy + self.R_c * math.sin(theta)
 
-        # 접선 헤딩: 증가 방향은 +π/2, 감소 방향은 -π/2
+        # 접선 헤딩
         yaw = yaw_wrap(theta + direction * (math.pi / 2.0))
         return pose_xyth(x, y, yaw)
 
@@ -157,14 +156,14 @@ class MultiAgentMockLineCirclePub(Node):
         aA.type_id = self.type_id
         aA.mode = "auto"
         aA.pos_std_m = 0.03
-        aA.footprint = self.fp
+        aA.footprint = self.fp   # 로컬 프레임(base_link)
         aA.status = AgentStatus()
         aA.status.phase = AgentStatus.STATUS_WAITING
 
         A_pose = pose_xyth(1.0, 0.0, 0.0)
         aA.current_pose = PoseStamped()
         aA.current_pose.header.stamp = now
-        aA.current_pose.header.frame_id = FRAME
+        aA.current_pose.header.frame_id = FRAME_MAP
         aA.current_pose.pose = A_pose
         aA.truncated_path = make_path_with_stamps(now, [A_pose] * MAX_POSES, self.dt)
 
@@ -174,7 +173,7 @@ class MultiAgentMockLineCirclePub(Node):
         aB.type_id = self.type_id
         aB.mode = "auto"
         aB.pos_std_m = 0.05
-        aB.footprint = self.fp
+        aB.footprint = self.fp   # 로컬 프레임(base_link)
         aB.status = AgentStatus()
         aB.status.phase = AgentStatus.STATUS_MOVING
 
@@ -183,7 +182,7 @@ class MultiAgentMockLineCirclePub(Node):
 
         aB.current_pose = PoseStamped()
         aB.current_pose.header.stamp = now
-        aB.current_pose.header.frame_id = FRAME
+        aB.current_pose.header.frame_id = FRAME_MAP
         aB.current_pose.pose = path_poses_b[0]
 
         # --- Agent C: 반원 왕복 ---
@@ -192,7 +191,7 @@ class MultiAgentMockLineCirclePub(Node):
         aC.type_id = self.type_id
         aC.mode = "auto"
         aC.pos_std_m = 0.05
-        aC.footprint = self.fp
+        aC.footprint = self.fp   # 로컬 프레임(base_link)
         aC.status = AgentStatus()
         aC.status.phase = AgentStatus.STATUS_MOVING
 
@@ -201,13 +200,13 @@ class MultiAgentMockLineCirclePub(Node):
 
         aC.current_pose = PoseStamped()
         aC.current_pose.header.stamp = now
-        aC.current_pose.header.frame_id = FRAME
+        aC.current_pose.header.frame_id = FRAME_MAP
         aC.current_pose.pose = path_poses_c[0]
 
         # --- Array ---
         arr = MultiAgentInfoArray()
         arr.header.stamp = now
-        arr.header.frame_id = FRAME
+        arr.header.frame_id = FRAME_MAP
         arr.agents = [aA, aB, aC]
 
         self.pub.publish(arr)
