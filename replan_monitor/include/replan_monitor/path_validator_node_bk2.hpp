@@ -31,6 +31,8 @@
 #include "multi_agent_msgs/msg/multi_agent_info_array.hpp"
 #include "multi_agent_msgs/msg/multi_agent_info.hpp"
 #include "multi_agent_msgs/msg/agent_status.hpp"
+
+// ★ 네 패키지명으로 교체
 #include "multi_agent_msgs/msg/path_agent_collision_info.hpp"
 
 #include "tf2_ros/buffer.h"
@@ -110,16 +112,7 @@ private:
     std::string note;
   };
 
-  // wx, wy를 커버하는 agent의 footprint 또는 truncated_path 튜브를 찾아 리턴
   std::vector<AgentHit> whoCoversPoint(double wx, double wy) const;
-
-  // 내부: 경로 튜브(footprint를 얇게 확장)에서 포함 여부 검사
-  static bool pathTubeCoversPoint(const multi_agent_msgs::msg::MultiAgentInfo & a,
-                                  double wx, double wy,
-                                  double stride_m, double dilate_m,
-                                  int max_poses, double frame_yaw,
-                                  const std::string & global_frame);
-
   static double headingTo(const geometry_msgs::msg::Pose & pose, double wx, double wy);
   static double speedAlong(const geometry_msgs::msg::Twist & tw, double heading_rad);
 
@@ -159,7 +152,7 @@ private:
 
   std::atomic<bool> is_robot_in_driving_state_{false};
   rclcpp::Time last_replan_time_;        // replan 쿨다운 기준
-  rclcpp::Time last_agent_block_time_;   // 에이전트 홀드 기준
+  rclcpp::Time last_agent_block_time_;   // ★ 에이전트 홀드 기준
 
   std::unordered_map<uint64_t, ObstacleInfo> obstacle_db_;
   mutable std::mutex obstacle_db_mutex_;
@@ -218,15 +211,9 @@ private:
   bool use_radius_{true};
   double robot_radius_m_{0.1};
 
-  // 에이전트 홀드 파라미터
+  // ★ NEW: 에이전트 홀드 파라미터
   double agent_block_hold_sec_{2.0};
   double agent_block_max_wait_sec_{8.0};
-
-  // === NEW: 에이전트 경로 튜브 매칭 파라미터 ===
-  bool   agent_path_hit_enable_{true};
-  double agent_path_hit_stride_m_{0.35};
-  double agent_path_hit_dilate_m_{0.02};
-  int    agent_path_hit_max_poses_{200};
 };
 
 }  // namespace replan_monitor

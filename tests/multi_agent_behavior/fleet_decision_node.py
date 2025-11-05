@@ -14,7 +14,7 @@ from std_msgs.msg import Bool, String
 from geometry_msgs.msg import Pose, PoseStamped, Twist
 from nav_msgs.msg import Path
 
-from replan_monitor_msgs.msg import PathAgentCollisionInfo
+from multi_agent_msgs.msg import PathAgentCollisionInfo
 from multi_agent_msgs.msg import MultiAgentInfoArray, MultiAgentInfo, AgentStatus
 
 
@@ -113,7 +113,7 @@ class FleetDecisionNode(Node):
         # ---- Parameters (defaults reflect prior design) ----
         # Frames & my identity
         self.declare_parameter("global_frame", "map")
-        self.declare_parameter("my_machine_id", 1)
+        self.declare_parameter("my_machine_id", 10)
 
         # TTC combine
         self.declare_parameter("w1_ttc", 1.0)    # weight direct TTC

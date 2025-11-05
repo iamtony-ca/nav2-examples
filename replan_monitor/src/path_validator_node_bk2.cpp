@@ -1,4 +1,5 @@
 #include "replan_monitor/path_validator_node.hpp"
+
 using std::placeholders::_1;
 
 namespace replan_monitor
@@ -52,15 +53,9 @@ PathValidatorNode::PathValidatorNode()
   this->declare_parameter<std::string>("footprint", "[]");
   this->declare_parameter("robot_radius", 0.1);
 
-  // 에이전트 홀드
+  // ★ NEW: 에이전트 홀드 파라미터
   this->declare_parameter("agent_block_hold_sec", 2.0);
   this->declare_parameter("agent_block_max_wait_sec", 8.0);
-
-  // === NEW: 에이전트 경로 튜브 매칭 ===
-  this->declare_parameter("agent_path_hit_enable", true);
-  this->declare_parameter("agent_path_hit_stride_m", 0.35);
-  this->declare_parameter("agent_path_hit_dilate_m", 0.02);
-  this->declare_parameter("agent_path_hit_max_poses", 500);
 
   // ---- load parameters ----
   global_frame_               = this->get_parameter("global_frame").as_string();
@@ -119,20 +114,15 @@ PathValidatorNode::PathValidatorNode()
     RCLCPP_INFO(get_logger(), "No valid footprint provided. Using robot_radius=%.3f", robot_radius_m_);
   }
 
-  // 홀드
+  // ★ NEW: 홀드 파라미터
   agent_block_hold_sec_     = this->get_parameter("agent_block_hold_sec").as_double();
   agent_block_max_wait_sec_ = this->get_parameter("agent_block_max_wait_sec").as_double();
-
-  // 경로 튜브 매칭
-  agent_path_hit_enable_      = this->get_parameter("agent_path_hit_enable").as_bool();
-  agent_path_hit_stride_m_    = this->get_parameter("agent_path_hit_stride_m").as_double();
-  agent_path_hit_dilate_m_    = this->get_parameter("agent_path_hit_dilate_m").as_double();
-  agent_path_hit_max_poses_   = this->get_parameter("agent_path_hit_max_poses").as_int();
 
   // ===== TF =====
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
+  // ★ clock type 맞춰 초기화
   last_replan_time_       = rclcpp::Time(0,0,this->get_clock()->get_clock_type());
   last_agent_block_time_  = rclcpp::Time(0,0,this->get_clock()->get_clock_type());
 
@@ -195,9 +185,13 @@ PathValidatorNode::PathValidatorNode()
       timer_callback_group_);
 
   RCLCPP_INFO(this->get_logger(),
-    "PathValidatorNode ready. agent_path_hit_enable=%s stride=%.2f dilate=%.2f maxposes=%d",
-    (agent_path_hit_enable_ ? "true":"false"),
-    agent_path_hit_stride_m_, agent_path_hit_dilate_m_, agent_path_hit_max_poses_);
+    "PathValidatorNode ready. footprint=%s (radius=%.3f), use_footprint_check=%s, compare_agent_mask=%s, pub_agent_collision=%s, agents_topic=%s, hold=%.2fs max_wait=%.2fs",
+    (use_radius_ ? "radius" : "polygon"), robot_radius_m_,
+    (use_footprint_check_ ? "true":"false"),
+    (compare_agent_mask_ ? "true":"false"),
+    (publish_agent_collision_ ? "true":"false"),
+    agents_topic_.c_str(),
+    agent_block_hold_sec_, agent_block_max_wait_sec_);
 }
 
 // ===================== Costmap handling =====================
@@ -225,7 +219,8 @@ void PathValidatorNode::costmapCallback(const nav2_msgs::msg::Costmap::SharedPtr
 
   const size_t expected = static_cast<size_t>(sig.size_x) * static_cast<size_t>(sig.size_y);
   if (msg->data.size() != expected) {
-    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+    RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
         "Costmap data size mismatch: got %zu, expected %zu",
         msg->data.size(), expected);
     return;
@@ -253,7 +248,8 @@ void PathValidatorNode::agentMaskCallback(const nav2_msgs::msg::Costmap::SharedP
 
   const size_t expected = static_cast<size_t>(sig.size_x) * static_cast<size_t>(sig.size_y);
   if (msg->data.size() != expected) {
-    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+    RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
         "Agent mask data size mismatch: got %zu, expected %zu",
         msg->data.size(), expected);
     return;
@@ -292,7 +288,8 @@ bool PathValidatorNode::getCurrentPoseFromTF(geometry_msgs::msg::Pose & pose_out
     pose_out = base_in_global.pose;
     return true;
   } catch (const tf2::TransformException & ex) {
-    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+    RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 1000,
         "Could not get robot pose %s->%s: %s",
         global_frame_.c_str(), base_frame_.c_str(), ex.what());
     return false;
@@ -303,7 +300,9 @@ bool PathValidatorNode::transformToGlobal(const geometry_msgs::msg::PoseStamped 
                                           geometry_msgs::msg::PoseStamped & out) const
 {
   if (in.header.frame_id.empty() || in.header.frame_id == global_frame_) {
-    out = in; out.header.frame_id = global_frame_; return true;
+    out = in;
+    out.header.frame_id = global_frame_;
+    return true;
   }
   try {
     auto tf = tf_buffer_->lookupTransform(global_frame_, in.header.frame_id, in.header.stamp,
@@ -311,7 +310,8 @@ bool PathValidatorNode::transformToGlobal(const geometry_msgs::msg::PoseStamped 
     tf2::doTransform(in, out, tf);
     return true;
   } catch (const tf2::TransformException & ex) {
-    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+    RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
         "transformToGlobal failed %s->%s: %s",
         in.header.frame_id.c_str(), global_frame_.c_str(), ex.what());
     return false;
@@ -321,14 +321,17 @@ bool PathValidatorNode::transformToGlobal(const geometry_msgs::msg::PoseStamped 
 void PathValidatorNode::transformPathToGlobal(const nav_msgs::msg::Path & in,
                                               std::vector<geometry_msgs::msg::PoseStamped> & out) const
 {
-  out.clear(); out.reserve(in.poses.size());
+  out.clear();
+  out.reserve(in.poses.size());
   for (const auto & ps : in.poses) {
     geometry_msgs::msg::PoseStamped g;
-    if (transformToGlobal(ps, g)) out.emplace_back(std::move(g));
+    if (transformToGlobal(ps, g)) {
+      out.emplace_back(std::move(g));
+    }
   }
 }
 
-// ===================== Obstacle DB update =====================
+// ===================== Obstacle DB update (Detection) =====================
 
 void PathValidatorNode::updateObstacleDatabase()
 {
@@ -478,15 +481,18 @@ void PathValidatorNode::validatePathCallback(const nav_msgs::msg::Path::SharedPt
   if (!is_robot_in_driving_state_.load()) return;
   if (!msg || msg->poses.empty()) return;
 
+  std::shared_ptr<nav2_costmap_2d::Costmap2D> costmap;
   {
     std::lock_guard<std::mutex> lock(costmap_mutex_);
     if (!costmap_) return;
+    costmap = costmap_;
   }
 
   std::vector<geometry_msgs::msg::PoseStamped> gpath;
   transformPathToGlobal(*msg, gpath);
   if (gpath.empty()) return;
 
+  // ★ NEW: 에이전트 홀드 타임이 유효하면 판단 스킵
   const rclcpp::Time now = this->now();
   const double since_agent = (now - last_agent_block_time_).seconds();
   if (since_agent >= 0.0 && since_agent < agent_block_hold_sec_) {
@@ -494,6 +500,11 @@ void PathValidatorNode::validatePathCallback(const nav_msgs::msg::Path::SharedPt
                  since_agent, agent_block_hold_sec_);
     return;
   }
+  // 너무 오래 버티면(막혀있음): 홀드 무시하고 정상 로직 진행
+  // if (since_agent > agent_block_max_wait_sec_) { // 옵션: 로그만
+  //   RCLCPP_INFO(get_logger(), "[hold] exceeded max wait (%.2fs > %.2fs), replan allowed",
+  //               since_agent, agent_block_max_wait_sec_);
+  // }
 
   if (use_footprint_check_) {
     validateWithFootprint(gpath);
@@ -516,6 +527,7 @@ void PathValidatorNode::validateWithPoints(const std::vector<geometry_msgs::msg:
   size_t streak = 0;
   rclcpp::Time now = this->now();
 
+  // DB 스냅샷
   std::unordered_map<uint64_t, ObstacleInfo> db_snapshot;
   {
     std::lock_guard<std::mutex> lock(obstacle_db_mutex_);
@@ -534,47 +546,15 @@ void PathValidatorNode::validateWithPoints(const std::vector<geometry_msgs::msg:
     unsigned int mx, my;
     {
       std::lock_guard<std::mutex> lock(costmap_mutex_);
+      if (!costmap_) return;
       if (!costmap_->worldToMap(gpath[i].pose.position.x, gpath[i].pose.position.y, mx, my)) {
-        streak = 0; continue;
+        streak = 0;
+        continue;
       }
     }
 
-    const bool blocked_cell = isBlockedCellKernel(mx, my);
+    bool blocked_cell = isBlockedCellKernel(mx, my);
 
-    // ★ 우선순위: 에이전트 히트 여부를 먼저 확인 (agent mask 유무와 무관)
-    if (blocked_cell) {
-      double wx, wy;
-      {
-        std::lock_guard<std::mutex> lock(costmap_mutex_);
-        costmap_->mapToWorld(mx, my, wx, wy);
-      }
-      auto hits = whoCoversPoint(wx, wy);
-      if (!hits.empty()) {
-        publishAgentCollisionList(hits);
-        last_agent_block_time_ = this->now();
-        return; // 에이전트 충돌로 확정 → 일반 장애물 로직으로 가지 않음
-      }
-    }
-
-    // (필요 시) agent mask 보조 판정
-    bool blocked = blocked_cell;
-    if (blocked && compare_agent_mask_) {
-      const bool agent_mark = agentCellBlockedNear(mx, my,
-                            static_cast<unsigned char>(agent_cost_threshold_),
-                            agent_mask_manhattan_buffer_);
-      if (agent_mark) {
-        double wx, wy;
-        { std::lock_guard<std::mutex> lock(costmap_mutex_); costmap_->mapToWorld(mx, my, wx, wy); }
-        auto hits = whoCoversPoint(wx, wy);
-        if (!hits.empty()) {
-          publishAgentCollisionList(hits);
-          last_agent_block_time_ = this->now();
-          return;
-        }
-      }
-    }
-
-    // 일반 장애물 성숙도
     const uint64_t key = packKey(mx, my);
     bool persistent_mature = false;
     auto it = db_snapshot.find(key);
@@ -584,7 +564,27 @@ void PathValidatorNode::validateWithPoints(const std::vector<geometry_msgs::msg:
       }
     }
 
-    blocked = blocked && persistent_mature;
+    bool blocked = blocked_cell && persistent_mature;
+
+    if (blocked && compare_agent_mask_) {
+      const bool agent_hit = agentCellBlockedNear(mx, my,
+                              static_cast<unsigned char>(agent_cost_threshold_),
+                              agent_mask_manhattan_buffer_);
+      if (agent_hit && publish_agent_collision_) {
+        double wx, wy;
+        {
+          std::lock_guard<std::mutex> lock(costmap_mutex_);
+          costmap_->mapToWorld(mx, my, wx, wy);
+        }
+        auto hits = whoCoversPoint(wx, wy);
+        if (!hits.empty()) {
+          publishAgentCollisionList(hits);
+          // ★ NEW: 홀드 시작 & 같은 사이클 종료
+          last_agent_block_time_ = this->now();
+          return;
+        }
+      }
+    }
 
     streak = blocked ? (streak + 1) : 0;
     best_streak = std::max(best_streak, streak);
@@ -661,7 +661,8 @@ void PathValidatorNode::validateWithFootprint(const std::vector<geometry_msgs::m
     if (use_radius_) {
       unsigned int cx, cy;
       if (!costmap->worldToMap(ps.pose.position.x, ps.pose.position.y, cx, cy)) {
-        consecutive = 0; continue;
+        consecutive = 0;
+        continue;
       }
       const int r_cells = std::max(1, static_cast<int>(std::ceil(robot_radius_m_ / res)));
 
@@ -678,7 +679,8 @@ void PathValidatorNode::validateWithFootprint(const std::vector<geometry_msgs::m
           const unsigned int umy = static_cast<unsigned int>(my);
 
           if (masterCellBlocked(umx, umy, master_thr)) {
-            blocked_here = true; hit_mx = umx; hit_my = umy;
+            blocked_here = true;
+            hit_mx = umx; hit_my = umy;
           }
         }
       }
@@ -698,10 +700,8 @@ void PathValidatorNode::validateWithFootprint(const std::vector<geometry_msgs::m
         q.y = ps.pose.position.y + s * x + c * y;
         q.z = 0.0;
         poly_world.push_back(q);
-        if (q.x < minx) minx=q.x;
-        if (q.y < miny) miny=q.y;
-        if (q.x > maxx) maxx=q.x; 
-        if (q.y > maxy) maxy=q.y;
+        if (q.x < minx) minx=q.x; if (q.y < miny) miny=q.y;
+        if (q.x > maxx) maxx=q.x; if (q.y > maxy) maxy=q.y;
       }
 
       int min_i, min_j, max_i, max_j;
@@ -717,30 +717,26 @@ void PathValidatorNode::validateWithFootprint(const std::vector<geometry_msgs::m
           const unsigned int umy = static_cast<unsigned int>(j);
 
           if (masterCellBlocked(umx, umy, master_thr)) {
-            blocked_here = true; hit_mx = umx; hit_my = umy;
+            blocked_here = true;
+            hit_mx = umx; hit_my = umy;
           }
         }
       }
     }
 
     if (blocked_here) {
-      // ★ 우선순위: 에이전트 히트 먼저
-      double wx, wy; { std::lock_guard<std::mutex> lock(costmap_mutex_); costmap->mapToWorld(hit_mx, hit_my, wx, wy); }
-      auto hits = whoCoversPoint(wx, wy);
-      if (!hits.empty()) {
-        publishAgentCollisionList(hits);
-        last_agent_block_time_ = this->now();
-        return;
-      }
-
-      // (보조) agent mask가 있으면 한 번 더 확인
       if (compare_agent_mask_) {
-        const bool agent_mark = agentCellBlockedNear(hit_mx, hit_my, agent_thr,
-                                                     agent_mask_manhattan_buffer_);
-        if (agent_mark) {
-          auto hits2 = whoCoversPoint(wx, wy);
-          if (!hits2.empty()) {
-            publishAgentCollisionList(hits2);
+        const bool agent_hit = agentCellBlockedNear(hit_mx, hit_my, agent_thr,
+                                                    agent_mask_manhattan_buffer_);
+        if (agent_hit && publish_agent_collision_) {
+          double wx, wy; {
+            std::lock_guard<std::mutex> lock(costmap_mutex_);
+            costmap->mapToWorld(hit_mx, hit_my, wx, wy);
+          }
+          auto hits = whoCoversPoint(wx, wy);
+          if (!hits.empty()) {
+            publishAgentCollisionList(hits);
+            // ★ NEW: 홀드 시작 & 같은 사이클 종료
             last_agent_block_time_ = this->now();
             return;
           }
@@ -758,7 +754,7 @@ void PathValidatorNode::validateWithFootprint(const std::vector<geometry_msgs::m
   }
 }
 
-// ===================== Agent 충돌 식별 =====================
+// ===================== Agent 충돌 식별/퍼블리시 =====================
 
 double PathValidatorNode::headingTo(const geometry_msgs::msg::Pose & pose, double wx, double wy)
 {
@@ -776,70 +772,6 @@ double PathValidatorNode::speedAlong(const geometry_msgs::msg::Twist & tw, doubl
 {
   const double v = tw.linear.x;
   return v * std::cos(heading_rad);
-}
-
-bool PathValidatorNode::pathTubeCoversPoint(const multi_agent_msgs::msg::MultiAgentInfo & a,
-                                            double wx, double wy,
-                                            double stride_m, double dilate_m,
-                                            int max_poses, double /*frame_yaw*/,
-                                            const std::string & /*global_frame*/)
-{
-  const auto & path = a.truncated_path;
-  if (path.poses.empty()) return false;
-
-  const int limit = std::min<int>(path.poses.size(), std::max(1, max_poses));
-  // 거리 기반 스트라이드
-  double acc = 0.0;
-  auto prev = path.poses[0].pose.position;
-
-  for (int i = 0; i < limit; ++i) {
-    const auto & ps = path.poses[i].pose;
-
-    if (i > 0) {
-      const auto & cur = ps.position;
-      acc += std::hypot(cur.x - prev.x, cur.y - prev.y);
-      if (acc < std::max(0.05, stride_m)) continue;
-      acc = 0.0;
-      prev = cur;
-    }
-
-    // footprint를 얇게 등방성 확장한 로컬 폴리곤
-    const auto & fp = a.footprint.polygon.points;
-    if (fp.size() < 3) continue;
-
-    // 로컬 dilate
-    std::vector<geometry_msgs::msg::Point> poly_local; poly_local.reserve(fp.size());
-    double cx=0, cy=0;
-    for (auto & p : fp) { cx += p.x; cy += p.y; }
-    cx /= static_cast<double>(fp.size());
-    cy /= static_cast<double>(fp.size());
-    for (auto & p : fp) {
-      double vx = p.x - cx, vy = p.y - cy;
-      double n = std::hypot(vx, vy); if (n < 1e-6) n = 1.0;
-      geometry_msgs::msg::Point q;
-      q.x = p.x + dilate_m * (vx / n);
-      q.y = p.y + dilate_m * (vy / n);
-      q.z = 0.0;
-      poly_local.push_back(q);
-    }
-
-    // 로컬 → 월드 변환(경로 pose 기준, 스미어 없음)
-    const double yaw = tf2::getYaw(ps.orientation);
-    const double c = std::cos(yaw), s = std::sin(yaw);
-    std::vector<geometry_msgs::msg::Point> poly_world; poly_world.reserve(poly_local.size());
-    for (auto & p : poly_local) {
-      geometry_msgs::msg::Point q;
-      q.x = ps.position.x + c * p.x - s * p.y;
-      q.y = ps.position.y + s * p.x + c * p.y;
-      q.z = 0.0;
-      poly_world.push_back(q);
-    }
-
-    if (pointInPolygon(poly_world, wx, wy)) {
-      return true;
-    }
-  }
-  return false;
 }
 
 std::vector<PathValidatorNode::AgentHit> PathValidatorNode::whoCoversPoint(double wx, double wy) const
@@ -863,81 +795,57 @@ std::vector<PathValidatorNode::AgentHit> PathValidatorNode::whoCoversPoint(doubl
     const auto & fp = a.footprint.polygon.points;
     if (fp.size() < 3) continue;
 
-    // 1) 현재 위치 footprint(소확장) 커버?
-    {
-      std::vector<geometry_msgs::msg::Point> poly_local; poly_local.reserve(fp.size());
-      double cx=0, cy=0;
-      for (auto & p : fp) { cx += p.x; cy += p.y; }
-      cx /= static_cast<double>(fp.size());
-      cy /= static_cast<double>(fp.size());
-      for (auto & p : fp) {
-        double vx = p.x - cx, vy = p.y - cy;
-        double n = std::hypot(vx, vy); if (n < 1e-6) n = 1.0;
-        geometry_msgs::msg::Point q;
-        q.x = p.x + agent_match_dilate_m_ * (vx / n);
-        q.y = p.y + agent_match_dilate_m_ * (vy / n);
-        q.z = 0.0;
-        poly_local.push_back(q);
-      }
-
-      const double yaw = tf2::getYaw(a.current_pose.pose.orientation);
-      const double c = std::cos(yaw), s = std::sin(yaw);
-      std::vector<geometry_msgs::msg::Point> poly_world; poly_world.reserve(poly_local.size());
-      for (auto & p : poly_local) {
-        geometry_msgs::msg::Point q;
-        q.x = a.current_pose.pose.position.x + c * p.x - s * p.y;
-        q.y = a.current_pose.pose.position.y + s * p.x + c * p.y;
-        q.z = 0.0;
-        poly_world.push_back(q);
-      }
-
-      if (pointInPolygon(poly_world, wx, wy)) {
-        AgentHit hit;
-        hit.machine_id = a.machine_id;
-        hit.type_id = a.type_id;
-        hit.x = wx; hit.y = wy;
-
-        const double head = headingTo(a.current_pose.pose, wx, wy);
-        const double v_along = speedAlong(a.current_twist, head);
-        if (v_along > 0.05) {
-          const double dx = wx - a.current_pose.pose.position.x;
-          const double dy = wy - a.current_pose.pose.position.y;
-          const double dist = std::hypot(dx, dy);
-          hit.ttc_first = static_cast<float>(dist / v_along);
-          hit.note = "agent footprint overlap; TTC estimated";
-        } else {
-          hit.ttc_first = -1.0f;
-          hit.note = "agent footprint overlap; TTC unknown";
-        }
-        out.emplace_back(std::move(hit));
-        continue; // footprint에 걸리면 굳이 path 튜브 검사 불필요
-      }
+    // footprint 소확장
+    std::vector<geometry_msgs::msg::Point> poly_local; poly_local.reserve(fp.size());
+    double cx=0, cy=0;
+    for (auto & p : fp) { cx += p.x; cy += p.y; }
+    cx /= static_cast<double>(fp.size());
+    cy /= static_cast<double>(fp.size());
+    for (auto & p : fp) {
+      double vx = p.x - cx, vy = p.y - cy;
+      double n = std::hypot(vx, vy); if (n < 1e-6) n = 1.0;
+      geometry_msgs::msg::Point q;
+      q.x = p.x + agent_match_dilate_m_ * (vx / n);
+      q.y = p.y + agent_match_dilate_m_ * (vy / n);
+      q.z = 0.0;
+      poly_local.push_back(q);
     }
 
-    // 2) (NEW) truncated_path 튜브 커버?
-    if (agent_path_hit_enable_) {
-      const bool covered = pathTubeCoversPoint(
-          a, wx, wy,
-          agent_path_hit_stride_m_,
-          agent_path_hit_dilate_m_,
-          agent_path_hit_max_poses_,
-          /*frame_yaw=*/0.0, global_frame_);
-      if (covered) {
-        AgentHit hit;
-        hit.machine_id = a.machine_id;
-        hit.type_id = a.type_id;
-        hit.x = wx; hit.y = wy;
-        hit.ttc_first = -1.0f; // 경로 포즈에서 TTC는 애매 → -1로
-        hit.note = "agent truncated_path overlap";
-        out.emplace_back(std::move(hit));
+    const double yaw = tf2::getYaw(a.current_pose.pose.orientation);
+    const double c = std::cos(yaw), s = std::sin(yaw);
+    std::vector<geometry_msgs::msg::Point> poly_world; poly_world.reserve(poly_local.size());
+    for (auto & p : poly_local) {
+      geometry_msgs::msg::Point q;
+      q.x = a.current_pose.pose.position.x + c * p.x - s * p.y;
+      q.y = a.current_pose.pose.position.y + s * p.x + c * p.y;
+      q.z = 0.0;
+      poly_world.push_back(q);
+    }
+
+    if (pointInPolygon(poly_world, wx, wy)) {
+      AgentHit hit;
+      hit.machine_id = a.machine_id;
+      hit.type_id = a.type_id;
+      hit.x = wx; hit.y = wy;
+
+      const double head = headingTo(a.current_pose.pose, wx, wy);
+      const double v_along = speedAlong(a.current_twist, head);
+      if (v_along > 0.05) {
+        const double dx = wx - a.current_pose.pose.position.x;
+        const double dy = wy - a.current_pose.pose.position.y;
+        const double dist = std::hypot(dx, dy);
+        hit.ttc_first = static_cast<float>(dist / v_along);
+        hit.note = "agent footprint overlap; TTC estimated";
+      } else {
+        hit.ttc_first = -1.0f;
+        hit.note = "agent footprint overlap; TTC unknown";
       }
+      out.emplace_back(std::move(hit));
     }
   }
 
   return out;
 }
-
-// ===================== Replan pulse =====================
 
 void PathValidatorNode::publishAgentCollisionList(const std::vector<AgentHit> & hits)
 {
@@ -960,11 +868,13 @@ void PathValidatorNode::publishAgentCollisionList(const std::vector<AgentHit> & 
   agent_collision_pub_->publish(msg);
 }
 
+// ===================== Replan pulse =====================
+
 void PathValidatorNode::triggerReplan(const std::string & reason)
 {
   const rclcpp::Time now = this->now();
 
-  // 홀드: 에이전트 알림 이후 일정 시간은 리플랜 방지
+  // ★ 홀드: 에이전트 알림 이후 일정 시간은 리플랜 방지
   const double since_agent = (now - last_agent_block_time_).seconds();
   if (since_agent >= 0.0 && since_agent < agent_block_hold_sec_) {
     RCLCPP_DEBUG(get_logger(),
@@ -972,8 +882,12 @@ void PathValidatorNode::triggerReplan(const std::string & reason)
       since_agent, agent_block_hold_sec_);
     return;
   }
+  // 너무 오래 막혔으면 리플랜 허용 (max_wait 넘어가면 hold 무시)
+  // (명시적 체크는 생략해도 since_agent<hold 구간만 막으므로 충분)
 
-  if ((now - last_replan_time_).seconds() <= cooldown_sec_) return;
+  if ((now - last_replan_time_).seconds() <= cooldown_sec_) {
+    return;
+  }
   last_replan_time_ = now;
 
   std_msgs::msg::Bool m; m.data = true;
