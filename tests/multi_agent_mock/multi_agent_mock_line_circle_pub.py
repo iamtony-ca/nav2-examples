@@ -8,7 +8,6 @@ from geometry_msgs.msg import PoseStamped, Pose, Point32
 from geometry_msgs.msg import PolygonStamped
 from nav_msgs.msg import Path
 
-# --- multi_agent_msgs (사용자 패키지) ---
 from multi_agent_msgs.msg import MultiAgentInfoArray, MultiAgentInfo, AgentStatus
 
 FRAME = "map"
@@ -17,35 +16,48 @@ HZ = 10.0
 MAX_POSES = 20
 
 def rect_footprint(w: float, l: float) -> PolygonStamped:
-    """centered rectangle footprint (width w, length l) in robot local frame"""
     fp = PolygonStamped()
     fp.header.frame_id = FRAME
     hw, hl = w * 0.5, l * 0.5
-    pts = [
+    fp.polygon.points = [
         Point32(x= hl, y= hw, z=0.0),
         Point32(x= hl, y=-hw, z=0.0),
         Point32(x=-hl, y=-hw, z=0.0),
         Point32(x=-hl, y= hw, z=0.0),
     ]
-    fp.polygon.points = pts
     return fp
+
+def yaw_wrap(yaw: float) -> float:
+    # wrap to (-pi, pi]
+    return (yaw + math.pi) % (2.0 * math.pi) - math.pi
 
 def pose_xyth(x: float, y: float, th: float) -> Pose:
     p = Pose()
     p.position.x = x
     p.position.y = y
+    th = yaw_wrap(th)
     c = math.cos(th * 0.5)
     s = math.sin(th * 0.5)
     p.orientation.z = s
     p.orientation.w = c
     return p
 
-def make_path(poses: List[Pose]) -> Path:
+def make_path_with_stamps(start_stamp, poses: List[Pose], dt: float) -> Path:
     path = Path()
     path.header.frame_id = FRAME
-    for po in poses:
+    # 각 포즈에 증가하는 stamp를 넣어줌(시각 의미 부여, 일부 레이어에서 유용)
+    tsec = start_stamp.sec
+    tnsec = start_stamp.nanosec
+    cur = tsec + tnsec * 1e-9
+    for i, po in enumerate(poses):
         ps = PoseStamped()
         ps.header.frame_id = FRAME
+        # 간단한 부동소수 누적 → sec/nsec 재분해
+        ts = cur + i * dt
+        sec = int(ts)
+        nsec = int((ts - sec) * 1e9)
+        ps.header.stamp.sec = sec
+        ps.header.stamp.nanosec = nsec
         ps.pose = po
         path.poses.append(ps)
     return path
@@ -59,45 +71,40 @@ class MultiAgentMockLineCirclePub(Node):
         self.dt = 1.0 / HZ
         self.timer = self.create_timer(self.dt, self.on_timer)
 
-        # 공통 footprint (폭 0.5 m, 길이 0.7 m)
+        # 공통 footprint
         self.fp = rect_footprint(0.50, 0.70)
 
-        # 고정 에이전트 파라미터
+        # IDs
         self.agentA_id = 101  # 정지
         self.agentB_id = 202  # 직선 왕복
         self.agentC_id = 303  # 반원 왕복
         self.type_id = "amr"
 
-        # --- Agent B 직선 왕복 파라미터 ---
-        # A와 B를 잇는 구간을 일정 속도로 왕복
+        # --- B: 직선 왕복 파라미터 ---
         self.A_pt = (-2.0, 0.0)
         self.B_pt = (0.0, 0.0)
         self.v = 0.25  # m/s
 
-        # 사전 계산 (B용)
         ax, ay = self.A_pt
         bx, by = self.B_pt
         dx, dy = (bx - ax), (by - ay)
         self.L = math.hypot(dx, dy) if (dx or dy) else 1e-6
-        self.ux, self.uy = (dx / self.L, dy / self.L)  # 단위 벡터
+        self.ux, self.uy = (dx / self.L, dy / self.L)
 
-        # --- Agent C 반원(π rad) 왕복 파라미터 ---
-        # 중심 (cx, cy), 반지름 R_c, 시작각 theta0 에서 theta0+π 사이를 왕복
+        # --- C: 반원(π rad) 왕복 파라미터 ---
         self.cx, self.cy = (1.0, 1.0)
         self.R_c = 1.0
-        self.theta0 = -math.pi / 2.0   # 시작각 (예: 아래쪽에서 시작해 왼->오 반원)
-        self.v_c = 0.20                # m/s (선속도)
+        self.theta0 = -math.pi / 2.0   # 시작각
+        self.v_c = 0.20                # m/s
         self.arc_len = math.pi * self.R_c  # 반원 호길이
-        # 각속도는 필요 시 계산해서 사용: w = v_c / R_c
 
         self.get_logger().info(f"Publishing {PUB_TOPIC} at {HZ:.1f} Hz")
 
     @staticmethod
     def _wrap_bounce(s: float, L: float) -> Tuple[float, int]:
         """
-        왕복(트라이앵글 웨이브) 진행거리로 변환.
-        s: 누적 이동거리, L: 구간 길이(선분 길이 또는 호길이)
-        반환: (구간 내 위치거리 s', 진행방향(+1: 정방향, -1: 역방향))
+        왕복(삼각파) 변환: s 누적거리 → (구간내 s', 진행방향)
+        direction: +1 정방향, -1 역방향
         """
         if L <= 0.0:
             return 0.0, 1
@@ -108,113 +115,96 @@ class MultiAgentMockLineCirclePub(Node):
         else:
             return (2.0 * L - m), -1
 
-    # --------------------- B: 직선 왕복 ---------------------
+    # ----- B: 직선 왕복 -----
     def _pose_on_line(self, t: float) -> Pose:
-        """
-        시각 t에서의 agent_b 포즈 (위치 + 헤딩, 헤딩은 진행방향 기준)
-        """
-        s = max(0.0, self.v * t)  # 누적 이동거리
+        s = max(0.0, self.v * t)
         s_prime, direction = self._wrap_bounce(s, self.L)
         x = self.A_pt[0] + self.ux * s_prime
         y = self.A_pt[1] + self.uy * s_prime
-
-        # 진행방향 헤딩
-        if direction >= 0:
-            yaw = math.atan2(self.uy, self.ux)  # A->B
-        else:
-            yaw = math.atan2(-self.uy, -self.ux)  # B->A
+        yaw = math.atan2(self.uy, self.ux) if direction >= 0 else math.atan2(-self.uy, -self.ux)
         return pose_xyth(x, y, yaw)
 
-    # --------------------- C: 반원 왕복 ---------------------
+    # ----- C: 반원 왕복 -----
     def _pose_on_semicircle(self, t: float) -> Pose:
         """
-        시각 t에서의 agent_c 포즈.
-        반지름 R_c, 시작각 theta0 ~ theta0+π 구간을 선속도 v_c로 왕복.
-        헤딩은 접선 방향(진행방향 기준)으로 설정.
+        반지름 R_c, 각도 [theta0, theta0+π] 구간을 선속도 v_c로 왕복.
+        정방향: theta0 → theta0+π, 역방향: theta0+π → theta0
         """
-        s = max(0.0, self.v_c * t)  # 누적 이동거리
-        s_prime, direction = self._wrap_bounce(s, self.arc_len)  # [0, πR] 구간
-        # 호길이 -> 각도로 변환
+        s = max(0.0, self.v_c * t)
+        s_prime, direction = self._wrap_bounce(s, self.arc_len)  # [0, πR]
         dtheta = s_prime / self.R_c  # [0, π]
-        theta = self.theta0 + dtheta
+
+        # *** 중요: 방향에 따라 theta 증가/감소 ***
+        if direction >= 0:
+            theta = self.theta0 + dtheta           # 정방향
+        else:
+            theta = self.theta0 + math.pi - dtheta # 역방향
 
         # 위치
         x = self.cx + self.R_c * math.cos(theta)
         y = self.cy + self.R_c * math.sin(theta)
 
-        # 접선 방향 헤딩 (정방향: +π/2, 역방향: -π/2)
-        if direction >= 0:
-            yaw = theta + math.pi / 2.0
-        else:
-            yaw = theta - math.pi / 2.0
-
-        # yaw wrap (선택 사항)
-        # while yaw > math.pi: yaw -= 2*math.pi
-        # while yaw <= -math.pi: yaw += 2*math.pi
-
+        # 접선 헤딩: 증가 방향은 +π/2, 감소 방향은 -π/2
+        yaw = yaw_wrap(theta + direction * (math.pi / 2.0))
         return pose_xyth(x, y, yaw)
 
     def on_timer(self):
         now = self.get_clock().now().to_msg()
 
-        # --- Agent A: 정지 (대기) ---
+        # --- Agent A: 정지 ---
         aA = MultiAgentInfo()
         aA.machine_id = self.agentA_id
         aA.type_id = self.type_id
         aA.mode = "auto"
         aA.pos_std_m = 0.03
         aA.footprint = self.fp
-
         aA.status = AgentStatus()
         aA.status.phase = AgentStatus.STATUS_WAITING
 
-        A_theta = 0.0
-        A_pose = pose_xyth(1.0, 0.0, A_theta)
+        A_pose = pose_xyth(1.0, 0.0, 0.0)
         aA.current_pose = PoseStamped()
         aA.current_pose.header.stamp = now
         aA.current_pose.header.frame_id = FRAME
         aA.current_pose.pose = A_pose
-        aA.truncated_path = make_path([A_pose] * MAX_POSES)
+        aA.truncated_path = make_path_with_stamps(now, [A_pose] * MAX_POSES, self.dt)
 
-        # --- Agent B: 이동 (A<->B 직선 왕복) ---
+        # --- Agent B: 직선 왕복 ---
         aB = MultiAgentInfo()
         aB.machine_id = self.agentB_id
         aB.type_id = self.type_id
         aB.mode = "auto"
         aB.pos_std_m = 0.05
         aB.footprint = self.fp
-
         aB.status = AgentStatus()
         aB.status.phase = AgentStatus.STATUS_MOVING
 
         path_poses_b = [self._pose_on_line(self.t + k * self.dt) for k in range(MAX_POSES)]
-        aB.truncated_path = make_path(path_poses_b)
+        aB.truncated_path = make_path_with_stamps(now, path_poses_b, self.dt)
 
         aB.current_pose = PoseStamped()
         aB.current_pose.header.stamp = now
         aB.current_pose.header.frame_id = FRAME
         aB.current_pose.pose = path_poses_b[0]
 
-        # --- Agent C: 이동 (반원 왕복) ---
+        # --- Agent C: 반원 왕복 ---
         aC = MultiAgentInfo()
         aC.machine_id = self.agentC_id
         aC.type_id = self.type_id
         aC.mode = "auto"
         aC.pos_std_m = 0.05
         aC.footprint = self.fp
-
         aC.status = AgentStatus()
         aC.status.phase = AgentStatus.STATUS_MOVING
 
         path_poses_c = [self._pose_on_semicircle(self.t + k * self.dt) for k in range(MAX_POSES)]
-        aC.truncated_path = make_path(path_poses_c)
+        aC.truncated_path = make_path_with_stamps(now, path_poses_c, self.dt)
 
         aC.current_pose = PoseStamped()
         aC.current_pose.header.stamp = now
         aC.current_pose.header.frame_id = FRAME
         aC.current_pose.pose = path_poses_c[0]
 
-        # --- Array 채우기 ---
+        # --- Array ---
         arr = MultiAgentInfoArray()
         arr.header.stamp = now
         arr.header.frame_id = FRAME
