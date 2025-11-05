@@ -11,7 +11,7 @@ from rclpy.time import Time
 
 from std_msgs.msg import Bool, String
 from geometry_msgs.msg import Pose
-from replan_monitor_msgs.msg import PathAgentCollisionInfo
+from multi_agent_msgs.msg import PathAgentCollisionInfo
 from multi_agent_msgs.msg import MultiAgentInfoArray, MultiAgentInfo, AgentStatus
 
 
