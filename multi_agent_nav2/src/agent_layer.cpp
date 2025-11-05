@@ -364,12 +364,12 @@ void AgentLayer::rasterizeAgentPath(
   // 2) (선택) truncated_path의 각 pose에서도 footprint를 얇게/간격 띄워서 찍고 싶다면
   //    아래 루프를 활성화하세요. 지금은 과도한 차단을 피하기 위해 "현재 위치만" 반영.
   //
-  // const int limit = std::min<int>(a.truncated_path.poses.size(), max_poses_);
-  // for (int i = 0; i < limit; ++i) {
-  //   const auto & ps = a.truncated_path.poses[i].pose;
-  //   // 경로상의 footprint는 등방성만 소량(예: iso_extra*0.5), 전방 스미어는 0.0로 권장
-  //   fillFootprintAt(a.footprint, ps, iso_extra * 0.5, 0.0, grid, cost_now, &meta_hits);
-  // }
+  const int limit = std::min<int>(a.truncated_path.poses.size(), max_poses_);
+  for (int i = 0; i < limit; ++i) {
+    const auto & ps = a.truncated_path.poses[i].pose;
+    // 경로상의 footprint는 등방성만 소량(예: iso_extra*0.5), 전방 스미어는 0.0로 권장
+    fillFootprintAt(a.footprint, ps, iso_extra * 0.5, 0.0, grid, cost_now, &meta_hits);
+  }
 }
 
 void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
