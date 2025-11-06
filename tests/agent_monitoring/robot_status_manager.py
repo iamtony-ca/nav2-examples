@@ -97,7 +97,7 @@ class RobotStatusManager(Node):
         BT 로그 수신 시, BT 상태를 캐시하고 즉시 상태 재평가를 트리거합니다.
         """
         with self.state_lock:
-            self.last_log_time = Time.from_msg(msg.header.stamp)
+            self.last_log_time = Time.from_msg(msg.timestamp)
             
             for event in msg.event_log:
                 if event.current_status == "RUNNING":

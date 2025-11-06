@@ -82,7 +82,7 @@ class RobotStatusManager(Node):
         /behavior_tree_log 토픽에서 메시지를 수신할 때마다 호출됩니다.
         """
         # 마지막 로그 수신 시간 업데이트
-        self.last_log_time = Time.from_msg(msg.header.stamp)
+        self.last_log_time = Time.from_msg(msg.timestamp)
         
         running_nodes = set()
         terminal_nodes = {}  # key: node_name, value: status ("SUCCESS", "FAILURE", "IDLE")
