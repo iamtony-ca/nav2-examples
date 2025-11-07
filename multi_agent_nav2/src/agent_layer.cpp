@@ -29,19 +29,19 @@ void AgentLayer::onInitialize()
   node_shared_->declare_parameter("roi_range_m", rclcpp::ParameterValue(12.0));
   node_shared_->declare_parameter("time_decay_sec", rclcpp::ParameterValue(1.0));
   node_shared_->declare_parameter("lethal_cost", rclcpp::ParameterValue(254));
-  node_shared_->declare_parameter("moving_cost", rclcpp::ParameterValue(180));
-  node_shared_->declare_parameter("waiting_cost", rclcpp::ParameterValue(200));
+  node_shared_->declare_parameter("moving_cost", rclcpp::ParameterValue(254)); // 180
+  node_shared_->declare_parameter("waiting_cost", rclcpp::ParameterValue(254));
   node_shared_->declare_parameter("manual_cost_bias", rclcpp::ParameterValue(30));
 
   // [CHANGED] 전방 스미어와 등방성 팽창을 분리
   node_shared_->declare_parameter("dilation_m", rclcpp::ParameterValue(0.05));
-  node_shared_->declare_parameter("forward_smear_m", rclcpp::ParameterValue(0.25));
+  node_shared_->declare_parameter("forward_smear_m", rclcpp::ParameterValue(0.005));
   node_shared_->declare_parameter("sigma_k", rclcpp::ParameterValue(2.0));
 
   node_shared_->declare_parameter("publish_meta", rclcpp::ParameterValue(true));
   node_shared_->declare_parameter("meta_stride", rclcpp::ParameterValue(3));
   node_shared_->declare_parameter("freshness_timeout_ms", rclcpp::ParameterValue(800));
-  node_shared_->declare_parameter("max_poses", rclcpp::ParameterValue(40));
+  node_shared_->declare_parameter("max_poses", rclcpp::ParameterValue(10000));
   node_shared_->declare_parameter("qos_reliable", rclcpp::ParameterValue(true));
 
   // Get parameters

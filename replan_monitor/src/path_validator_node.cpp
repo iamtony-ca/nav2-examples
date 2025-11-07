@@ -12,33 +12,33 @@ PathValidatorNode::PathValidatorNode()
   this->declare_parameter<std::string>("base_frame", "base_link");
 
   this->declare_parameter("cooldown_sec", 1.0);
-  this->declare_parameter("consecutive_threshold", 3);
-  this->declare_parameter("obstacle_persistence_sec", 0.5);
+  this->declare_parameter("consecutive_threshold", 2);  //3
+  this->declare_parameter("obstacle_persistence_sec", 1.0);  // 0.5
   this->declare_parameter("max_speed", 0.5);
   this->declare_parameter("lookahead_time_sec", 15.0);
-  this->declare_parameter("min_lookahead_m", 2.0);
-  this->declare_parameter("cost_threshold", 200.0);
+  this->declare_parameter("min_lookahead_m", 0.8);  // 2.0
+  this->declare_parameter("cost_threshold", 254.0); //200.0
   this->declare_parameter("ignore_unknown", true);
 
   this->declare_parameter("db_update_frequency", 5.0);
   this->declare_parameter("obstacle_prune_timeout_sec", 3.0);
-  this->declare_parameter("db_stride", 2);
-  this->declare_parameter("cone_angle_deg", 100.0);
-  this->declare_parameter("kernel_half_size", 1);
+  this->declare_parameter("db_stride", 1);  // 2
+  this->declare_parameter("cone_angle_deg", 170.0); //100.0
+  this->declare_parameter("kernel_half_size", 2); // 1
 
-  this->declare_parameter("path_check_distance_m", 6.0);
+  this->declare_parameter("path_check_distance_m", 8.0); //6.0
 
-  this->declare_parameter("publish_false_pulse", true);
+  this->declare_parameter("publish_false_pulse", false); //true
   this->declare_parameter("flag_pulse_ms", 120);
 
   // ===== Footprint / Agent mask / Output =====
-  this->declare_parameter("use_footprint_check", false);
+  this->declare_parameter("use_footprint_check", true); // false
   this->declare_parameter("footprint_step_m", 0.15);
 
   this->declare_parameter("compare_agent_mask", true);
   this->declare_parameter<std::string>("agent_mask_topic", "/agent_layer/costmap_raw");
   this->declare_parameter("agent_cost_threshold", 254.0);
-  this->declare_parameter("agent_mask_manhattan_buffer", 1);
+  this->declare_parameter("agent_mask_manhattan_buffer", 3);  // 1
 
   this->declare_parameter("publish_agent_collision", true);
   this->declare_parameter<std::string>("agent_collision_topic", "/path_agent_collision_info");
@@ -46,7 +46,7 @@ PathValidatorNode::PathValidatorNode()
   // MultiAgent 구독
   this->declare_parameter<std::string>("agents_topic", "/multi_agent_infos");
   this->declare_parameter("agents_freshness_timeout_ms", 800);
-  this->declare_parameter("agent_match_dilate_m", 0.05);
+  this->declare_parameter("agent_match_dilate_m", 0.1); // 0.05
 
   // Nav2 footprint 스타일
   this->declare_parameter<std::string>("footprint", "[]");
@@ -59,8 +59,8 @@ PathValidatorNode::PathValidatorNode()
   // === NEW: 에이전트 경로 튜브 매칭 ===
   this->declare_parameter("agent_path_hit_enable", true);
   this->declare_parameter("agent_path_hit_stride_m", 0.35);
-  this->declare_parameter("agent_path_hit_dilate_m", 0.02);
-  this->declare_parameter("agent_path_hit_max_poses", 500);
+  this->declare_parameter("agent_path_hit_dilate_m", 0.05);
+  this->declare_parameter("agent_path_hit_max_poses", 1000);
 
   // ---- load parameters ----
   global_frame_               = this->get_parameter("global_frame").as_string();
@@ -444,17 +444,67 @@ inline bool PathValidatorNode::masterCellBlocked(unsigned int mx, unsigned int m
   return (c >= thr);
 }
 
-inline bool PathValidatorNode::agentCellBlockedNear(unsigned int mx, unsigned int my,
-                                                    unsigned char thr, int manhattan_buf) const
+// inline bool PathValidatorNode::agentCellBlockedNear(unsigned int mx, unsigned int my,
+//                                                     unsigned char thr, int manhattan_buf) const
+// {
+//   std::lock_guard<std::mutex> lock(agent_mask_mutex_);
+//   if (!agent_mask_) return false;
+
+//   const int sx = static_cast<int>(agent_mask_->getSizeInCellsX());
+//   const int sy = static_cast<int>(agent_mask_->getSizeInCellsY());
+
+//   const int ix = static_cast<int>(mx);
+//   const int iy = static_cast<int>(my);
+
+//   for (int dx = -manhattan_buf; dx <= manhattan_buf; ++dx) {
+//     for (int dy = -manhattan_buf; dy <= manhattan_buf; ++dy) {
+//       if (std::abs(dx) + std::abs(dy) > manhattan_buf) continue;
+//       const int x = ix + dx;
+//       const int y = iy + dy;
+//       if (x < 0 || y < 0 || x >= sx || y >= sy) continue;
+
+//       const unsigned char a = agent_mask_->getCost(static_cast<unsigned int>(x),
+//                                                    static_cast<unsigned int>(y));
+//       if (a >= thr) return true;
+//     }
+//   }
+//   return false;
+// }
+
+
+// PathValidatorNode::agentCellBlockedNear() 교체 버전
+inline bool PathValidatorNode::agentCellBlockedNear(
+    unsigned int mx, unsigned int my,
+    unsigned char thr, int manhattan_buf) const
 {
-  std::lock_guard<std::mutex> lock(agent_mask_mutex_);
-  if (!agent_mask_) return false;
+  // 1) 로컬 복사 (락 순서 교착 회피)
+  std::shared_ptr<nav2_costmap_2d::Costmap2D> master, agent;
+  {
+    std::lock_guard<std::mutex> lk(costmap_mutex_);
+    if (!costmap_) return false;
+    master = costmap_;
+  }
+  {
+    std::lock_guard<std::mutex> lk(agent_mask_mutex_);
+    if (!agent_mask_) return false;
+    agent = agent_mask_;
+  }
 
-  const int sx = static_cast<int>(agent_mask_->getSizeInCellsX());
-  const int sy = static_cast<int>(agent_mask_->getSizeInCellsY());
+  // 2) master index -> world
+  double wx, wy;
+  master->mapToWorld(mx, my, wx, wy);
 
-  const int ix = static_cast<int>(mx);
-  const int iy = static_cast<int>(my);
+  // 3) world -> agent_mask index
+  unsigned int ax, ay;
+  if (!agent->worldToMap(wx, wy, ax, ay)) {
+    return false;
+  }
+
+  // 4) 맨해튼 버퍼 내에서 검사
+  const int sx = static_cast<int>(agent->getSizeInCellsX());
+  const int sy = static_cast<int>(agent->getSizeInCellsY());
+  const int ix = static_cast<int>(ax);
+  const int iy = static_cast<int>(ay);
 
   for (int dx = -manhattan_buf; dx <= manhattan_buf; ++dx) {
     for (int dy = -manhattan_buf; dy <= manhattan_buf; ++dy) {
@@ -463,13 +513,15 @@ inline bool PathValidatorNode::agentCellBlockedNear(unsigned int mx, unsigned in
       const int y = iy + dy;
       if (x < 0 || y < 0 || x >= sx || y >= sy) continue;
 
-      const unsigned char a = agent_mask_->getCost(static_cast<unsigned int>(x),
-                                                   static_cast<unsigned int>(y));
+      const unsigned char a = agent->getCost(static_cast<unsigned int>(x),
+                                             static_cast<unsigned int>(y));
       if (a >= thr) return true;
     }
   }
   return false;
 }
+
+
 
 // ===================== Path validation dispatcher =====================
 
@@ -541,39 +593,102 @@ void PathValidatorNode::validateWithPoints(const std::vector<geometry_msgs::msg:
 
     const bool blocked_cell = isBlockedCellKernel(mx, my);
 
-    // ★ 우선순위: 에이전트 히트 여부를 먼저 확인 (agent mask 유무와 무관)
-    if (blocked_cell) {
-      double wx, wy;
-      {
-        std::lock_guard<std::mutex> lock(costmap_mutex_);
-        costmap_->mapToWorld(mx, my, wx, wy);
-      }
-      auto hits = whoCoversPoint(wx, wy);
-      if (!hits.empty()) {
-        publishAgentCollisionList(hits);
-        last_agent_block_time_ = this->now();
-        return; // 에이전트 충돌로 확정 → 일반 장애물 로직으로 가지 않음
-      }
-    }
+    // // ★ 우선순위: 에이전트 히트 여부를 먼저 확인 (agent mask 유무와 무관)
+    // if (blocked_cell) {
+    //   double wx, wy;
+    //   {
+    //     std::lock_guard<std::mutex> lock(costmap_mutex_);
+    //     costmap_->mapToWorld(mx, my, wx, wy);
+    //   }
+    //   auto hits = whoCoversPoint(wx, wy);
+    //   if (!hits.empty()) {
+    //     publishAgentCollisionList(hits);
+    //     last_agent_block_time_ = this->now();
+    //     return; // 에이전트 충돌로 확정 → 일반 장애물 로직으로 가지 않음
+    //   }
+    // }
 
-    // (필요 시) agent mask 보조 판정
-    bool blocked = blocked_cell;
-    if (blocked && compare_agent_mask_) {
-      const bool agent_mark = agentCellBlockedNear(mx, my,
-                            static_cast<unsigned char>(agent_cost_threshold_),
-                            agent_mask_manhattan_buffer_);
-      if (agent_mark) {
-        double wx, wy;
-        { std::lock_guard<std::mutex> lock(costmap_mutex_); costmap_->mapToWorld(mx, my, wx, wy); }
-        auto hits = whoCoversPoint(wx, wy);
+    // // (필요 시) agent mask 보조 판정
+    // bool blocked = blocked_cell;
+    // if (blocked && compare_agent_mask_) {
+    //   const bool agent_mark = agentCellBlockedNear(mx, my,
+    //                         static_cast<unsigned char>(agent_cost_threshold_),
+    //                         agent_mask_manhattan_buffer_);
+    //   if (agent_mark) {
+    //     double wx, wy;
+    //     { std::lock_guard<std::mutex> lock(costmap_mutex_); costmap_->mapToWorld(mx, my, wx, wy); }
+    //     auto hits = whoCoversPoint(wx, wy);
+    //     if (!hits.empty()) {
+    //       publishAgentCollisionList(hits);
+    //       last_agent_block_time_ = this->now();
+    //       return;
+    //     }
+    //   }
+    // }
+
+    if (blocked_cell) {
+      // --- costmap 포인터 복사 ---
+      std::shared_ptr<nav2_costmap_2d::Costmap2D> cm;
+      { std::lock_guard<std::mutex> lock(costmap_mutex_); cm = costmap_; }
+      if (!cm) return;
+
+      // --- 중심 셀 월드좌표 ---
+      double wx, wy;
+      cm->mapToWorld(static_cast<int>(mx), static_cast<int>(my), wx, wy);
+
+      // --- 중심+이웃 1셀까지 에이전트 히트 검사 람다 ---
+      auto agent_hit_around = [&](double cx, double cy,
+                                  unsigned int mx_c, unsigned int my_c) -> std::vector<AgentHit> {
+        // 1) 중심
+        auto hits = whoCoversPoint(cx, cy);
+        if (!hits.empty()) return hits;
+
+        // 2) 8방향 이웃
+        static const int OFFS[8][2] = {
+          { 1, 0},{-1, 0},{ 0, 1},{ 0,-1},
+          { 1, 1},{ 1,-1},{-1, 1},{-1,-1}
+        };
+        for (auto &o : OFFS) {
+          double wxx, wyy;
+          cm->mapToWorld(static_cast<int>(mx_c)+o[0], static_cast<int>(my_c)+o[1], wxx, wyy);
+          auto h2 = whoCoversPoint(wxx, wyy);
+          if (!h2.empty()) return h2;
+        }
+        return {};
+      };
+
+      // 1) 일반 코스트로 막혔을 때: 중심+이웃 검사
+      {
+        auto hits = agent_hit_around(wx, wy, mx, my);
         if (!hits.empty()) {
           publishAgentCollisionList(hits);
           last_agent_block_time_ = this->now();
-          return;
+          return; // 에이전트 충돌 확정
         }
       }
+
+      // 2) (보조) agent mask 기준으로도 보강 검사
+      if (compare_agent_mask_) {
+        const bool agent_mark = agentCellBlockedNear(
+            mx, my,
+            static_cast<unsigned char>(agent_cost_threshold_),
+            agent_mask_manhattan_buffer_);
+        if (agent_mark) {
+          auto hits2 = agent_hit_around(wx, wy, mx, my);
+          if (!hits2.empty()) {
+            publishAgentCollisionList(hits2);
+            last_agent_block_time_ = this->now();
+            return;
+          }
+        }
+      }
+
+      // 3) 에이전트 히트가 아니면 이후의 일반 장애물 로직으로 진행
     }
 
+
+
+    bool blocked = blocked_cell;
     // 일반 장애물 성숙도
     const uint64_t key = packKey(mx, my);
     bool persistent_mature = false;
@@ -723,22 +838,56 @@ void PathValidatorNode::validateWithFootprint(const std::vector<geometry_msgs::m
       }
     }
 
+
     if (blocked_here) {
-      // ★ 우선순위: 에이전트 히트 먼저
-      double wx, wy; { std::lock_guard<std::mutex> lock(costmap_mutex_); costmap->mapToWorld(hit_mx, hit_my, wx, wy); }
-      auto hits = whoCoversPoint(wx, wy);
-      if (!hits.empty()) {
-        publishAgentCollisionList(hits);
-        last_agent_block_time_ = this->now();
-        return;
+      // --- costmap 포인터를 잠깐 복사 (락 최소화) ---
+      std::shared_ptr<nav2_costmap_2d::Costmap2D> cm;
+      { std::lock_guard<std::mutex> lock(costmap_mutex_); cm = costmap_; }
+      if (!cm) return;
+
+      // --- 중심 셀(히트셀) 기준 월드좌표 ---
+      double wx, wy;
+      cm->mapToWorld(static_cast<int>(hit_mx), static_cast<int>(hit_my), wx, wy);
+
+      // --- 중심+이웃 1셀까지 에이전트 히트 검사 람다 ---
+      auto agent_hit_around = [&](double cx, double cy,
+                                  unsigned int mx_c, unsigned int my_c) -> std::vector<AgentHit> {
+        // 1) 중심 먼저
+        auto hits = whoCoversPoint(cx, cy);
+        if (!hits.empty()) return hits;
+
+        // 2) 8방향 이웃
+        static const int OFFS[8][2] = {
+          { 1, 0},{-1, 0},{ 0, 1},{ 0,-1},
+          { 1, 1},{ 1,-1},{-1, 1},{-1,-1}
+        };
+        for (auto &o : OFFS) {
+          double wxx, wyy;
+          cm->mapToWorld(static_cast<int>(mx_c)+o[0], static_cast<int>(my_c)+o[1], wxx, wyy);
+          auto h2 = whoCoversPoint(wxx, wyy);
+          if (!h2.empty()) return h2;
+        }
+        return {};
+      };
+
+      // 1) 일반 코스트로 막혔을 때: 중심+이웃 검사
+      {
+        auto hits = agent_hit_around(wx, wy, hit_mx, hit_my);
+        if (!hits.empty()) {
+          publishAgentCollisionList(hits);
+          last_agent_block_time_ = this->now();
+          return;
+        }
       }
 
-      // (보조) agent mask가 있으면 한 번 더 확인
+      // 2) (보조) agent mask가 있으면 동일한 보강 검사 재시도
       if (compare_agent_mask_) {
-        const bool agent_mark = agentCellBlockedNear(hit_mx, hit_my, agent_thr,
-                                                     agent_mask_manhattan_buffer_);
+        const bool agent_mark = agentCellBlockedNear(
+            hit_mx, hit_my,
+            static_cast<unsigned char>(agent_cost_threshold_),
+            agent_mask_manhattan_buffer_);
         if (agent_mark) {
-          auto hits2 = whoCoversPoint(wx, wy);
+          auto hits2 = agent_hit_around(wx, wy, hit_mx, hit_my);
           if (!hits2.empty()) {
             publishAgentCollisionList(hits2);
             last_agent_block_time_ = this->now();
@@ -747,6 +896,7 @@ void PathValidatorNode::validateWithFootprint(const std::vector<geometry_msgs::m
         }
       }
 
+      // 3) 여기까지 에이전트가 아니면 일반 장애물로 누적 처리
       consecutive++;
       if (consecutive >= consecutive_threshold_) {
         triggerReplan("blocked (footprint) streak threshold reached");
@@ -755,6 +905,39 @@ void PathValidatorNode::validateWithFootprint(const std::vector<geometry_msgs::m
     } else {
       consecutive = 0;
     }
+
+    // if (blocked_here) {
+    //   // ★ 우선순위: 에이전트 히트 먼저
+    //   double wx, wy; { std::lock_guard<std::mutex> lock(costmap_mutex_); costmap->mapToWorld(hit_mx, hit_my, wx, wy); }
+    //   auto hits = whoCoversPoint(wx, wy);
+    //   if (!hits.empty()) {
+    //     publishAgentCollisionList(hits);
+    //     last_agent_block_time_ = this->now();
+    //     return;
+    //   }
+
+    //   // (보조) agent mask가 있으면 한 번 더 확인
+    //   if (compare_agent_mask_) {
+    //     const bool agent_mark = agentCellBlockedNear(hit_mx, hit_my, agent_thr,
+    //                                                  agent_mask_manhattan_buffer_);
+    //     if (agent_mark) {
+    //       auto hits2 = whoCoversPoint(wx, wy);
+    //       if (!hits2.empty()) {
+    //         publishAgentCollisionList(hits2);
+    //         last_agent_block_time_ = this->now();
+    //         return;
+    //       }
+    //     }
+    //   }
+
+    //   consecutive++;
+    //   if (consecutive >= consecutive_threshold_) {
+    //     triggerReplan("blocked (footprint) streak threshold reached");
+    //     return;
+    //   }
+    // } else {
+    //   consecutive = 0;
+    // }
   }
 }
 
