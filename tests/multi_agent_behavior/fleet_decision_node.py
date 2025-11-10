@@ -276,7 +276,7 @@ class FleetDecisionNode(Node):
         # 이벤트 방식: REPLAN을 1회성 요청
         self.get_logger().warn("external replan_flag -> request REPLAN")
         self._set_state_and_emit("REPLAN", reason="external replan_flag")
-        self.pub_req_replan.publish(Bool(data=True))
+        # self.pub_req_replan.publish(Bool(data=True))
 
     def on_collision(self, msg: PathAgentCollisionInfo):
         now = self.get_clock().now()
@@ -330,32 +330,103 @@ class FleetDecisionNode(Node):
         a = agents.get(machine_id, None)
         return bool(a and a.reroute)
 
+    # def build_candidates(self, msg: PathAgentCollisionInfo) -> List[Candidate]:
+    #     if self.last_agents is None or len(msg.x) == 0:
+    #         return []
+
+    #     agents_by_id = self._agents_by_id()
+    #     me_pose: Optional[Pose] = None
+    #     if self.my_id in agents_by_id:
+    #         me_pose = agents_by_id[self.my_id].current_pose.pose
+
+    #     out: List[Candidate] = []
+    #     for i in range(len(msg.x)):
+    #         px, py = msg.x[i], msg.y[i]
+    #         ttc = msg.ttc_first[i] if i < len(msg.ttc_first) else -1.0
+    #         note = msg.note[i] if i < len(msg.note) else ""
+
+    #         agent, rel_heading_deg, v_closing = self.match_agent_at_point(px, py, agents_by_id)
+    #         if agent is None or agent.machine_id == self.my_id:
+    #             continue
+
+    #         T_eff = self.combine_ttc(ttc, px, py, agent)
+    #         d_me = dist2(me_pose.position.x, me_pose.position.y, px, py) if me_pose else 10.0
+
+    #         sev = self.a1 * (1.0 / max(T_eff, self.T_min)) + \
+    #               self.a2 * (1.0 / max(d_me, self.d_min)) + \
+    #               self.a3 * heading_bonus(rel_heading_deg) + \
+    #               self.a4 * v_closing
+
+    #         row_me = right_of_way_score(agents_by_id.get(self.my_id, agent), self.my_id)
+    #         row_ot = right_of_way_score(agent, self.my_id)
+    #         yprio = self.b1 * mode_bonus(agent.mode) + \
+    #                 self.b2 * (row_ot - row_me) + \
+    #                 self.b3 * (1.0 if agent.reroute else 0.0) + \
+    #                 self.b4 * (1.0 if agent.status.phase == AgentStatus.STATUS_PATH_SEARCHING else 0.0) + \
+    #                 self.b5 * (1.0 if agent.occupancy else 0.0) + \
+    #                 self.b6 * id_bonus(self.my_id, agent.machine_id)
+
+    #         score = sev * (1.0 + self.kappa * yprio)
+
+    #         out.append(Candidate(
+    #             machine_id=int(agent.machine_id),
+    #             type_id=agent.type_id,
+    #             px=px, py=py,
+    #             T_eff=T_eff, severity=sev, yprio=yprio, score=score, note=note
+    #         ))
+    #     return out
     def build_candidates(self, msg: PathAgentCollisionInfo) -> List[Candidate]:
         if self.last_agents is None or len(msg.x) == 0:
             return []
 
         agents_by_id = self._agents_by_id()
-        me_pose: Optional[Pose] = None
-        if self.my_id in agents_by_id:
-            me_pose = agents_by_id[self.my_id].current_pose.pose
+        me_pose = agents_by_id.get(self.my_id, None).current_pose.pose if self.my_id in agents_by_id else None
 
         out: List[Candidate] = []
-        for i in range(len(msg.x)):
+        N = len(msg.x)
+        for i in range(N):
             px, py = msg.x[i], msg.y[i]
             ttc = msg.ttc_first[i] if i < len(msg.ttc_first) else -1.0
             note = msg.note[i] if i < len(msg.note) else ""
 
-            agent, rel_heading_deg, v_closing = self.match_agent_at_point(px, py, agents_by_id)
+            # --- 1) ID 기반 매칭 시도 ---
+            agent = None
+            rel_heading_deg = 90.0
+            v_closing = 0.0
+
+            mid = msg.machine_id[i] if i < len(msg.machine_id) else 0
+            if mid:
+                a = agents_by_id.get(int(mid), None)
+                if a is not None:
+                    agent = a
+                    # 상대 heading / v_closing 계산 (ID 매칭 기준)
+                    a_yaw = yaw_of(a.current_pose.pose)
+                    if me_pose is not None:
+                        rel_heading_deg = abs(math.degrees(ang_wrap(yaw_of(me_pose) - a_yaw)))
+                    ux, uy = unit(px - a.current_pose.pose.position.x, py - a.current_pose.pose.position.y)
+                    v_other = a.current_twist.linear.x * dot2(math.cos(a_yaw), math.sin(a_yaw), ux, uy)
+                    v_closing = max(0.0, v_other)
+
+                    # (선택) 일관성 체크: 너무 멀면 폴백
+                    if dist2(a.current_pose.pose.position.x, a.current_pose.pose.position.y, px, py) > 10.0:    # need to check
+                        agent = None  # 다시 폴백
+                        rel_heading_deg, v_closing = 90.0, 0.0
+
+            # --- 2) 폴백: 근접 매칭 ---
+            if agent is None:
+                agent, rel_heading_deg, v_closing = self.match_agent_at_point(px, py, agents_by_id)
+
             if agent is None or agent.machine_id == self.my_id:
                 continue
 
+            # 나머지는 종전 로직 그대로
             T_eff = self.combine_ttc(ttc, px, py, agent)
             d_me = dist2(me_pose.position.x, me_pose.position.y, px, py) if me_pose else 10.0
 
             sev = self.a1 * (1.0 / max(T_eff, self.T_min)) + \
-                  self.a2 * (1.0 / max(d_me, self.d_min)) + \
-                  self.a3 * heading_bonus(rel_heading_deg) + \
-                  self.a4 * v_closing
+                self.a2 * (1.0 / max(d_me, self.d_min)) + \
+                self.a3 * heading_bonus(rel_heading_deg) + \
+                self.a4 * v_closing
 
             row_me = right_of_way_score(agents_by_id.get(self.my_id, agent), self.my_id)
             row_ot = right_of_way_score(agent, self.my_id)
@@ -375,6 +446,7 @@ class FleetDecisionNode(Node):
                 T_eff=T_eff, severity=sev, yprio=yprio, score=score, note=note
             ))
         return out
+
 
     def match_agent_at_point(self, px: float, py: float, agents_by_id) -> Tuple[Optional[MultiAgentInfo], float, float]:
         best = None
