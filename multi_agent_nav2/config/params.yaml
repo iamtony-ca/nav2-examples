@@ -154,3 +154,42 @@ local_costmap:
         plugin: nav2_costmap_2d::InflationLayer
         cost_scaling_factor: 3.0
         inflation_radius: 0.50
+
+
+
+
+
+# 이 파라미터를 읽어들일 노드의 이름 (예: my_fleet_manager)
+my_fleet_manager:
+  ros__parameters:
+
+    # 1. 관리할 로봇 ID 목록을 정의합니다.
+    # C++ 노드에서 이 리스트를 먼저 읽고, 각 ID에 대해 루프를 돌며 파라미터를 로드합니다.
+    robot_ids: ["robot_001", "robot_002", "warehouse_bot_A"]
+
+    # 2. 각 로봇 ID를 네임스페이스(키)로 사용하여 상세 파라미터를 정의합니다.
+
+    # --- 로봇 1 (원형) ---
+    robot_001:
+      type_id: "TYPE_A_TURTLE"
+      machine_id: "machine-sn-001"
+      # Nav2 등에서 footprint가 비어있으면 robot_radius를 사용합니다.
+      robot_radius: 0.35
+      # footprint를 문자열 "[]" 로 지정하거나 아예 생략합니다.
+      footprint: "[]"
+
+    # --- 로봇 2 (사각형) ---
+    robot_002:
+      type_id: "TYPE_B_BOX"
+      machine_id: "machine-sn-002"
+      # footprint를 사용할 것이므로 radius는 0.0 또는 무시됩니다.
+      robot_radius: 0.0
+      # Nav2 Costmap 2D는 이 문자열 형식을 잘 파싱합니다.
+      footprint: "[[0.5, 0.4], [0.5, -0.4], [-0.5, -0.4], [-0.5, 0.4]]"
+
+    # --- 로봇 3 (로봇 1과 같은 타입) ---
+    warehouse_bot_A:
+      type_id: "TYPE_A_TURTLE"
+      machine_id: "machine-sn-003"
+      robot_radius: 0.42
+      footprint: "[]"
