@@ -1,8 +1,56 @@
 #include "replan_monitor/path_validator_node.hpp"
+// [NEW] For makeFootprintFromString and makeFootprintFromRadius
+#include <nav2_costmap_2d/footprint.hpp>
+
 using std::placeholders::_1;
 
 namespace replan_monitor
 {
+
+
+// [NEW] Implementation of static helper (from agent_layer)
+std::vector<geometry_msgs::msg::Point32> PathValidatorNode::toPoint32(
+    const std::vector<geometry_msgs::msg::Point>& points)
+{
+    std::vector<geometry_msgs::msg::Point32> points32;
+    points32.reserve(points.size());
+    for (const auto& p : points) {
+        geometry_msgs::msg::Point32 p32;
+        p32.x = static_cast<float>(p.x);
+        p32.y = static_cast<float>(p.y);
+        p32.z = 0.0f;
+        points32.push_back(p32);
+    }
+    return points32;
+}
+
+// [NEW] Implementation of helper to get footprint from loaded map
+std::vector<geometry_msgs::msg::Point32> 
+PathValidatorNode::getFootprintForAgent(const multi_agent_msgs::msg::MultiAgentInfo & a) const
+{
+    auto it = agent_footprints_.find(a.machine_id);
+    if (it == agent_footprints_.end()) {
+        RCLCPP_WARN_ONCE(get_logger(), 
+          "No footprint data found in YAML for machine_id %u. Cannot check agent collision.",
+          a.machine_id);
+        return {}; // Return empty vector
+    }
+
+    const auto& data = it->second;
+
+    if (data.use_radius) {
+        std::vector<geometry_msgs::msg::Point> points = 
+            nav2_costmap_2d::makeFootprintFromRadius(data.radius);
+        return toPoint32(points);
+    } else {
+        return data.points; // Return pre-loaded Point32 vector
+    }
+}
+
+
+
+
+
 
 PathValidatorNode::PathValidatorNode()
 : Node("path_validator_node")
@@ -128,6 +176,65 @@ PathValidatorNode::PathValidatorNode()
   agent_path_hit_stride_m_    = this->get_parameter("agent_path_hit_stride_m").as_double();
   agent_path_hit_dilate_m_    = this->get_parameter("agent_path_hit_dilate_m").as_double();
   agent_path_hit_max_poses_   = this->get_parameter("agent_path_hit_max_poses").as_int();
+
+
+
+  // [NEW] Add declaration for the robot list
+  this->declare_parameter<std::vector<std::string>>("robot_ids", std::vector<std::string>({}));
+
+  // [NEW] Loop 1: Declare all sub-parameters for each robot_id
+  // (We get robot_ids first to declare, this is a bit redundant but safe)
+  std::vector<std::string> robot_ids_to_declare;
+  try {
+    robot_ids_to_declare = this->get_parameter("robot_ids").as_string_array();
+  } catch (...) {
+    RCLCPP_WARN(get_logger(), "No 'robot_ids' list found in YAML, will not load any agent footprints.");
+  }
+  
+  for (const auto & id_str : robot_ids_to_declare) {
+    // This is a regular node, no 'name_' prefix.
+    this->declare_parameter(id_str + ".machine_id", rclcpp::ParameterValue(0));
+    this->declare_parameter(id_str + ".robot_radius", rclcpp::ParameterValue(0.0));
+    this->declare_parameter(id_str + ".footprint", rclcpp::ParameterValue(std::string("[]")));
+  }
+
+  // [NEW] Loop 2: Get parameters and populate the map
+  agent_footprints_.clear();
+  std::vector<std::string> robot_ids;
+  this->get_parameter("robot_ids", robot_ids); // Get the list again (now that it's declared)
+  
+  for (const auto & id_str : robot_ids) {
+    
+    int machine_id_int = 0;
+    this->get_parameter(id_str + ".machine_id", machine_id_int);
+    if (machine_id_int == 0) continue; 
+
+    uint16_t machine_id = static_cast<uint16_t>(machine_id_int);
+    
+    AgentFootprintData data;
+    std::string footprint_str;
+    this->get_parameter(id_str + ".footprint", footprint_str);
+    this->get_parameter(id_str + ".robot_radius", data.radius);
+
+    std::vector<geometry_msgs::msg::Point> footprint_points;
+    if (nav2_costmap_2d::makeFootprintFromString(footprint_str, footprint_points) &&
+        footprint_points.size() >= 3)
+    {
+      data.points = toPoint32(footprint_points); // Convert Point to Point32
+      data.use_radius = false;
+    } else {
+      data.use_radius = true;
+    }
+
+    agent_footprints_[machine_id] = data;
+    
+    RCLCPP_INFO(get_logger(), 
+      "Loaded footprint for machine_id %u: use_radius=%s, points=%zu",
+      machine_id, (data.use_radius ? "true" : "false"), data.points.size());
+  }
+
+
+
 
   // ===== TF =====
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
@@ -978,7 +1085,7 @@ std::vector<PathValidatorNode::AgentHit> PathValidatorNode::whoCoversPoint(doubl
   }
 
   for (const auto & a : last_agents_->agents) {
-    const auto & fp = a.footprint.polygon.points;
+    const auto fp = getFootprintForAgent(a);
     if (fp.size() < 3) continue;
 
     // 1) 현재 위치 footprint(소확장) 커버?

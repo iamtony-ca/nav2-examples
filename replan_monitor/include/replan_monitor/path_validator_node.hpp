@@ -13,6 +13,9 @@
 #include <chrono>
 #include <algorithm>
 
+// [NEW] Added for std::map
+#include <map>
+
 #include "rclcpp/rclcpp.hpp"
 
 #include "geometry_msgs/msg/pose.hpp"
@@ -109,6 +112,27 @@ private:
     float ttc_first{-1.0f};
     std::string note;
   };
+
+  // [NEW] Map to store footprint data from YAML
+  struct AgentFootprintData
+  {
+    // existing code uses Point32, so we store Point32
+    std::vector<geometry_msgs::msg::Point32> points;
+    double radius{0.0};
+    bool use_radius{true};
+  };
+  // Map from machine_id to its footprint/radius data
+  std::map<uint16_t, AgentFootprintData> agent_footprints_;
+
+  // [NEW] Helper to get footprint for a given agent
+  std::vector<geometry_msgs::msg::Point32> 
+  getFootprintForAgent(const multi_agent_msgs::msg::MultiAgentInfo & a) const;
+
+  // [NEW] Helper to convert nav2_costmap_2d::makeFootprint... results
+  static std::vector<geometry_msgs::msg::Point32> toPoint32(
+      const std::vector<geometry_msgs::msg::Point>& points);
+
+
 
   // wx, wy를 커버하는 agent의 footprint 또는 truncated_path 튜브를 찾아 리턴
   std::vector<AgentHit> whoCoversPoint(double wx, double wy) const;
