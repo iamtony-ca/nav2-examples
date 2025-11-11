@@ -3,13 +3,73 @@
 #include <pluginlib/class_list_macros.hpp>
 #include <tf2/utils.h>
 
+// [NEW] For makeFootprintFromString and makeFootprintFromRadius
+#include <nav2_costmap_2d/footprint.hpp>
+
 #include <geometry_msgs/msg/point32.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <multi_agent_msgs/msg/agent_status.hpp>
 #include <multi_agent_msgs/msg/agent_layer_cell_meta.hpp>
 
+// #include <cmath>
+// #include <algorithm>
+// #include <utility>
+
+
 namespace multi_agent_nav2
 {
+
+// [NEW] Implementation of static helper
+std::vector<geometry_msgs::msg::Point32> AgentLayer::toPoint32(
+    const std::vector<geometry_msgs::msg::Point>& points)
+{
+    std::vector<geometry_msgs::msg::Point32> points32;
+    points32.reserve(points.size());
+    for (const auto& p : points) {
+        geometry_msgs::msg::Point32 p32;
+        p32.x = static_cast<float>(p.x);
+        p32.y = static_cast<float>(p.y);
+        p32.z = 0.0f; // Z is not used in 2D footprint
+        points32.push_back(p32);
+    }
+    return points32;
+}
+
+// [NEW] Implementation of helper to get footprint from loaded map
+geometry_msgs::msg::PolygonStamped 
+AgentLayer::getFootprintForAgent(const multi_agent_msgs::msg::MultiAgentInfo & a)
+{
+    geometry_msgs::msg::PolygonStamped fp_stamped;
+    
+    // Find the data loaded from YAML
+    auto it = agent_footprints_.find(a.machine_id);
+    if (it == agent_footprints_.end()) {
+        // If not found, log a warning once and return empty
+        RCLCPP_WARN_ONCE(logger_, 
+          "No footprint data found in YAML for machine_id %u. Cannot draw agent.",
+          a.machine_id);
+        return fp_stamped; // Return empty
+    }
+
+    const auto& data = it->second;
+
+    if (data.use_radius) {
+        // Generate circular footprint from radius
+        std::vector<geometry_msgs::msg::Point> points = 
+            nav2_costmap_2d::makeFootprintFromRadius(data.radius);
+        fp_stamped.polygon.points = toPoint32(points);
+    } else {
+        // Use pre-loaded polygon points
+        fp_stamped.polygon.points = data.points;
+    }
+
+    // Header is mostly for convention; frame_id should be local (base_link)
+    fp_stamped.header.frame_id = "base_link";
+    fp_stamped.header.stamp = a.current_pose.header.stamp;
+    return fp_stamped;
+}
+
+
 
 AgentLayer::AgentLayer() {}
 
@@ -87,6 +147,64 @@ void AgentLayer::onInitialize()
   node_shared_->get_parameter(name_ + "." + "max_poses", max_poses_);
   node_shared_->get_parameter(name_ + "." + "qos_reliable", qos_reliable_);
 
+
+// [NEW] Add declaration for the robot list
+  declareParameter("robot_ids", rclcpp::ParameterValue(std::vector<std::string>({})));
+
+  // [NEW] Get the list of robot IDs
+  std::vector<std::string> robot_ids;
+  node_shared_->get_parameter(name_ + "." + "robot_ids", robot_ids);
+
+  // [NEW] Loop 1: Declare all sub-parameters for each robot_id
+  for (const auto & id_str : robot_ids) {
+    std::string id_ns = name_ + "." + id_str; // e.g., "agent_layer.robot_001"
+    // declareParameter(id_ns + ".type_id", rclcpp::ParameterValue(std::string(""))); // Not strictly needed
+    declareParameter(id_ns + ".machine_id", rclcpp::ParameterValue(0));
+    declareParameter(id_ns + ".robot_radius", rclcpp::ParameterValue(0.0));
+    declareParameter(id_ns + ".footprint", rclcpp::ParameterValue(std::string("[]")));
+  }
+
+  // [NEW] Loop 2: Get parameters and populate the map
+  agent_footprints_.clear();
+  for (const auto & id_str : robot_ids) {
+    std::string id_ns = name_ + "." + id_str;
+    
+    int machine_id_int = 0;
+    node_shared_->get_parameter(id_ns + ".machine_id", machine_id_int);
+    if (machine_id_int == 0) continue; // Skip invalid ID
+
+    uint16_t machine_id = static_cast<uint16_t>(machine_id_int);
+    
+    AgentFootprintData data;
+    std::string footprint_str;
+    node_shared_->get_parameter(id_ns + ".footprint", footprint_str);
+    node_shared_->get_parameter(id_ns + ".robot_radius", data.radius);
+
+    std::vector<geometry_msgs::msg::Point> footprint_points;
+    // Use nav2_costmap_2d helper to parse footprint string
+    if (nav2_costmap_2d::makeFootprintFromString(footprint_str, footprint_points) &&
+        footprint_points.size() >= 3)
+    {
+      data.points = toPoint32(footprint_points); // Convert Point to Point32
+      data.use_radius = false;
+    } else {
+      data.use_radius = true;
+      // data.radius is already set
+      RCLCPP_INFO(logger_, 
+        "Using radius (%.2f) for machine_id %u (footprint string: '%s')",
+        data.radius, machine_id, footprint_str.c_str());
+    }
+
+    agent_footprints_[machine_id] = data;
+    
+    RCLCPP_INFO(logger_, 
+      "Loaded footprint for machine_id %u: use_radius=%s, points=%zu",
+      machine_id, (data.use_radius ? "true" : "false"), data.points.size());
+  }
+
+
+
+
   RCLCPP_INFO(
       logger_,  // Layer 기본 클래스에서 상속받은 logger_ 사용
       "AgentLayer '%s' initialized: self_machine_id=%u, self_type_id='%s', moving_cost=%u",
@@ -163,7 +281,7 @@ unsigned char AgentLayer::computeCost(const multi_agent_msgs::msg::MultiAgentInf
 double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo & a) const
 {
   double r = dilation_m_;
-  if (a.pos_std_m >= 0.0) r += sigma_k_ * a.pos_std_m;
+  // if (a.pos_std_m >= 0.0) r += sigma_k_ * a.pos_std_m;   // need to edit
   return r;
 }
 
@@ -360,12 +478,23 @@ bool AgentLayer::pointInPolygon(const std::vector<geometry_msgs::msg::Point> & p
   return inside;
 }
 
-// [CHANGED] 이동 중이면 forward_smear_m_ 사용, 아니면 0.0
+
+
+/* ****************************************
+ * [AFTER] agent_layer.cpp - rasterizeAgentPath()
+ * ****************************************
+ */
 void AgentLayer::rasterizeAgentPath(
   const multi_agent_msgs::msg::MultiAgentInfo & a,
   nav2_costmap_2d::Costmap2D * grid,
   std::vector<std::pair<unsigned int,unsigned int>> & meta_hits)
 {
+  // [NEW] Get footprint from YAML map using machine_id
+  geometry_msgs::msg::PolygonStamped fp = getFootprintForAgent(a);
+  if (fp.polygon.points.empty()) {
+    return; // No footprint found (logged in helper), skip rasterizing this agent
+  }
+
   // 코스트 & 등방성 팽창
   const unsigned char cost_now = computeCost(a);
   const double iso_extra = computeDilation(a);
@@ -374,7 +503,7 @@ void AgentLayer::rasterizeAgentPath(
   const double forward_len = isMovingPhase(a.status.phase) ? forward_smear_m_ : 0.0;
 
   // 1) 에이전트 현재 footprint 찍기 (전방 스미어 조건부 적용)
-  fillFootprintAt(a.footprint, a.current_pose.pose, iso_extra, forward_len,
+  fillFootprintAt(fp, a.current_pose.pose, iso_extra, forward_len, // [CHANGED]
                   grid, cost_now, &meta_hits);
 
   // 2) (선택) truncated_path의 각 pose에서도 footprint를 얇게/간격 띄워서 찍고 싶다면
@@ -384,9 +513,39 @@ void AgentLayer::rasterizeAgentPath(
   for (int i = 0; i < limit; ++i) {
     const auto & ps = a.truncated_path.poses[i].pose;
     // 경로상의 footprint는 등방성만 소량(예: iso_extra*0.5), 전방 스미어는 0.0로 권장
-    fillFootprintAt(a.footprint, ps, iso_extra * 0.5, 0.0, grid, cost_now, &meta_hits);
+    fillFootprintAt(fp, ps, iso_extra * 0.5, 0.0, grid, cost_now, &meta_hits); // [CHANGED]
   }
 }
+
+
+
+// // [CHANGED] 이동 중이면 forward_smear_m_ 사용, 아니면 0.0
+// void AgentLayer::rasterizeAgentPath(
+//   const multi_agent_msgs::msg::MultiAgentInfo & a,
+//   nav2_costmap_2d::Costmap2D * grid,
+//   std::vector<std::pair<unsigned int,unsigned int>> & meta_hits)
+// {
+//   // 코스트 & 등방성 팽창
+//   const unsigned char cost_now = computeCost(a);
+//   const double iso_extra = computeDilation(a);
+
+//   // 이동 여부에 따라 전방 스미어 적용
+//   const double forward_len = isMovingPhase(a.status.phase) ? forward_smear_m_ : 0.0;
+
+//   // 1) 에이전트 현재 footprint 찍기 (전방 스미어 조건부 적용)
+//   fillFootprintAt(a.footprint, a.current_pose.pose, iso_extra, forward_len,
+//                   grid, cost_now, &meta_hits);
+
+//   // 2) (선택) truncated_path의 각 pose에서도 footprint를 얇게/간격 띄워서 찍고 싶다면
+//   //    아래 루프를 활성화하세요. 지금은 과도한 차단을 피하기 위해 "현재 위치만" 반영.
+//   //
+//   const int limit = std::min<int>(a.truncated_path.poses.size(), max_poses_);
+//   for (int i = 0; i < limit; ++i) {
+//     const auto & ps = a.truncated_path.poses[i].pose;
+//     // 경로상의 footprint는 등방성만 소량(예: iso_extra*0.5), 전방 스미어는 0.0로 권장
+//     fillFootprintAt(a.footprint, ps, iso_extra * 0.5, 0.0, grid, cost_now, &meta_hits);
+//   }
+// }
 
 void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
                              int /*min_i*/, int /*min_j*/, int /*max_i*/, int /*max_j*/)

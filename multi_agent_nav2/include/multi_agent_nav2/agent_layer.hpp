@@ -6,6 +6,7 @@
 #include <utility>
 #include <algorithm>
 #include <cmath>
+#include <map>  // [NEW]
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
@@ -84,6 +85,25 @@ private:
   // bounds cache for this cycle
   double touch_min_x_{0.0}, touch_min_y_{0.0}, touch_max_x_{0.0}, touch_max_y_{0.0};
   bool   touched_{false};
+
+// [NEW] Map to store footprint data from YAML
+  struct AgentFootprintData
+  {
+    // We use Point32 directly to match dilateFootprintDirectional helper
+    std::vector<geometry_msgs::msg::Point32> points;
+    double radius{0.0};
+    bool use_radius{true};
+  };
+  // Map from machine_id to its footprint/radius data
+  std::map<uint16_t, AgentFootprintData> agent_footprints_;
+
+  // [NEW] Helper to get footprint for a given agent
+  geometry_msgs::msg::PolygonStamped 
+  getFootprintForAgent(const multi_agent_msgs::msg::MultiAgentInfo & a);
+
+  // [NEW] Helper to convert nav2_costmap_2d::makeFootprint... results
+  static std::vector<geometry_msgs::msg::Point32> toPoint32(
+      const std::vector<geometry_msgs::msg::Point>& points);
 
   // helpers
   void infosCallback(const multi_agent_msgs::msg::MultiAgentInfoArray::SharedPtr msg);
