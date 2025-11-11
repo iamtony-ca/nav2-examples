@@ -157,11 +157,11 @@ void AgentLayer::onInitialize()
 
   // [NEW] Loop 1: Declare all sub-parameters for each robot_id
   for (const auto & id_str : robot_ids) {
-    std::string id_ns = name_ + "." + id_str; // e.g., "agent_layer.robot_001"
+    // std::string id_ns = name_ + "." + id_str; // e.g., "agent_layer.robot_001"
     // declareParameter(id_ns + ".type_id", rclcpp::ParameterValue(std::string(""))); // Not strictly needed
-    declareParameter(id_ns + ".machine_id", rclcpp::ParameterValue(0));
-    declareParameter(id_ns + ".robot_radius", rclcpp::ParameterValue(0.0));
-    declareParameter(id_ns + ".footprint", rclcpp::ParameterValue(std::string("[]")));
+    declareParameter(id_str + ".machine_id", rclcpp::ParameterValue(0));
+    declareParameter(id_str + ".robot_radius", rclcpp::ParameterValue(0.0));
+    declareParameter(id_str + ".footprint", rclcpp::ParameterValue(std::string("[]")));
   }
 
   // [NEW] Loop 2: Get parameters and populate the map
