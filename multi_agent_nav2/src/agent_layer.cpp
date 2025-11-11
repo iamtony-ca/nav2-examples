@@ -87,6 +87,16 @@ void AgentLayer::onInitialize()
   node_shared_->get_parameter(name_ + "." + "max_poses", max_poses_);
   node_shared_->get_parameter(name_ + "." + "qos_reliable", qos_reliable_);
 
+  RCLCPP_INFO(
+      logger_,  // Layer 기본 클래스에서 상속받은 logger_ 사용
+      "AgentLayer '%s' initialized: self_machine_id=%u, self_type_id='%s', moving_cost=%u",
+      name_.c_str(),
+      self_machine_id_,
+      self_type_id_.c_str(),
+      static_cast<unsigned int>(moving_cost_)
+    );
+
+
   current_ = true;
   matchSize();
 
