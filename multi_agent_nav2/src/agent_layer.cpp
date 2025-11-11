@@ -19,67 +19,73 @@ void AgentLayer::onInitialize()
   if (!node_shared_) {
     throw std::runtime_error("AgentLayer: failed to lock lifecycle node");
   }
+// --- [수정] ---
+  // Layer의 내장 헬퍼를 사용하거나, name_을 수동으로 붙입니다.
+  // Layer의 내장 헬퍼(declareParameter)를 사용하는 것을 권장합니다.
+  // 이 함수는 내부적으로 name_을 처리해 줍니다.
+  
+  // declareParameter는 base class (Layer)의 헬퍼 함수를 사용합니다.
+  // 이 함수는 내부적으로 name_을 붙여줍니다. (node_shared_-> 불필요)
+  declareParameter("enabled", rclcpp::ParameterValue(true));
+  declareParameter("topic", rclcpp::ParameterValue(std::string("/multi_agent_infos")));
+  declareParameter("self_machine_id", rclcpp::ParameterValue(0));
+  declareParameter("self_type_id", rclcpp::ParameterValue(std::string("")));
+  declareParameter("use_path_header_frame", rclcpp::ParameterValue(true));
+  declareParameter("roi_range_m", rclcpp::ParameterValue(12.0));
+  declareParameter("time_decay_sec", rclcpp::ParameterValue(1.0));
+  declareParameter("lethal_cost", rclcpp::ParameterValue(254));
+  declareParameter("moving_cost", rclcpp::ParameterValue(254)); // 180
+  declareParameter("waiting_cost", rclcpp::ParameterValue(254));
+  declareParameter("manual_cost_bias", rclcpp::ParameterValue(30));
+  declareParameter("dilation_m", rclcpp::ParameterValue(0.05));
+  declareParameter("forward_smear_m", rclcpp::ParameterValue(0.005));
+  declareParameter("sigma_k", rclcpp::ParameterValue(2.0));
+  declareParameter("publish_meta", rclcpp::ParameterValue(true));
+  declareParameter("meta_stride", rclcpp::ParameterValue(3));
+  declareParameter("freshness_timeout_ms", rclcpp::ParameterValue(800));
+  declareParameter("max_poses", rclcpp::ParameterValue(10000));
+  declareParameter("qos_reliable", rclcpp::ParameterValue(true));
 
-  // Declare parameters (defaults)
-  node_shared_->declare_parameter("enabled", rclcpp::ParameterValue(true));
-  node_shared_->declare_parameter("topic", rclcpp::ParameterValue(std::string("/multi_agent_infos")));
-  node_shared_->declare_parameter("self_machine_id", rclcpp::ParameterValue(0));
-  node_shared_->declare_parameter("self_type_id", rclcpp::ParameterValue(std::string("")));
-  node_shared_->declare_parameter("use_path_header_frame", rclcpp::ParameterValue(true));
-  node_shared_->declare_parameter("roi_range_m", rclcpp::ParameterValue(12.0));
-  node_shared_->declare_parameter("time_decay_sec", rclcpp::ParameterValue(1.0));
-  node_shared_->declare_parameter("lethal_cost", rclcpp::ParameterValue(254));
-  node_shared_->declare_parameter("moving_cost", rclcpp::ParameterValue(254)); // 180
-  node_shared_->declare_parameter("waiting_cost", rclcpp::ParameterValue(254));
-  node_shared_->declare_parameter("manual_cost_bias", rclcpp::ParameterValue(30));
-
-  // [CHANGED] 전방 스미어와 등방성 팽창을 분리
-  node_shared_->declare_parameter("dilation_m", rclcpp::ParameterValue(0.05));
-  node_shared_->declare_parameter("forward_smear_m", rclcpp::ParameterValue(0.005));
-  node_shared_->declare_parameter("sigma_k", rclcpp::ParameterValue(2.0));
-
-  node_shared_->declare_parameter("publish_meta", rclcpp::ParameterValue(true));
-  node_shared_->declare_parameter("meta_stride", rclcpp::ParameterValue(3));
-  node_shared_->declare_parameter("freshness_timeout_ms", rclcpp::ParameterValue(800));
-  node_shared_->declare_parameter("max_poses", rclcpp::ParameterValue(10000));
-  node_shared_->declare_parameter("qos_reliable", rclcpp::ParameterValue(true));
 
   // Get parameters
-  node_shared_->get_parameter("enabled", enabled_);
-  node_shared_->get_parameter("topic", topic_);
+  // get_parameter는 헬퍼가 없으므로, node_shared_-> 와 'name_' 을 명시적으로 사용합니다.
+  node_shared_->get_parameter(name_ + "." + "enabled", enabled_);
+  node_shared_->get_parameter(name_ + "." + "topic", topic_);
   {
     int tmp = 0;
-    node_shared_->get_parameter("self_machine_id", tmp);
+    node_shared_->get_parameter(name_ + "." + "self_machine_id", tmp);
     self_machine_id_ = static_cast<uint16_t>(tmp);
   }
-  node_shared_->get_parameter("self_type_id", self_type_id_);
-  node_shared_->get_parameter("use_path_header_frame", use_path_header_frame_);
-  node_shared_->get_parameter("roi_range_m", roi_range_m_);
-  node_shared_->get_parameter("time_decay_sec", time_decay_sec_);
+  node_shared_->get_parameter(name_ + "." + "self_type_id", self_type_id_);
+  node_shared_->get_parameter(name_ + "." + "use_path_header_frame", use_path_header_frame_);
+  node_shared_->get_parameter(name_ + "." + "roi_range_m", roi_range_m_);
+  node_shared_->get_parameter(name_ + "." + "time_decay_sec", time_decay_sec_);
   {
-    int tmp = 254; node_shared_->get_parameter("lethal_cost", tmp);
+    int tmp = 254; 
+    node_shared_->get_parameter(name_ + "." + "lethal_cost", tmp);
     lethal_cost_ = static_cast<unsigned char>(std::clamp(tmp, 0, 254));
   }
   {
-    int tmp = 180; node_shared_->get_parameter("moving_cost", tmp);
+    int tmp = 180; 
+    node_shared_->get_parameter(name_ + "." + "moving_cost", tmp);
     moving_cost_ = static_cast<unsigned char>(std::clamp(tmp, 0, 254));
   }
   {
-    int tmp = 200; node_shared_->get_parameter("waiting_cost", tmp);
+    int tmp = 200; 
+    node_shared_->get_parameter(name_ + "." + "waiting_cost", tmp);
     waiting_cost_ = static_cast<unsigned char>(std::clamp(tmp, 0, 254));
   }
-  node_shared_->get_parameter("manual_cost_bias", manual_cost_bias_);
+  node_shared_->get_parameter(name_ + "." + "manual_cost_bias", manual_cost_bias_);
 
-  // [CHANGED] 등방성만 dilation_m, 전방 스미어는 별도
-  node_shared_->get_parameter("dilation_m", dilation_m_);
-  node_shared_->get_parameter("forward_smear_m", forward_smear_m_);
-  node_shared_->get_parameter("sigma_k", sigma_k_);
+  node_shared_->get_parameter(name_ + "." + "dilation_m", dilation_m_);
+  node_shared_->get_parameter(name_ + "." + "forward_smear_m", forward_smear_m_);
+  node_shared_->get_parameter(name_ + "." + "sigma_k", sigma_k_);
 
-  node_shared_->get_parameter("publish_meta", publish_meta_);
-  node_shared_->get_parameter("meta_stride", meta_stride_);
-  node_shared_->get_parameter("freshness_timeout_ms", freshness_timeout_ms_);
-  node_shared_->get_parameter("max_poses", max_poses_);
-  node_shared_->get_parameter("qos_reliable", qos_reliable_);
+  node_shared_->get_parameter(name_ + "." + "publish_meta", publish_meta_);
+  node_shared_->get_parameter(name_ + "." + "meta_stride", meta_stride_);
+  node_shared_->get_parameter(name_ + "." + "freshness_timeout_ms", freshness_timeout_ms_);
+  node_shared_->get_parameter(name_ + "." + "max_poses", max_poses_);
+  node_shared_->get_parameter(name_ + "." + "qos_reliable", qos_reliable_);
 
   current_ = true;
   matchSize();

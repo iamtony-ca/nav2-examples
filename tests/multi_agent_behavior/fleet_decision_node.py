@@ -330,51 +330,7 @@ class FleetDecisionNode(Node):
         a = agents.get(machine_id, None)
         return bool(a and a.reroute)
 
-    # def build_candidates(self, msg: PathAgentCollisionInfo) -> List[Candidate]:
-    #     if self.last_agents is None or len(msg.x) == 0:
-    #         return []
 
-    #     agents_by_id = self._agents_by_id()
-    #     me_pose: Optional[Pose] = None
-    #     if self.my_id in agents_by_id:
-    #         me_pose = agents_by_id[self.my_id].current_pose.pose
-
-    #     out: List[Candidate] = []
-    #     for i in range(len(msg.x)):
-    #         px, py = msg.x[i], msg.y[i]
-    #         ttc = msg.ttc_first[i] if i < len(msg.ttc_first) else -1.0
-    #         note = msg.note[i] if i < len(msg.note) else ""
-
-    #         agent, rel_heading_deg, v_closing = self.match_agent_at_point(px, py, agents_by_id)
-    #         if agent is None or agent.machine_id == self.my_id:
-    #             continue
-
-    #         T_eff = self.combine_ttc(ttc, px, py, agent)
-    #         d_me = dist2(me_pose.position.x, me_pose.position.y, px, py) if me_pose else 10.0
-
-    #         sev = self.a1 * (1.0 / max(T_eff, self.T_min)) + \
-    #               self.a2 * (1.0 / max(d_me, self.d_min)) + \
-    #               self.a3 * heading_bonus(rel_heading_deg) + \
-    #               self.a4 * v_closing
-
-    #         row_me = right_of_way_score(agents_by_id.get(self.my_id, agent), self.my_id)
-    #         row_ot = right_of_way_score(agent, self.my_id)
-    #         yprio = self.b1 * mode_bonus(agent.mode) + \
-    #                 self.b2 * (row_ot - row_me) + \
-    #                 self.b3 * (1.0 if agent.reroute else 0.0) + \
-    #                 self.b4 * (1.0 if agent.status.phase == AgentStatus.STATUS_PATH_SEARCHING else 0.0) + \
-    #                 self.b5 * (1.0 if agent.occupancy else 0.0) + \
-    #                 self.b6 * id_bonus(self.my_id, agent.machine_id)
-
-    #         score = sev * (1.0 + self.kappa * yprio)
-
-    #         out.append(Candidate(
-    #             machine_id=int(agent.machine_id),
-    #             type_id=agent.type_id,
-    #             px=px, py=py,
-    #             T_eff=T_eff, severity=sev, yprio=yprio, score=score, note=note
-    #         ))
-    #     return out
     def build_candidates(self, msg: PathAgentCollisionInfo) -> List[Candidate]:
         if self.last_agents is None or len(msg.x) == 0:
             return []

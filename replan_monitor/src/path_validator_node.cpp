@@ -593,39 +593,6 @@ void PathValidatorNode::validateWithPoints(const std::vector<geometry_msgs::msg:
 
     const bool blocked_cell = isBlockedCellKernel(mx, my);
 
-    // // ★ 우선순위: 에이전트 히트 여부를 먼저 확인 (agent mask 유무와 무관)
-    // if (blocked_cell) {
-    //   double wx, wy;
-    //   {
-    //     std::lock_guard<std::mutex> lock(costmap_mutex_);
-    //     costmap_->mapToWorld(mx, my, wx, wy);
-    //   }
-    //   auto hits = whoCoversPoint(wx, wy);
-    //   if (!hits.empty()) {
-    //     publishAgentCollisionList(hits);
-    //     last_agent_block_time_ = this->now();
-    //     return; // 에이전트 충돌로 확정 → 일반 장애물 로직으로 가지 않음
-    //   }
-    // }
-
-    // // (필요 시) agent mask 보조 판정
-    // bool blocked = blocked_cell;
-    // if (blocked && compare_agent_mask_) {
-    //   const bool agent_mark = agentCellBlockedNear(mx, my,
-    //                         static_cast<unsigned char>(agent_cost_threshold_),
-    //                         agent_mask_manhattan_buffer_);
-    //   if (agent_mark) {
-    //     double wx, wy;
-    //     { std::lock_guard<std::mutex> lock(costmap_mutex_); costmap_->mapToWorld(mx, my, wx, wy); }
-    //     auto hits = whoCoversPoint(wx, wy);
-    //     if (!hits.empty()) {
-    //       publishAgentCollisionList(hits);
-    //       last_agent_block_time_ = this->now();
-    //       return;
-    //     }
-    //   }
-    // }
-
     if (blocked_cell) {
       // --- costmap 포인터 복사 ---
       std::shared_ptr<nav2_costmap_2d::Costmap2D> cm;
@@ -906,38 +873,6 @@ void PathValidatorNode::validateWithFootprint(const std::vector<geometry_msgs::m
       consecutive = 0;
     }
 
-    // if (blocked_here) {
-    //   // ★ 우선순위: 에이전트 히트 먼저
-    //   double wx, wy; { std::lock_guard<std::mutex> lock(costmap_mutex_); costmap->mapToWorld(hit_mx, hit_my, wx, wy); }
-    //   auto hits = whoCoversPoint(wx, wy);
-    //   if (!hits.empty()) {
-    //     publishAgentCollisionList(hits);
-    //     last_agent_block_time_ = this->now();
-    //     return;
-    //   }
-
-    //   // (보조) agent mask가 있으면 한 번 더 확인
-    //   if (compare_agent_mask_) {
-    //     const bool agent_mark = agentCellBlockedNear(hit_mx, hit_my, agent_thr,
-    //                                                  agent_mask_manhattan_buffer_);
-    //     if (agent_mark) {
-    //       auto hits2 = whoCoversPoint(wx, wy);
-    //       if (!hits2.empty()) {
-    //         publishAgentCollisionList(hits2);
-    //         last_agent_block_time_ = this->now();
-    //         return;
-    //       }
-    //     }
-    //   }
-
-    //   consecutive++;
-    //   if (consecutive >= consecutive_threshold_) {
-    //     triggerReplan("blocked (footprint) streak threshold reached");
-    //     return;
-    //   }
-    // } else {
-    //   consecutive = 0;
-    // }
   }
 }
 
