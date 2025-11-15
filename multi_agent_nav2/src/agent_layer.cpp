@@ -290,6 +290,10 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
 {
   if (!enabled_) return;
 
+// [NEW] Cache robot pose for updateCosts
+  cached_robot_x_ = robot_x;
+  cached_robot_y_ = robot_y;
+
   touched_ = false;
   touch_min_x_ =  1e9; touch_min_y_ =  1e9;
   touch_max_x_ = -1e9; touch_max_y_ = -1e9;
@@ -562,8 +566,20 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
   std::vector<std::pair<unsigned int,unsigned int>> meta_hits;
   meta_hits.reserve(256);
 
+
+// [NEW] Get the cached robot position from updateBounds
+  const double robot_x = cached_robot_x_;
+  const double robot_y = cached_robot_y_;
+
+
   for (const auto & a : infos) {
     if (isSelf(a)) continue;
+
+// [NEW] CRITICAL FIX: Apply the same ROI check that was in updateBounds
+    const double dx = a.current_pose.pose.position.x - robot_x;
+    const double dy = a.current_pose.pose.position.y - robot_y;
+    if (std::hypot(dx, dy) > roi_range_m_) continue;
+
     rasterizeAgentPath(a, &master_grid, meta_hits);
   }
 

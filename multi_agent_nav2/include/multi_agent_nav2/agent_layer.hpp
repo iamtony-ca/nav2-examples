@@ -86,6 +86,10 @@ private:
   double touch_min_x_{0.0}, touch_min_y_{0.0}, touch_max_x_{0.0}, touch_max_y_{0.0};
   bool   touched_{false};
 
+// [NEW] Cached robot pose for updateCosts
+  double cached_robot_x_{0.0};
+  double cached_robot_y_{0.0};
+
 // [NEW] Map to store footprint data from YAML
   struct AgentFootprintData
   {
