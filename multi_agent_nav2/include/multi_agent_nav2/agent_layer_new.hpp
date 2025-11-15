@@ -12,6 +12,7 @@
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 
 #include <nav2_costmap_2d/layer.hpp>
+#include <nav2_costmap_2d/layered_costmap.hpp>  // add
 #include <nav2_costmap_2d/costmap_2d.hpp>
 
 #include <geometry_msgs/msg/point.hpp>
@@ -86,6 +87,8 @@ private:
   int         freshness_timeout_ms_{800};
   int         max_poses_{40};
   bool        qos_reliable_{true};
+// [NEW] To support rolling window
+  bool        rolling_window_{false};
 
   // bounds cache for this cycle
   double touch_min_x_{0.0}, touch_min_y_{0.0}, touch_max_x_{0.0}, touch_max_y_{0.0};

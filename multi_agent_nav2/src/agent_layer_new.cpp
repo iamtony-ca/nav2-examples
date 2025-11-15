@@ -280,6 +280,9 @@ void AgentLayer::onInitialize()
     );
 
 
+// [NEW] Check if the costmap is rolling (like obstacle_layer)
+  rolling_window_ = layered_costmap_->isRolling();
+
   current_ = true;
   matchSize();
 
@@ -353,6 +356,12 @@ double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo &
 void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw*/,
                               double* min_x, double* min_y, double* max_x, double* max_y)
 {
+// [NEW] Add rolling window support (must be called before any other processing)
+  if (rolling_window_) {
+    updateOrigin(robot_x - getSizeInMetersX() / 2, robot_y - getSizeInMetersY() / 2);
+  }
+
+
   if (!enabled_) return;
 
 // [NEW] Cache robot pose for updateCosts

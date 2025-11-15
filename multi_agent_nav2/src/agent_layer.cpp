@@ -522,35 +522,6 @@ void AgentLayer::rasterizeAgentPath(
 }
 
 
-
-// // [CHANGED] 이동 중이면 forward_smear_m_ 사용, 아니면 0.0
-// void AgentLayer::rasterizeAgentPath(
-//   const multi_agent_msgs::msg::MultiAgentInfo & a,
-//   nav2_costmap_2d::Costmap2D * grid,
-//   std::vector<std::pair<unsigned int,unsigned int>> & meta_hits)
-// {
-//   // 코스트 & 등방성 팽창
-//   const unsigned char cost_now = computeCost(a);
-//   const double iso_extra = computeDilation(a);
-
-//   // 이동 여부에 따라 전방 스미어 적용
-//   const double forward_len = isMovingPhase(a.status.phase) ? forward_smear_m_ : 0.0;
-
-//   // 1) 에이전트 현재 footprint 찍기 (전방 스미어 조건부 적용)
-//   fillFootprintAt(a.footprint, a.current_pose.pose, iso_extra, forward_len,
-//                   grid, cost_now, &meta_hits);
-
-//   // 2) (선택) truncated_path의 각 pose에서도 footprint를 얇게/간격 띄워서 찍고 싶다면
-//   //    아래 루프를 활성화하세요. 지금은 과도한 차단을 피하기 위해 "현재 위치만" 반영.
-//   //
-//   const int limit = std::min<int>(a.truncated_path.poses.size(), max_poses_);
-//   for (int i = 0; i < limit; ++i) {
-//     const auto & ps = a.truncated_path.poses[i].pose;
-//     // 경로상의 footprint는 등방성만 소량(예: iso_extra*0.5), 전방 스미어는 0.0로 권장
-//     fillFootprintAt(a.footprint, ps, iso_extra * 0.5, 0.0, grid, cost_now, &meta_hits);
-//   }
-// }
-
 void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
                              int /*min_i*/, int /*min_j*/, int /*max_i*/, int /*max_j*/)
 {
