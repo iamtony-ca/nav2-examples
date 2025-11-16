@@ -361,55 +361,61 @@ double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo &
   return r;
 }
 
+
 void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw*/,
                               double* min_x, double* min_y, double* max_x, double* max_y)
 {
-// [NEW] Add rolling window support (must be called before any other processing)
-  // if (rolling_window_) {
-  //   updateOrigin(robot_x - getSizeInMetersX() / 2, robot_y - getSizeInMetersY() / 2);
-  // }
+  // 1. [FIXED] rolling_window_ 관련 코드를 모두 제거합니다.
+  //    LayeredCostmap이 이 함수 *전에* updateOrigin()을 호출해줍니다.
 
+  if (!enabled_) {
+    return;
+  }
 
-  if (!enabled_) return;
-
-// [NEW] Cache robot pose for updateCosts
+  // 2. updateCosts에서 사용할 로봇의 현재 위치를 캐시합니다. (정상)
   cached_robot_x_ = robot_x;
   cached_robot_y_ = robot_y;
 
+  // 3. 바운드 캐시를 초기화합니다. (정상)
   touched_ = false;
   touch_min_x_ =  1e9; touch_min_y_ =  1e9;
   touch_max_x_ = -1e9; touch_max_y_ = -1e9;
 
+  // 4. 최신 에이전트 정보를 가져옵니다. (정상)
   std::vector<multi_agent_msgs::msg::MultiAgentInfo> infos;
   {
     std::lock_guard<std::mutex> lk(data_mtx_);
-    if (!last_infos_ || stale(last_stamp_)) return;
+    if (!last_infos_ || stale(last_stamp_)) {
+      return;
+    }
     infos.assign(last_infos_->agents.begin(), last_infos_->agents.end());
   }
 
-// [CHANGED] costmap_frame은 "map" 또는 "odom"이 될 수 있습니다.
+  // 5. 현재 코스트맵의 기준 프레임("map" 또는 "odom")을 가져옵니다. (정상)
   const std::string & costmap_frame = layered_costmap_->getGlobalFrameID();
 
-  for (const auto & a_map : infos) { // "map" 프레임 기준 원본 데이터
-    if (isSelf(a_map)) continue;
+  // 6. 모든 에이전트를 순회하며 TF 변환 및 바운드 계산을 수행합니다.
+  for (const auto & a_map : infos) { // a_map은 "map" 프레임 기준 원본 데이터
+    if (isSelf(a_map)) {
+      continue;
+    }
 
-    // [NEW] Transform agent info from "map" to costmap frame (e.g., "odom")
+    // 6a. [FIXED] 에이전트 정보를 "map" -> "costmap_frame"("odom" 등)으로 변환
     multi_agent_msgs::msg::MultiAgentInfo a; // 변환된 데이터가 저장될 변수
     if (!transformAgentInfo(a_map, a, costmap_frame)) {
       continue; // TF 변환 실패 시 이 에이전트 무시
     }
 
-    // [CHANGED] ROI 검사를 변환된 'a'의 좌표로 수행
-    const double dx = a.current_pose.pose.position.x - robot_x;
-    const double dy = a.current_pose.pose.position.y - robot_y;
-    if (std::hypot(dx, dy) > roi_range_m_) continue;
+    // 6b. [FIXED] ROI 검사를 *변환된* 좌표 'a' 기준으로 수행
+    const double dx = a.current_pose.pose.position.x - robot_x;
+    const double dy = a.current_pose.pose.position.y - robot_y;
+    if (std::hypot(dx, dy) > roi_range_m_) {
+      continue;
+    }
 
-    // [REMOVED] TF 변환을 거쳤으므로 이 프레임 체크는 더 이상 유효하지 않거나 불필요합니다.
-    // if (use_path_header_frame_ && a.truncated_path.header.frame_id != global_frame) {
-    //   continue;
-    // }
+    // 6c. [REMOVED] use_path_header_frame_ 체크 제거 (TF 변환이 이미 처리함)
 
-    // 현재 위치 + 트렁케이트 경로를 모두 bounds에 반영
+    // 6d. [FIXED] *변환된* 'a'의 좌표를 사용하여 바운드 업데이트
     {
       const auto & p = a.current_pose.pose.position;
       touch_min_x_ = std::min(touch_min_x_, p.x);
@@ -419,9 +425,11 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
       touched_ = true;
     }
 
+    // 6e. [FIXED] *변환된* 'a.truncated_path'를 사용하여 바운드 업데이트
     const int limit = std::min<int>(a.truncated_path.poses.size(), max_poses_);
     for (int i = 0; i < limit; ++i) {
-      const auto & p = a.truncated_path.poses[i].pose.position;
+      // transformAgentInfo가 이미 'a.truncated_path'의 모든 포즈를 변환했음
+      const auto & p = a.truncated_path.poses[i].pose.position; 
       touch_min_x_ = std::min(touch_min_x_, p.x);
       touch_min_y_ = std::min(touch_min_y_, p.y);
       touch_max_x_ = std::max(touch_max_x_, p.x);
@@ -430,6 +438,7 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
     }
   }
 
+  // 7. 최종 바운드를 부모 코스트맵에 전달합니다. (정상)
   if (touched_) {
     *min_x = std::min(*min_x, touch_min_x_);
     *min_y = std::min(*min_y, touch_min_y_);
@@ -437,6 +446,12 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
     *max_y = std::max(*max_y, touch_max_y_);
   }
 }
+
+
+
+
+
+
 
 // === 내부 헬퍼: 로컬 프레임에서 등방성 + 전방(+x) 스미어 적용 ===
 // [NEW]
@@ -611,34 +626,6 @@ void AgentLayer::rasterizeAgentPath(
 }
 
 
-
-// // [CHANGED] 이동 중이면 forward_smear_m_ 사용, 아니면 0.0
-// void AgentLayer::rasterizeAgentPath(
-//   const multi_agent_msgs::msg::MultiAgentInfo & a,
-//   nav2_costmap_2d::Costmap2D * grid,
-//   std::vector<std::pair<unsigned int,unsigned int>> & meta_hits)
-// {
-//   // 코스트 & 등방성 팽창
-//   const unsigned char cost_now = computeCost(a);
-//   const double iso_extra = computeDilation(a);
-
-//   // 이동 여부에 따라 전방 스미어 적용
-//   const double forward_len = isMovingPhase(a.status.phase) ? forward_smear_m_ : 0.0;
-
-//   // 1) 에이전트 현재 footprint 찍기 (전방 스미어 조건부 적용)
-//   fillFootprintAt(a.footprint, a.current_pose.pose, iso_extra, forward_len,
-//                   grid, cost_now, &meta_hits);
-
-//   // 2) (선택) truncated_path의 각 pose에서도 footprint를 얇게/간격 띄워서 찍고 싶다면
-//   //    아래 루프를 활성화하세요. 지금은 과도한 차단을 피하기 위해 "현재 위치만" 반영.
-//   //
-//   const int limit = std::min<int>(a.truncated_path.poses.size(), max_poses_);
-//   for (int i = 0; i < limit; ++i) {
-//     const auto & ps = a.truncated_path.poses[i].pose;
-//     // 경로상의 footprint는 등방성만 소량(예: iso_extra*0.5), 전방 스미어는 0.0로 권장
-//     fillFootprintAt(a.footprint, ps, iso_extra * 0.5, 0.0, grid, cost_now, &meta_hits);
-//   }
-// }
 
 void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
                              int /*min_i*/, int /*min_j*/, int /*max_i*/, int /*max_j*/)
