@@ -11,6 +11,10 @@
 #include <multi_agent_msgs/msg/agent_status.hpp>
 #include <multi_agent_msgs/msg/agent_layer_cell_meta.hpp>
 
+
+// [NEW] Include TF2 buffer (although tf_ is inherited, explicit include is safer)
+#include "tf2_ros/buffer.h"
+
 // #include <cmath>
 // #include <algorithm>
 // #include <utility>
@@ -69,6 +73,75 @@ AgentLayer::getFootprintForAgent(const multi_agent_msgs::msg::MultiAgentInfo & a
     return fp_stamped;
 }
 
+
+// [NEW] Implementation for the TF helper function
+bool AgentLayer::transformAgentInfo(
+    const multi_agent_msgs::msg::MultiAgentInfo & agent_in_map,
+    multi_agent_msgs::msg::MultiAgentInfo & agent_in_costmap_frame,
+    const std::string & costmap_frame) const
+{
+  // We assume agent_in_map data is in the frame_id of last_infos_->header
+  const std::string& map_frame = last_infos_->header.frame_id;
+  const rclcpp::Time& map_stamp = last_infos_->header.stamp; // Use the stamp from the array
+
+  if (map_frame.empty()) {
+    RCLCPP_WARN_ONCE(logger_, "MultiAgentInfoArray message has empty frame_id. Cannot transform.");
+    return false;
+  }
+
+  // If frames are already the same, just copy
+  if (map_frame == costmap_frame) {
+    agent_in_costmap_frame = agent_in_map;
+    return true;
+  }
+
+  // Copy non-transformable data (status, id, etc.)
+  agent_in_costmap_frame = agent_in_map; 
+  agent_in_costmap_frame.truncated_path.poses.clear(); // Clear poses to re-fill
+
+  try {
+    // 1. Transform current_pose
+    geometry_msgs::msg::PoseStamped pose_to_transform = agent_in_map.current_pose;
+    pose_to_transform.header.frame_id = map_frame; // Ensure correct source frame
+    pose_to_transform.header.stamp = map_stamp;     // Use array stamp for TF lookup
+
+    geometry_msgs::msg::PoseStamped transformed_pose;
+    // tf_ is the inherited buffer from nav2_costmap_2d::Layer
+    tf_->transform(pose_to_transform, transformed_pose, costmap_frame);
+    agent_in_costmap_frame.current_pose = transformed_pose;
+
+    // 2. Transform truncated_path
+    for (const auto& pose_stamped_in_map : agent_in_map.truncated_path.poses) {
+      
+      // [FIX] Create a NEW PoseStamped for each path point
+      geometry_msgs::msg::PoseStamped path_pose_to_transform;
+      // [FIX] Explicitly set the header for *this* point
+      path_pose_to_transform.header.frame_id = map_frame;
+      path_pose_to_transform.header.stamp = map_stamp;
+      // [FIX] Copy the pose from the path
+      path_pose_to_transform.pose = pose_stamped_in_map.pose; 
+
+      geometry_msgs::msg::PoseStamped pose_in_costmap_frame;
+      // [FIX] Transform the new, correct object
+      tf_->transform(path_pose_to_transform, pose_in_costmap_frame, costmap_frame);
+      
+      agent_in_costmap_frame.truncated_path.poses.push_back(pose_in_costmap_frame);
+    }
+
+    // Update header of the path
+    agent_in_costmap_frame.truncated_path.header.frame_id = costmap_frame;
+    agent_in_costmap_frame.truncated_path.header.stamp = transformed_pose.header.stamp;
+    return true;
+
+  } catch (const tf2::TransformException & ex) {
+    RCLCPP_WARN_THROTTLE(
+      logger_, *node_shared_->get_clock(), 2000,
+      "Failed to transform agent %u from '%s' to '%s': %s",
+      agent_in_map.machine_id, map_frame.c_str(), costmap_frame.c_str(), ex.what());
+    return false;
+  }
+  return false;
+}
 
 
 AgentLayer::AgentLayer() {}
@@ -215,6 +288,9 @@ void AgentLayer::onInitialize()
     );
 
 
+// [NEW] Check if the costmap is rolling (like obstacle_layer)
+  // rolling_window_ = layered_costmap_->isRolling();
+
   current_ = true;
   matchSize();
 
@@ -288,6 +364,12 @@ double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo &
 void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw*/,
                               double* min_x, double* min_y, double* max_x, double* max_y)
 {
+// [NEW] Add rolling window support (must be called before any other processing)
+  // if (rolling_window_) {
+  //   updateOrigin(robot_x - getSizeInMetersX() / 2, robot_y - getSizeInMetersY() / 2);
+  // }
+
+
   if (!enabled_) return;
 
 // [NEW] Cache robot pose for updateCosts
@@ -305,20 +387,27 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
     infos.assign(last_infos_->agents.begin(), last_infos_->agents.end());
   }
 
-  const std::string & global_frame = layered_costmap_->getGlobalFrameID();
+// [CHANGED] costmap_frame은 "map" 또는 "odom"이 될 수 있습니다.
+  const std::string & costmap_frame = layered_costmap_->getGlobalFrameID();
 
-  for (const auto & a : infos) {
-    if (isSelf(a)) continue;
+  for (const auto & a_map : infos) { // "map" 프레임 기준 원본 데이터
+    if (isSelf(a_map)) continue;
 
-    // ROI by distance from our robot
-    const double dx = a.current_pose.pose.position.x - robot_x;
-    const double dy = a.current_pose.pose.position.y - robot_y;
-    if (std::hypot(dx, dy) > roi_range_m_) continue;
-
-    // frame check (optional)
-    if (use_path_header_frame_ && a.truncated_path.header.frame_id != global_frame) {
-      continue;
+    // [NEW] Transform agent info from "map" to costmap frame (e.g., "odom")
+    multi_agent_msgs::msg::MultiAgentInfo a; // 변환된 데이터가 저장될 변수
+    if (!transformAgentInfo(a_map, a, costmap_frame)) {
+      continue; // TF 변환 실패 시 이 에이전트 무시
     }
+
+    // [CHANGED] ROI 검사를 변환된 'a'의 좌표로 수행
+    const double dx = a.current_pose.pose.position.x - robot_x;
+    const double dy = a.current_pose.pose.position.y - robot_y;
+    if (std::hypot(dx, dy) > roi_range_m_) continue;
+
+    // [REMOVED] TF 변환을 거쳤으므로 이 프레임 체크는 더 이상 유효하지 않거나 불필요합니다.
+    // if (use_path_header_frame_ && a.truncated_path.header.frame_id != global_frame) {
+    //   continue;
+    // }
 
     // 현재 위치 + 트렁케이트 경로를 모두 bounds에 반영
     {
@@ -522,6 +611,35 @@ void AgentLayer::rasterizeAgentPath(
 }
 
 
+
+// // [CHANGED] 이동 중이면 forward_smear_m_ 사용, 아니면 0.0
+// void AgentLayer::rasterizeAgentPath(
+//   const multi_agent_msgs::msg::MultiAgentInfo & a,
+//   nav2_costmap_2d::Costmap2D * grid,
+//   std::vector<std::pair<unsigned int,unsigned int>> & meta_hits)
+// {
+//   // 코스트 & 등방성 팽창
+//   const unsigned char cost_now = computeCost(a);
+//   const double iso_extra = computeDilation(a);
+
+//   // 이동 여부에 따라 전방 스미어 적용
+//   const double forward_len = isMovingPhase(a.status.phase) ? forward_smear_m_ : 0.0;
+
+//   // 1) 에이전트 현재 footprint 찍기 (전방 스미어 조건부 적용)
+//   fillFootprintAt(a.footprint, a.current_pose.pose, iso_extra, forward_len,
+//                   grid, cost_now, &meta_hits);
+
+//   // 2) (선택) truncated_path의 각 pose에서도 footprint를 얇게/간격 띄워서 찍고 싶다면
+//   //    아래 루프를 활성화하세요. 지금은 과도한 차단을 피하기 위해 "현재 위치만" 반영.
+//   //
+//   const int limit = std::min<int>(a.truncated_path.poses.size(), max_poses_);
+//   for (int i = 0; i < limit; ++i) {
+//     const auto & ps = a.truncated_path.poses[i].pose;
+//     // 경로상의 footprint는 등방성만 소량(예: iso_extra*0.5), 전방 스미어는 0.0로 권장
+//     fillFootprintAt(a.footprint, ps, iso_extra * 0.5, 0.0, grid, cost_now, &meta_hits);
+//   }
+// }
+
 void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
                              int /*min_i*/, int /*min_j*/, int /*max_i*/, int /*max_j*/)
 {
@@ -543,16 +661,25 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
   const double robot_y = cached_robot_y_;
 
 
-  for (const auto & a : infos) {
-    if (isSelf(a)) continue;
+// [NEW] Get the costmap frame ID ("map" 또는 "odom")
+  const std::string & costmap_frame = layered_costmap_->getGlobalFrameID();
 
-// [NEW] CRITICAL FIX: Apply the same ROI check that was in updateBounds
-    const double dx = a.current_pose.pose.position.x - robot_x;
-    const double dy = a.current_pose.pose.position.y - robot_y;
-    if (std::hypot(dx, dy) > roi_range_m_) continue;
+  for (const auto & a_map : infos) { // "map" 프레임 기준 원본 데이터
+    if (isSelf(a_map)) continue;
 
-    rasterizeAgentPath(a, &master_grid, meta_hits);
-  }
+    // [NEW] Transform agent info from "map" to costmap frame (e.g., "odom")
+    multi_agent_msgs::msg::MultiAgentInfo a; // 변환된 데이터가 저장될 변수
+    if (!transformAgentInfo(a_map, a, costmap_frame)) {
+      continue; // TF 변환 실패 시 이 에이전트 무시
+    }
+
+    // [CHANGED] ROI check using the *transformed* pose 'a'
+    const double dx = a.current_pose.pose.position.x - robot_x;
+    const double dy = a.current_pose.pose.position.y - robot_y;
+    if (std::hypot(dx, dy) > roi_range_m_) continue;
+
+    rasterizeAgentPath(a, &master_grid, meta_hits); // 변환된 'a'를 전달
+  }
 
   if (publish_meta_ && meta_pub_) {
     multi_agent_msgs::msg::AgentLayerMetaArray arr;

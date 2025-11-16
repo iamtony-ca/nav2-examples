@@ -12,6 +12,7 @@
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 
 #include <nav2_costmap_2d/layer.hpp>
+#include <nav2_costmap_2d/layered_costmap.hpp>  // add
 #include <nav2_costmap_2d/costmap_2d.hpp>
 
 #include <geometry_msgs/msg/point.hpp>
@@ -21,6 +22,11 @@
 #include <multi_agent_msgs/msg/multi_agent_info_array.hpp>
 #include <multi_agent_msgs/msg/agent_layer_meta_array.hpp>
 #include <multi_agent_msgs/msg/agent_status.hpp>
+
+
+// [NEW] Add TF2 headers for transformation
+#include <tf2_ros/buffer.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 namespace multi_agent_nav2
 {
@@ -81,6 +87,8 @@ private:
   int         freshness_timeout_ms_{800};
   int         max_poses_{40};
   bool        qos_reliable_{true};
+// [NEW] To support rolling window
+  // bool        rolling_window_{false};
 
   // bounds cache for this cycle
   double touch_min_x_{0.0}, touch_min_y_{0.0}, touch_max_x_{0.0}, touch_max_y_{0.0};
@@ -108,6 +116,14 @@ private:
   // [NEW] Helper to convert nav2_costmap_2d::makeFootprint... results
   static std::vector<geometry_msgs::msg::Point32> toPoint32(
       const std::vector<geometry_msgs::msg::Point>& points);
+
+
+// [NEW] Helper for transforming agent data to the costmap's frame
+  bool transformAgentInfo(
+      const multi_agent_msgs::msg::MultiAgentInfo & agent_in_map,
+      multi_agent_msgs::msg::MultiAgentInfo & agent_in_costmap_frame,
+      const std::string & costmap_frame) const;
+
 
   // helpers
   void infosCallback(const multi_agent_msgs::msg::MultiAgentInfoArray::SharedPtr msg);
