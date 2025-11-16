@@ -2,16 +2,27 @@
 # -*- coding: utf-8 -*-
 
 import math
+import json
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Any
 
 import rclpy
 from rclpy.node import Node
 from rclpy.time import Time
 
+from rclpy.qos import (
+    QoSProfile,
+    QoSHistoryPolicy,
+    QoSReliabilityPolicy,
+    QoSDurabilityPolicy,
+
+)
+
+
+
 from std_msgs.msg import Bool, String
 from geometry_msgs.msg import Pose
-from replan_monitor_msgs.msg import PathAgentCollisionInfo
+from multi_agent_msgs.msg import PathAgentCollisionInfo
 from multi_agent_msgs.msg import MultiAgentInfoArray, MultiAgentInfo, AgentStatus
 
 
@@ -38,14 +49,13 @@ def dist2(ax: float, ay: float, bx: float, by: float) -> float:
 def dot2(ax: float, ay: float, bx: float, by: float) -> float:
     return ax * bx + ay * by
 
-def unit(vx: float, vy: float) -> Tuple[float, float]:
+def unit(vx: float, vy: float):
     n = math.hypot(vx, vy)
     if n < 1e-6:
         return (0.0, 0.0)
     return (vx / n, vy / n)
 
 def heading_bonus(rel_heading_deg: float) -> float:
-    # head-on > crossing > same-lane (positive means more severe)
     a = abs(rel_heading_deg)
     if a <= 25.0:   # same lane
         return 0.1
@@ -85,10 +95,16 @@ class Candidate:
 
 
 # ---------------------------
-# Event-driven decision node (with resume & timeouts)
+# Event-driven decision node with TOGGLE policy
 # ---------------------------
 
 class FleetDecisionNode(Node):
+    """
+    policy_mode: "score" | "rule"
+      - score: 기존 점수 기반 (severity * (1 + kappa*yprio))
+      - rule : 제공된 policy 표로만 최종 행동을 매핑 (rule_policy_json 파라미터)
+    공통: conflict-group 상호배제 게이트와 heavy rate-limit 적용
+    """
     def __init__(self):
         super().__init__("fleet_decision_node_ev")
 
@@ -108,7 +124,7 @@ class FleetDecisionNode(Node):
         self.declare_parameter("a3_heading", 0.5)
         self.declare_parameter("a4_vclosing", 0.3)
 
-        # Yield weights
+        # Yield weights (priority)
         self.declare_parameter("b1_mode", 0.7)
         self.declare_parameter("b2_rowgap", 0.9)
         self.declare_parameter("b3_reroute", 0.8)
@@ -117,12 +133,12 @@ class FleetDecisionNode(Node):
         self.declare_parameter("b6_id", 0.2)
         self.declare_parameter("kappa", 0.6)
 
-        # thresholds for enter
+        # thresholds for enter (TTC 기반)
         self.declare_parameter("T_slow", 6.0)
         self.declare_parameter("T_yield", 2.5)
-        self.declare_parameter("yield_priority_thresh", 0.8)
+        self.declare_parameter("yield_priority_thresh", 0.8)  # Y_th
 
-        # resume hysteresis (exit thresholds & K-连续)
+        # resume hysteresis
         self.declare_parameter("T_resume_slow", 6.5)
         self.declare_parameter("T_resume_yield", 3.5)
         self.declare_parameter("T_resume_stop", 5.0)
@@ -132,7 +148,7 @@ class FleetDecisionNode(Node):
         self.declare_parameter("K_stop_clean", 3)
 
         # idle-based resume
-        self.declare_parameter("resume_idle_sec", 1.5)  # no collision for this window -> resume (SLOWDOWN/YIELD only)
+        self.declare_parameter("resume_idle_sec", 1.5)
 
         # timeouts (hard cap)
         self.declare_parameter("resume_timeout_slow", 6.0)
@@ -140,13 +156,14 @@ class FleetDecisionNode(Node):
         self.declare_parameter("resume_timeout_stop", 15.0)
 
         # debounce / ignore windows
-        self.declare_parameter("agent_event_silence_sec", 1.0)         # 동일 agent 재처리 금지 시간
-        self.declare_parameter("replan_ignore_sec_after_agent", 0.5)    # agent 이벤트 직후 외부 replan 무시
-        self.declare_parameter("run_pulse_silence_sec", 0.5)            # /cmd/run 펄스 디바운스
+        self.declare_parameter("agent_event_silence_sec", 1.0)
+        self.declare_parameter("replan_ignore_sec_after_agent", 0.5)
+        self.declare_parameter("run_pulse_silence_sec", 0.5)
 
         # topics (inputs)
         self.declare_parameter("topic_collision", "/path_agent_collision_info")
         self.declare_parameter("topic_agents", "/multi_agent_infos")
+        # 외부 replan 신호 (옵션)
         self.declare_parameter("topic_replan_flag", "/replan_flag")
 
         # topics (outputs)
@@ -159,6 +176,14 @@ class FleetDecisionNode(Node):
         self.declare_parameter("topic_cmd_slowdown", "/cmd/slowdown")
         self.declare_parameter("topic_cmd_yield", "/cmd/yield")
         self.declare_parameter("topic_cmd_stop", "/cmd/stop")
+
+        # ---- TOGGLEs / rule engine ----
+        self.declare_parameter("policy_mode", "rule")             # "rule" or "score"
+        self.declare_parameter("rule_policy_json", "")            # JSON string of ordered rules
+        self.declare_parameter("use_severity_in_score", False)    # 임시 운용 스위치
+        self.declare_parameter("use_ttc_in_decide", False)        # score 모드에서만 의미 있음
+        self.declare_parameter("policy_yprio_slow_thresh", 0.4)   # score 모드에서 TTC 미사용 시 SLOWDOWN 기준
+        self.declare_parameter("heavy_cooldown_sec", 2.0)         # heavy action rate-limit
 
         # ---- get params ----
         self.global_frame = self.get_parameter("global_frame").value
@@ -218,10 +243,21 @@ class FleetDecisionNode(Node):
         self.topic_cmd_yield = self.get_parameter("topic_cmd_yield").value
         self.topic_cmd_stop = self.get_parameter("topic_cmd_stop").value
 
+        # toggles
+        self.policy_mode = str(self.get_parameter("policy_mode").value).strip().lower()
+        self.rule_policy_json = str(self.get_parameter("rule_policy_json").value)
+        self.use_severity_in_score = bool(self.get_parameter("use_severity_in_score").value)
+        self.use_ttc_in_decide = bool(self.get_parameter("use_ttc_in_decide").value)
+        self.policy_yprio_slow_thresh = float(self.get_parameter("policy_yprio_slow_thresh").value)
+        self.heavy_cooldown_sec = float(self.get_parameter("heavy_cooldown_sec").value)
+
+        # rule table (parsed)
+        self.rule_table: List[Dict[str, Any]] = self._parse_rule_json(self.rule_policy_json)
+
         # ---- runtime caches ----
         self.last_agents: Optional[MultiAgentInfoArray] = None
-        self.last_agent_event_time: Dict[Tuple[int, str], Time] = {}  # (machine_id, type_id) -> last processed time
-        self.last_agent_event_any: Optional[Time] = None              # 마지막 agent 충돌 이벤트 시간
+        self.last_agent_event_time: Dict[Tuple[int, str], Time] = {}
+        self.last_agent_event_any: Optional[Time] = None
 
         # state & timers
         self.state: str = "RUN"
@@ -233,13 +269,25 @@ class FleetDecisionNode(Node):
         self.yield_clean = 0
         self.stop_clean = 0
 
+        # heavy rate-limit
+        self.last_heavy_time: Optional[Time] = None
+
         # ---- pubs/subs ----
         self.sub_agents = self.create_subscription(MultiAgentInfoArray, self.topic_agents, self.on_agents, 10)
         self.sub_collision = self.create_subscription(PathAgentCollisionInfo, self.topic_collision, self.on_collision, 20)
         self.sub_replan_flag = self.create_subscription(Bool, self.topic_replan_flag, self.on_replan_flag, 10)
 
         self.pub_state = self.create_publisher(String, self.topic_decision_state, 10)
-        self.pub_req_replan = self.create_publisher(Bool, self.topic_request_replan, 10)
+
+        qos_profile_req_replan = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL
+        )
+
+
+        self.pub_req_replan = self.create_publisher(Bool, self.topic_request_replan, qos_profile_req_replan)
         self.pub_req_reroute = self.create_publisher(Bool, self.topic_request_reroute, 10)
 
         self.pub_cmd_run = self.create_publisher(Bool, self.topic_cmd_run, 10)
@@ -249,13 +297,44 @@ class FleetDecisionNode(Node):
 
         self.pub_debug = self.create_publisher(String, "/decision_debug", 10)
 
-        # lightweight timer only for timeouts & idle-resume (no heavy logic)
+        # lightweight timer only for timeouts & idle-resume
         self.timer = self.create_timer(0.2, self.on_timer)
 
-        self.get_logger().info(f"[event] fleet_decision_node ready. my_id={self.my_id}")
+        self.get_logger().info(f"[event] fleet_decision_node ready. my_id={self.my_id}, policy_mode={self.policy_mode}")
 
-        # 최초 상태(기본 RUN) 공지 + 1회 명령 펄스
+        # 최초 상태 공지
         self._set_state_and_emit("RUN", reason="node start")
+
+    # ---------- Rule parsing ----------
+
+    def _parse_rule_json(self, s: str) -> List[Dict[str, Any]]:
+        if not s or not s.strip():
+            # 예시 기본 룰(안전한 기본값) — 필요시 덮어써
+            # 상단부터 매칭
+            default_rules = [
+                # {"cond": {"yprio": {">=": 0.8}}, "action": "YIELD"},
+                # {"cond": {"primary_is_reroute": True, "yprio": {">=": 0.6}}, "action": "REROUTE"},
+                # {"cond": {"yprio": {">=": 0.4}}, "action": "SLOWDOWN"},
+                # {"default": True, "action": "RUN"}
+                {"cond": {"yprio": {">=": 0.0}}, "action": "REPLAN"},
+                {"cond": {"yprio": {"<": 0.0}}, "action": "RUN"},
+                {"default": True, "action": "REPLAN"}
+            ]
+            return default_rules
+        try:
+            data = json.loads(s)
+            if isinstance(data, list):
+                return data
+            else:
+                self.get_logger().warn("rule_policy_json is not a list; using default rules.")
+        except Exception as e:
+            self.get_logger().error(f"rule_policy_json parse error: {e}; using default rules.")
+        return [
+            {"cond": {"yprio": {">=": 0.8}}, "action": "YIELD"},
+            {"cond": {"primary_is_reroute": True, "yprio": {">=": 0.6}}, "action": "REROUTE"},
+            {"cond": {"yprio": {">=": 0.4}}, "action": "SLOWDOWN"},
+            {"default": True, "action": "RUN"}
+        ]
 
     # ---------- Subscribers ----------
 
@@ -266,17 +345,13 @@ class FleetDecisionNode(Node):
         if not msg.data:
             return
         now = self.get_clock().now()
-        # 직전 에이전트 이벤트 직후에는 외부 replan_flag를 무시 (옵션)
         if self.last_agent_event_any is not None:
             dt = (now - self.last_agent_event_any).nanoseconds * 1e-9
             if dt < self.replan_ignore_sec_after_agent:
                 self.get_logger().info(f"replan_flag ignored ({dt:.2f}s after agent event)")
                 return
-
-        # 이벤트 방식: REPLAN을 1회성 요청
         self.get_logger().warn("external replan_flag -> request REPLAN")
         self._set_state_and_emit("REPLAN", reason="external replan_flag")
-        self.pub_req_replan.publish(Bool(data=True))
 
     def on_collision(self, msg: PathAgentCollisionInfo):
         now = self.get_clock().now()
@@ -284,7 +359,6 @@ class FleetDecisionNode(Node):
 
         cands_all = self.build_candidates(msg)
         if not cands_all:
-            # 충돌 후보가 없으면: 상태가 SLOWDOWN/YIELD/STOP이면 clean 카운팅
             self._maybe_resume_on_clean(None)
             return
 
@@ -300,23 +374,26 @@ class FleetDecisionNode(Node):
             cands.append(c)
 
         if not cands:
-            # 모두 디바운스에 걸려도 clean 판정에는 사용 (충돌이 사라진 효과와 유사)
             self._maybe_resume_on_clean(None)
             return
 
         primary = max(cands, key=lambda c: c.score)
         self.last_agent_event_time[(primary.machine_id, primary.type_id)] = now
 
-        # 현재 state에 따라 진입/유지/복귀 판정
-        decision = self.decide_with_primary(primary, primary_is_reroute=self._agent_is_reroute(primary.machine_id))
+        # 결과 결정
+        decision_raw = self.decide_with_primary(primary, primary_is_reroute=self._agent_is_reroute(primary.machine_id))
 
-        # resume 히스테리시스 (현재가 SLOWDOWN/YIELD/STOP이고 안전해졌는지 검사)
+        # 동일 충돌 집합 상호배제 게이트 적용
+        group_ids = self._conflict_group_ids(msg)
+        decision = self._policy_gate(decision_raw, primary, group_ids)
+
+        # resume 히스테리시스
         if self._maybe_resume_on_clean(primary):
             return
 
-        # 그 외: 이벤트 상태로 전환
         self._set_state_and_emit(decision,
-                                 reason=f"agent(mid={primary.machine_id}) score={primary.score:.2f} T={primary.T_eff:.2f} Y={primary.yprio:.2f}")
+                                 reason=f"agent(mid={primary.machine_id}) score={primary.score:.2f} "
+                                        f"T={primary.T_eff:.2f} Y={primary.yprio:.2f}")
 
     # ---------- Core building blocks ----------
 
@@ -330,6 +407,54 @@ class FleetDecisionNode(Node):
         a = agents.get(machine_id, None)
         return bool(a and a.reroute)
 
+    # === conflict group & gate ===
+
+    def _conflict_group_ids(self, msg: PathAgentCollisionInfo) -> List[int]:
+        ids = []
+        n = len(msg.machine_id)
+        for i in range(n):
+            try:
+                mid = int(msg.machine_id[i])
+            except Exception:
+                mid = 0
+            if mid and mid != self.my_id:
+                ids.append(mid)
+        return sorted(set(ids))
+
+    def _elect_leader(self, group_ids: List[int]) -> Optional[int]:
+        return min(group_ids) if group_ids else None
+
+    def _policy_gate(self, desired: str, primary: Candidate, group_ids: List[int]) -> str:
+        heavy = {"REPLAN", "REROUTE", "STOP"}
+
+        # 컨텍스트 산출
+        agents = self._agents_by_id()
+        someone_busy = any(
+            (aid in group_ids) and
+            (a.status.phase == AgentStatus.STATUS_PATH_SEARCHING or a.reroute)
+            for aid, a in agents.items()
+        )
+        leader = self._elect_leader(group_ids)
+        my_is_leader = (leader is None) or (leader == self.my_id)
+
+        # 1) leader만 heavy 허용
+        if desired in heavy and not my_is_leader:
+            return "YIELD" if desired in {"REPLAN", "REROUTE"} else "SLOWDOWN"
+
+        # 2) 상대가 바쁘면(이미 replanning/reroute) 내 heavy는 억제
+        if desired in heavy and someone_busy:
+            return "YIELD"
+
+        # 3) heavy rate-limit
+        if desired in heavy and self.last_heavy_time is not None:
+            dt = (self.get_clock().now() - self.last_heavy_time).nanoseconds * 1e-9
+            if dt < self.heavy_cooldown_sec:
+                return "YIELD"
+
+        return desired
+
+    # === Candidate build ===
+
     def build_candidates(self, msg: PathAgentCollisionInfo) -> List[Candidate]:
         if self.last_agents is None or len(msg.x) == 0:
             return []
@@ -340,22 +465,56 @@ class FleetDecisionNode(Node):
             me_pose = agents_by_id[self.my_id].current_pose.pose
 
         out: List[Candidate] = []
-        for i in range(len(msg.x)):
+        N = len(msg.x)
+        for i in range(N):
             px, py = msg.x[i], msg.y[i]
             ttc = msg.ttc_first[i] if i < len(msg.ttc_first) else -1.0
             note = msg.note[i] if i < len(msg.note) else ""
 
-            agent, rel_heading_deg, v_closing = self.match_agent_at_point(px, py, agents_by_id)
+            # --- ID 매칭 우선 ---
+            agent = None
+            rel_heading_deg = 90.0
+            v_closing = 0.0
+
+            mid = 0
+            if i < len(msg.machine_id):
+                try:
+                    mid = int(msg.machine_id[i])
+                except Exception:
+                    mid = 0
+            if mid:
+                a = agents_by_id.get(mid, None)
+                if a is not None:
+                    agent = a
+                    a_yaw = yaw_of(a.current_pose.pose)
+                    if me_pose is not None:
+                        rel_heading_deg = abs(math.degrees(ang_wrap(yaw_of(me_pose) - a_yaw)))
+                    ux, uy = unit(px - a.current_pose.pose.position.x, py - a.current_pose.pose.position.y)
+                    v_other = a.current_twist.linear.x * dot2(math.cos(a_yaw), math.sin(a_yaw), ux, uy)
+                    v_closing = max(0.0, v_other)
+                    if dist2(a.current_pose.pose.position.x, a.current_pose.pose.position.y, px, py) > 10.0:
+                        agent = None
+                        rel_heading_deg, v_closing = 90.0, 0.0
+
+            # --- 폴백: 근접 매칭 ---
+            if agent is None:
+                agent, rel_heading_deg, v_closing = self.match_agent_at_point(px, py, agents_by_id)
+
             if agent is None or agent.machine_id == self.my_id:
                 continue
 
+            # TTC 결합
             T_eff = self.combine_ttc(ttc, px, py, agent)
+
             d_me = dist2(me_pose.position.x, me_pose.position.y, px, py) if me_pose else 10.0
 
-            sev = self.a1 * (1.0 / max(T_eff, self.T_min)) + \
-                  self.a2 * (1.0 / max(d_me, self.d_min)) + \
-                  self.a3 * heading_bonus(rel_heading_deg) + \
-                  self.a4 * v_closing
+            if self.use_severity_in_score:
+                sev = self.a1 * (1.0 / max(T_eff, self.T_min)) + \
+                      self.a2 * (1.0 / max(d_me, self.d_min)) + \
+                      self.a3 * heading_bonus(rel_heading_deg) + \
+                      self.a4 * v_closing
+            else:
+                sev = 1.0
 
             row_me = right_of_way_score(agents_by_id.get(self.my_id, agent), self.my_id)
             row_ot = right_of_way_score(agent, self.my_id)
@@ -398,7 +557,7 @@ class FleetDecisionNode(Node):
 
         ux, uy = unit(px - best.current_pose.pose.position.x, py - best.current_pose.pose.position.y)
         v_other = best.current_twist.linear.x * dot2(math.cos(a_yaw), math.sin(a_yaw), ux, uy)
-        v_closing = max(0.0, v_other)  # 내 속도 미상 가정
+        v_closing = max(0.0, v_other)
         return best, rel_heading_deg, v_closing
 
     def combine_ttc(self, ttc_direct: float, px: float, py: float, agent: MultiAgentInfo) -> float:
@@ -428,45 +587,130 @@ class FleetDecisionNode(Node):
             return float("inf")
         return max(num / den, 0.0)
 
+    # ---------- Policy mapping (TOGGLE) ----------
+
     def decide_with_primary(self, c: Candidate, primary_is_reroute: bool) -> str:
-        # 간편 규칙:
-        # 1) 매우 위험(T_eff<T_yield or yprio>=Y_th) → YIELD
-        # 2) 중간(T_eff<T_slow) → SLOWDOWN
-        # 3) 상대가 reroute 상태고 yprio가 매우 크면 → REROUTE(내가 크게 양보)
-        # 4) 그 외 → RUN
-        if c.T_eff < self.T_yield or c.yprio >= self.Y_th:
-            return "YIELD"
-        if c.T_eff < self.T_slow:
-            return "SLOWDOWN"
+        if self.policy_mode == "rule":
+            return self._apply_rule_policy(c, primary_is_reroute)
+        # score 모드 (기본): 예전 간편 규칙 + 토글
+        if self.use_ttc_in_decide:
+            if (math.isfinite(c.T_eff) and c.T_eff < self.T_yield) or (c.yprio >= self.Y_th):
+                return "YIELD"
+            if math.isfinite(c.T_eff) and c.T_eff < self.T_slow:
+                return "SLOWDOWN"
+        else:
+            if c.yprio >= self.Y_th:
+                return "YIELD"
+            if c.yprio >= self.policy_yprio_slow_thresh:
+                return "SLOWDOWN"
         if primary_is_reroute and c.yprio >= (self.Y_th - 0.2):
             return "REROUTE"
         return "RUN"
 
+    # ---- rule engine ----
+
+    def _apply_rule_policy(self, c: Candidate, primary_is_reroute: bool) -> str:
+        if c.machine_id <= self.my_id:
+            return "REPLAN"
+        else :
+            return "RUN"
+        
+        
+        # 컨텍스트 변수들
+        agents = self._agents_by_id()
+        group_busy = any(a.status.phase == AgentStatus.STATUS_PATH_SEARCHING or a.reroute
+                         for a in agents.values())
+        # (정확한 busy는 그룹 제한 후 게이트에서 다시 반영되니, 룰에서는 보수적으로 써도 무방)
+        ctx = {
+            "T_eff": c.T_eff,
+            "yprio": c.yprio,
+            "primary_is_reroute": bool(primary_is_reroute),
+            "someone_busy": bool(group_busy),  # 참고용
+            # my_is_leader는 게이트 단계에서 최종 반영되므로 여기서는 필요시 평가용으로만 제공
+            "my_is_leader": True  # 기본 True (게이트에서 최종 교정)
+        }
+
+        for rule in self.rule_table:
+            if rule.get("default", False):
+                return str(rule.get("action", "RUN")).upper()
+
+            cond = rule.get("cond", {})
+            if self._cond_match(cond, ctx):
+                return str(rule.get("action", "RUN")).upper()
+
+        # 매칭 없음 → RUN
+        return "RUN"
+
+    def _cond_match(self, cond: Dict[str, Any], ctx: Dict[str, Any]) -> bool:
+        """ cond 예:
+            {
+              "yprio": {">=": 0.8},
+              "T_eff": {"<": 2.5},
+              "primary_is_reroute": true,
+              "someone_busy": false,
+              "my_is_leader": true
+            }
+        """
+        for key, want in cond.items():
+            if key not in ctx and key not in ("T_eff", "yprio", "primary_is_reroute", "someone_busy", "my_is_leader"):
+                return False
+            val = ctx.get(key, None)
+            # 숫자 비교
+            if isinstance(want, dict):
+                if val is None or not isinstance(val, (int, float)):
+                    return False
+                for op, th in want.items():
+                    if not isinstance(th, (int, float)):
+                        return False
+                    if op == ">":
+                        if not (val > th): return False
+                    elif op == ">=":
+                        if not (val >= th): return False
+                    elif op == "<":
+                        if not (val < th): return False
+                    elif op == "<=":
+                        if not (val <= th): return False
+                    elif op == "==":
+                        if not (val == th): return False
+                    elif op == "!=":
+                        if not (val != th): return False
+                    else:
+                        return False
+            else:
+                # 불리언/정확 매칭
+                if val != want:
+                    return False
+        return True
+
     # ---------- Resume & publishing ----------
 
     def _emit_state_pulse(self, state: str):
-        # publish state
         self.pub_state.publish(String(data=state))
-        # publish one-shot command
         if state == "RUN":
             now = self.get_clock().now()
             if self.last_run_cmd_time is not None:
                 dt = (now - self.last_run_cmd_time).nanoseconds * 1e-9
                 if dt < self.run_pulse_silence_sec:
-                    # debounce: skip frequent run pulses
                     return
             self.last_run_cmd_time = now
             self.pub_cmd_run.publish(Bool(data=True))
         elif state == "SLOWDOWN":
             self.pub_cmd_slow.publish(Bool(data=True))
         elif state == "YIELD":
-            self.pub_cmd_yield.publish(Bool(data=True))
+            # self.pub_cmd_yield.publish(Bool(data=True))
+            self.get_logger().info(f"##########[STATE] -> {state}")
+            self.pub_req_replan.publish(Bool(data=True))
+            self.last_heavy_time = self.get_clock().now()
         elif state == "STOP":
             self.pub_cmd_stop.publish(Bool(data=True))
+            self.last_heavy_time = self.get_clock().now()
         elif state == "REPLAN":
+            self.get_logger().info(f"##########[STATE] -> {state}")
             self.pub_req_replan.publish(Bool(data=True))
+            self.last_heavy_time = self.get_clock().now()
         elif state == "REROUTE":
             self.pub_req_reroute.publish(Bool(data=True))
+            self.last_heavy_time = self.get_clock().now()
 
     def _set_state_and_emit(self, state: str, reason: str = ""):
         self.state = state
@@ -478,60 +722,48 @@ class FleetDecisionNode(Node):
         self._emit_state_pulse(state)
 
     def _maybe_resume_on_clean(self, primary: Optional[Candidate]) -> bool:
-        """
-        현재 상태가 SLOWDOWN/YIELD/STOP일 때,
-        - collision 후보 없음(=primary None) 또는
-        - 후보가 있으나 충분히 안전(T_resume_* 이상 & yprio < Y_exit)
-        이면 K-연속 충족 시 RUN 펄스. 충족하면 True 반환.
-        """
         if self.state not in ("SLOWDOWN", "YIELD", "STOP"):
-            # 현재 RUN류면 복귀 검사 불필요
             self.slow_clean = self.yield_clean = self.stop_clean = 0
             return False
 
-        safe = False
+        # 룰 모드에서는 TTC 없이도 yprio 기준으로 종료 가능하게 유지
         if primary is None:
-            # 후보 자체가 없다 → 안전
             safe = True
         else:
-            if self.state == "SLOWDOWN":
-                safe = (primary.T_eff >= self.T_resume_slow) and (primary.yprio < self.Y_exit)
-            elif self.state == "YIELD":
-                safe = (primary.T_eff >= self.T_resume_yield) and (primary.yprio < self.Y_exit)
-            elif self.state == "STOP":
-                safe = (primary.T_eff >= self.T_resume_stop) and (primary.yprio < self.Y_exit)
+            if self.policy_mode == "score" and self.use_ttc_in_decide:
+                if self.state == "SLOWDOWN":
+                    safe = (math.isfinite(primary.T_eff) and primary.T_eff >= self.T_resume_slow) and (primary.yprio < self.Y_exit)
+                elif self.state == "YIELD":
+                    safe = (math.isfinite(primary.T_eff) and primary.T_eff >= self.T_resume_yield) and (primary.yprio < self.Y_exit)
+                else:
+                    safe = (math.isfinite(primary.T_eff) and primary.T_eff >= self.T_resume_stop) and (primary.yprio < self.Y_exit)
+            else:
+                # rule 모드 또는 TTC 미사용: yprio만 사용
+                safe = (primary.yprio < self.Y_exit)
 
         if not safe:
-            # 안전 기준 미충족 → 해당 상태의 clean 카운터 리셋
             if self.state == "SLOWDOWN": self.slow_clean = 0
             if self.state == "YIELD":    self.yield_clean = 0
             if self.state == "STOP":     self.stop_clean = 0
             return False
 
-        # 안전 기준 충족 → clean 카운팅
         if self.state == "SLOWDOWN":
             self.slow_clean += 1
             if self.slow_clean >= self.K_slow_clean:
                 self._set_state_and_emit("RUN", reason="resume clean(SLOWDOWN)")
-                self.slow_clean = 0
-                self.yield_clean = 0
-                self.stop_clean = 0
+                self.slow_clean = self.yield_clean = self.stop_clean = 0
                 return True
         elif self.state == "YIELD":
             self.yield_clean += 1
             if self.yield_clean >= self.K_yield_clean:
                 self._set_state_and_emit("RUN", reason="resume clean(YIELD)")
-                self.slow_clean = 0
-                self.yield_clean = 0
-                self.stop_clean = 0
+                self.slow_clean = self.yield_clean = self.stop_clean = 0
                 return True
         elif self.state == "STOP":
             self.stop_clean += 1
             if self.stop_clean >= self.K_stop_clean:
                 self._set_state_and_emit("RUN", reason="resume clean(STOP)")
-                self.slow_clean = 0
-                self.yield_clean = 0
-                self.stop_clean = 0
+                self.slow_clean = self.yield_clean = self.stop_clean = 0
                 return True
 
         return False
@@ -541,7 +773,6 @@ class FleetDecisionNode(Node):
     def on_timer(self):
         now = self.get_clock().now()
 
-        # Idle resume: 최근 충돌 이벤트가 일정 시간 없으면(SLOWDOWN/YIELD일 때만) RUN
         if self.state in ("SLOWDOWN", "YIELD"):
             if self.last_agent_event_any is not None:
                 dt_idle = (now - self.last_agent_event_any).nanoseconds * 1e-9
@@ -549,7 +780,6 @@ class FleetDecisionNode(Node):
                     self._set_state_and_emit("RUN", reason=f"idle resume ({dt_idle:.2f}s no collisions)")
                     return
 
-        # Hard timeout resume for SLOWDOWN/YIELD/STOP
         dt_state = (now - self.last_state_change).nanoseconds * 1e-9
         if self.state == "SLOWDOWN" and dt_state >= self.resume_timeout_slow:
             self._set_state_and_emit("RUN", reason=f"SLOWDOWN timeout {dt_state:.2f}s")
