@@ -31,6 +31,10 @@ ComputePathThroughPosesAction::ComputePathThroughPosesAction(
 
 void ComputePathThroughPosesAction::on_tick()
 {
+  // ADD iamtony
+  goal_ = Action::Goal();
+  ///////////
+
   getInput("goals", goal_.goals);
   getInput("planner_id", goal_.planner_id);
   if (getInput("start", goal_.start)) {
