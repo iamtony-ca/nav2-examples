@@ -44,7 +44,19 @@ private:
   double speed_limit_angular_;
   double speed_scale_;
 
-  
+  // 새로운 모드를 위한 변수
+  double ratio_limit_linear_;
+  double ratio_limit_angular_;
+
+  // 어떤 모드가 활성화되었는지 나타내는 Enum
+  enum class SpeedMode {
+    STANDARD_LIMIT,
+    STANDARD_SCALE,
+    RATIO_LIMIT_SCALE
+  };
+  SpeedMode current_mode_ = SpeedMode::STANDARD_LIMIT;  
+
+
   double min_abs_linear_vel_;
   double min_abs_angular_vel_;
   

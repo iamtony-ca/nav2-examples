@@ -102,14 +102,55 @@ void VelocityModifierNode::cmdVelCallback(const geometry_msgs::msg::Twist::Share
   
   auto adjusted_vel = std::make_unique<geometry_msgs::msg::Twist>(*msg);
 
-  // 이제 안전하게 공유 변수 접근 가능
-  adjusted_vel->linear.x *= speed_scale_;
-  adjusted_vel->angular.z *= speed_scale_;
+  // [수정된 로직 시작]
+  if (current_mode_ == SpeedMode::STANDARD_LIMIT) {
+    adjusted_vel->linear.x *= speed_scale_; // (speed_scale_은 1.0일 것)
+    adjusted_vel->angular.z *= speed_scale_;
+    adjusted_vel->linear.x = std::clamp(
+      adjusted_vel->linear.x, -speed_limit_linear_, speed_limit_linear_);
+    adjusted_vel->angular.z = std::clamp(
+      adjusted_vel->angular.z, -speed_limit_angular_, speed_limit_angular_);
+  } 
+  else if (current_mode_ == SpeedMode::STANDARD_SCALE) {
+    adjusted_vel->linear.x *= speed_scale_;
+    adjusted_vel->angular.z *= speed_scale_;
+    // (limit은 max일 것)
+    adjusted_vel->linear.x = std::clamp(
+      adjusted_vel->linear.x, -speed_limit_linear_, speed_limit_linear_);
+    adjusted_vel->angular.z = std::clamp(
+      adjusted_vel->angular.z, -speed_limit_angular_, speed_limit_angular_);
+  }
+  else if (current_mode_ == SpeedMode::RATIO_LIMIT_SCALE) {
+    // 1.0 스케일 적용 (다른 모드와 일관성)
+    adjusted_vel->linear.x *= speed_scale_; // (speed_scale_은 1.0일 것)
+    adjusted_vel->angular.z *= speed_scale_;
 
-  adjusted_vel->linear.x = std::clamp(
-    adjusted_vel->linear.x, -speed_limit_linear_, speed_limit_linear_);
-  adjusted_vel->angular.z = std::clamp(
-    adjusted_vel->angular.z, -speed_limit_angular_, speed_limit_angular_);
+    double abs_vx = std::abs(adjusted_vel->linear.x);
+    double abs_wz = std::abs(adjusted_vel->angular.z);
+    double scale = 1.0;
+    
+    // 비율 계산 (0으로 나누기 방지)
+    double linear_ratio = 1.0;
+    if (abs_vx > 1e-6) {
+      linear_ratio = ratio_limit_linear_ / abs_vx;
+    }
+    double angular_ratio = 1.0;
+    if (abs_wz > 1e-6) {
+      angular_ratio = ratio_limit_angular_ / abs_wz;
+    }
+
+    // 두 제한을 모두 만족해야 하므로, 더 작은 비율(더 많이 줄여야 하는)을 선택
+    if (abs_vx > ratio_limit_linear_ || abs_wz > ratio_limit_angular_) {
+      scale = std::min(linear_ratio, angular_ratio);
+    }
+    
+    // 1.0보다 큰 값으로 스케일링되지 않도록 (즉, 속도를 증가시키지 않도록)
+    scale = std::min(scale, 1.0); 
+
+    adjusted_vel->linear.x *= scale;
+    adjusted_vel->angular.z *= scale;
+  }
+  // [수정된 로직 끝]
 
   // 3. 저속 보정 로직 
   if (recovery_mode_) {
@@ -160,26 +201,39 @@ void VelocityModifierNode::cmdVelCallback(const geometry_msgs::msg::Twist::Share
 
 void VelocityModifierNode::controlCallback(const ModifierControl::SharedPtr msg)
 {
-  // lock_guard를 통해 데이터 쓰기 전 잠금
   const std::lock_guard<std::mutex> lock(data_mutex_);
 
   switch (msg->command_type) {
     case ModifierControl::TYPE_SPEED_LIMIT:
-      // 잠금 상태에서 모든 관련 변수를 원자적으로 변경
+      current_mode_ = SpeedMode::STANDARD_LIMIT;
       speed_limit_linear_ = msg->linear_value;
       speed_limit_angular_ = msg->angular_value;
       speed_scale_ = 1.0;
       RCLCPP_INFO(
-        this->get_logger(), "Set speed limit -> Linear: %.2f m/s, Angular: %.2f rad/s",
+        this->get_logger(), "Set Mode: STANDARD_LIMIT. Linear: %.2f, Angular: %.2f",
         speed_limit_linear_, speed_limit_angular_);
       break;
 
     case ModifierControl::TYPE_SPEED_SCALE:
-      // 잠금 상태에서 모든 관련 변수를 원자적으로 변경
+      current_mode_ = SpeedMode::STANDARD_SCALE;
       speed_scale_ = msg->linear_value;
       speed_limit_linear_ = std::numeric_limits<double>::max();
       speed_limit_angular_ = std::numeric_limits<double>::max();
-      RCLCPP_INFO(this->get_logger(), "Set speed scale to: %.2f", speed_scale_);
+      RCLCPP_INFO(this->get_logger(), "Set Mode: STANDARD_SCALE. Scale: %.2f", speed_scale_);
+      break;
+
+    case ModifierControl::TYPE_SPEED_LIMIT_SCALE:
+      current_mode_ = SpeedMode::RATIO_LIMIT_SCALE;
+      ratio_limit_linear_ = msg->linear_value;
+      ratio_limit_angular_ = msg->angular_value;
+      // 다른 모드 설정 초기화
+      speed_scale_ = 1.0; 
+      speed_limit_linear_ = std::numeric_limits<double>::max();
+      speed_limit_angular_ = std::numeric_limits<double>::max();
+
+      RCLCPP_INFO(
+        this->get_logger(), "Set Mode: RATIO_LIMIT_SCALE. Linear: %.2f, Angular: %.2f",
+        ratio_limit_linear_, ratio_limit_angular_);
       break;
 
     default:
