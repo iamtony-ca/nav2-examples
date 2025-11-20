@@ -6,10 +6,7 @@ namespace velocity_modifier
 {
 
 VelocityModifierNode::VelocityModifierNode(const rclcpp::NodeOptions & options)
-: Node("velocity_modifier_node", options),
-  speed_limit_linear_(std::numeric_limits<double>::max()),
-  speed_limit_angular_(std::numeric_limits<double>::max()),
-  speed_scale_(1.0)
+: Node("velocity_modifier_node", options)
 {
   RCLCPP_INFO(this->get_logger(), "Velocity Modifier Node is initializing...");
 
@@ -89,6 +86,7 @@ void VelocityModifierNode::recoveryModeCallback(const String::SharedPtr msg)
       RCLCPP_INFO(this->get_logger(), "Recovery mode DISABLED. Low-speed correction is inactive.");
     }
   } else {
+    recovery_mode_ = false;
     RCLCPP_DEBUG(
       this->get_logger(), "Received unknown command on /bt_recovery_mode: '%s'", msg->data.c_str());
   }
@@ -154,6 +152,9 @@ void VelocityModifierNode::cmdVelCallback(const geometry_msgs::msg::Twist::Share
 
   // 3. 저속 보정 로직 
   if (recovery_mode_) {
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
+      "[RECOVERY_ACTIVE] Recovery logic is running! linear_max: %.2f", ratio_scaling_max_linear_vel_);
+
     const double vx = adjusted_vel->linear.x;
     const double wz = adjusted_vel->angular.z;
     const double abs_vx = std::abs(vx);

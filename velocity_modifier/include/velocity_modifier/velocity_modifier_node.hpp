@@ -40,13 +40,13 @@ private:
   std::mutex data_mutex_;
 
   // 일반 멤버 변수
-  double speed_limit_linear_;
-  double speed_limit_angular_;
-  double speed_scale_;
+  double speed_limit_linear_ = std::numeric_limits<double>::max();
+  double speed_limit_angular_ = std::numeric_limits<double>::max();
+  double speed_scale_ = 1.0;
 
   // 새로운 모드를 위한 변수
-  double ratio_limit_linear_;
-  double ratio_limit_angular_;
+  double ratio_limit_linear_ = std::numeric_limits<double>::max();
+  double ratio_limit_angular_ = std::numeric_limits<double>::max();
 
   // 어떤 모드가 활성화되었는지 나타내는 Enum
   enum class SpeedMode {
@@ -57,12 +57,12 @@ private:
   SpeedMode current_mode_ = SpeedMode::STANDARD_LIMIT;  
 
 
-  double min_abs_linear_vel_;
-  double min_abs_angular_vel_;
+  double min_abs_linear_vel_ = 0.05;
+  double min_abs_angular_vel_ = 0.05;
   
   // 비율 보정 시 적용될 상한선 
-  double ratio_scaling_max_linear_vel_;
-  double ratio_scaling_max_angular_vel_;
+  double ratio_scaling_max_linear_vel_ = 0.35;
+  double ratio_scaling_max_angular_vel_ = 0.25;
   
   bool recovery_mode_ = false;
 
