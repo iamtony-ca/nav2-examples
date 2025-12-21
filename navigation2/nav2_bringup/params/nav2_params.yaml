@@ -97,6 +97,15 @@ controller_server:
     # controller_plugins: ["FollowPath"]
     use_realtime_priority: false
 
+    # stable_goal_checker:
+    #   plugin: "nav2_controller::StableStoppedGoalChecker"
+    #   x_goal_tolerance: 0.05       # 5cm X축 허용 오차
+    #   y_goal_tolerance: 0.05       # 5cm Y축 허용 오차
+    #   yaw_goal_tolerance: 0.1      # 약 5.7도 회전 허용 오차
+    #   trans_stopped_velocity: 0.01 # 1cm/s 이하일 때 정지 간주
+    #   rot_stopped_velocity: 0.01   # 0.01rad/s 이하일 때 정지 간주
+    #   stability_duration: 1.0      # 위 조건을 1초 이상 만족해야 함
+
     # Progress checker parameters
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"

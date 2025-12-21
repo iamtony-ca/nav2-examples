@@ -1,0 +1,9 @@
+<class_libraries>
+  <library path="nav2_stable_stopped_goal_checker">
+    <class name="nav2_controller::StableStoppedGoalChecker"
+           type="nav2_controller::StableStoppedGoalChecker"
+           base_class_type="nav2_core::GoalChecker">
+      <description>...</description>
+    </class>
+  </library>
+</class_libraries>
