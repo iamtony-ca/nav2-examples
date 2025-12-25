@@ -38,6 +38,7 @@
 #include <limits>
 #include <vector>
 
+// #include "nav2_controller/plugins/stable_stopped_goal_checker.hpp"
 #include "nav2_stable_stopped_goal_checker/stable_stopped_goal_checker.hpp"
 #include "pluginlib/class_list_macros.hpp"
 #include "angles/angles.h"
@@ -62,12 +63,8 @@ StableStoppedGoalChecker::StableStoppedGoalChecker()
   yaw_goal_tolerance_(0.25),
   rot_stopped_velocity_(0.25),
   trans_stopped_velocity_(0.25),
-  xy_stability_duration_(0.5),
-  yaw_stability_duration_(0.5),
-  stateful_(true),
-  check_xy_(true),
-  in_xy_tolerance_(false),
-  in_yaw_tolerance_(false)
+  stability_duration_(0.0),
+  in_pose_tolerance_(false)
 {
 }
 
@@ -91,14 +88,8 @@ void StableStoppedGoalChecker::initialize(
     node, plugin_name + ".trans_stopped_velocity", rclcpp::ParameterValue(0.25));
   nav2_util::declare_parameter_if_not_declared(
     node, plugin_name + ".rot_stopped_velocity", rclcpp::ParameterValue(0.25));
-  
-  // New parameters
   nav2_util::declare_parameter_if_not_declared(
-    node, plugin_name + ".xy_stability_duration", rclcpp::ParameterValue(0.5));
-  nav2_util::declare_parameter_if_not_declared(
-    node, plugin_name + ".yaw_stability_duration", rclcpp::ParameterValue(0.5));
-  nav2_util::declare_parameter_if_not_declared(
-    node, plugin_name + ".stateful", rclcpp::ParameterValue(true));
+    node, plugin_name + ".stability_duration", rclcpp::ParameterValue(0.5)); // Default 0.5s
 
   // Get parameters
   node->get_parameter(plugin_name + ".x_goal_tolerance", x_goal_tolerance_);
@@ -106,9 +97,7 @@ void StableStoppedGoalChecker::initialize(
   node->get_parameter(plugin_name + ".yaw_goal_tolerance", yaw_goal_tolerance_);
   node->get_parameter(plugin_name + ".trans_stopped_velocity", trans_stopped_velocity_);
   node->get_parameter(plugin_name + ".rot_stopped_velocity", rot_stopped_velocity_);
-  node->get_parameter(plugin_name + ".xy_stability_duration", xy_stability_duration_);
-  node->get_parameter(plugin_name + ".yaw_stability_duration", yaw_stability_duration_);
-  node->get_parameter(plugin_name + ".stateful", stateful_);
+  node->get_parameter(plugin_name + ".stability_duration", stability_duration_);
 
   // Add callback for dynamic parameters
   dyn_params_handler_ = node->add_on_set_parameters_callback(
@@ -117,94 +106,52 @@ void StableStoppedGoalChecker::initialize(
 
 void StableStoppedGoalChecker::reset()
 {
-  check_xy_ = true;
-  in_xy_tolerance_ = false;
-  in_yaw_tolerance_ = false;
+  in_pose_tolerance_ = false;
+//   first_tolerance_time_ = rclcpp::Time(0, 0, clock_->get_clock_type());
 }
 
 bool StableStoppedGoalChecker::isGoalReached(
   const geometry_msgs::msg::Pose & query_pose, const geometry_msgs::msg::Pose & goal_pose,
   const geometry_msgs::msg::Twist & velocity)
 {
-  // 1. Calculate Errors
+  // 1. Check Pose Tolerance (Split X, Y, Yaw)
   double dx = fabs(query_pose.position.x - goal_pose.position.x);
   double dy = fabs(query_pose.position.y - goal_pose.position.y);
-  double dyaw = fabs(angles::shortest_angular_distance(
+
+  double dyaw = angles::shortest_angular_distance(
     tf2::getYaw(query_pose.orientation),
-    tf2::getYaw(goal_pose.orientation)));
+    tf2::getYaw(goal_pose.orientation));
 
-  bool xy_ok = (dx <= x_goal_tolerance_) && (dy <= y_goal_tolerance_);
-  bool yaw_ok = (dyaw <= yaw_goal_tolerance_);
+  bool current_in_pose_tolerance = (dx <= x_goal_tolerance_) &&
+                                   (dy <= y_goal_tolerance_) &&
+                                   (fabs(dyaw) <= yaw_goal_tolerance_);
 
-  // 2. Logic based on 'stateful' parameter
-  if (stateful_) {
-    // === STATEFUL MODE: Check XY first, then Yaw ===
+  // 2. Check Stability Duration
+  if (current_in_pose_tolerance) {
+    if (!in_pose_tolerance_) {
+      // First time entering tolerance
+      first_tolerance_time_ = clock_->now();
+      in_pose_tolerance_ = true;
+    }
     
-    if (check_xy_) {
-      // Phase 1: Checking XY Stability
-      if (xy_ok) {
-        if (!in_xy_tolerance_) {
-          first_xy_tolerance_time_ = clock_->now();
-          in_xy_tolerance_ = true;
-        }
-        
-        double time_in_xy = (clock_->now() - first_xy_tolerance_time_).seconds();
-        
-        // If XY is stable for duration, switch to Yaw phase
-        if (time_in_xy >= xy_stability_duration_) {
-          check_xy_ = false;
-          in_xy_tolerance_ = false; // Reset for cleanliness (though not used anymore)
-          in_yaw_tolerance_ = false; // Reset for next phase
-          // Fall through to return false (next loop will check yaw)
-        }
-      } else {
-        in_xy_tolerance_ = false;
-      }
-      return false; // Still working on XY or just finished XY
-    } else {
-      // Phase 2: Checking Yaw Stability (XY is already assumed done)
-      if (yaw_ok) {
-        if (!in_yaw_tolerance_) {
-          first_yaw_tolerance_time_ = clock_->now();
-          in_yaw_tolerance_ = true;
-        }
+    // Calculate how long we've been in tolerance
+    double time_in_tolerance = (clock_->now() - first_tolerance_time_).seconds();
 
-        double time_in_yaw = (clock_->now() - first_yaw_tolerance_time_).seconds();
-
-        if (time_in_yaw >= yaw_stability_duration_) {
-          // Both phases passed, now check velocity
-          return fabs(velocity.angular.z) <= rot_stopped_velocity_ &&
-                 hypot(velocity.linear.x, velocity.linear.y) <= trans_stopped_velocity_;
-        }
-      } else {
-        in_yaw_tolerance_ = false;
-      }
+    // If we haven't stayed long enough, we are not done yet.
+    if (time_in_tolerance < stability_duration_) {
       return false;
     }
 
   } else {
-    // === NON-STATEFUL MODE: Check XY & Yaw Simultaneously ===
-    // Use xy_stability_duration for the combined check as requested
-    
-    if (xy_ok && yaw_ok) {
-      if (!in_xy_tolerance_) {
-        // Reuse xy variables for the combined state
-        first_xy_tolerance_time_ = clock_->now();
-        in_xy_tolerance_ = true;
-      }
-
-      double time_in_combined = (clock_->now() - first_xy_tolerance_time_).seconds();
-
-      if (time_in_combined >= xy_stability_duration_) {
-        // Tolerances & Duration met, now check velocity
-        return fabs(velocity.angular.z) <= rot_stopped_velocity_ &&
-               hypot(velocity.linear.x, velocity.linear.y) <= trans_stopped_velocity_;
-      }
-    } else {
-      in_xy_tolerance_ = false;
-    }
+    // We went out of tolerance, reset the timer
+    in_pose_tolerance_ = false;
     return false;
   }
+
+  // 3. Check Velocity (Stopped condition)
+  // Only reached if Pose and Duration are satisfied
+  return fabs(velocity.angular.z) <= rot_stopped_velocity_ &&
+         hypot(velocity.linear.x, velocity.linear.y) <= trans_stopped_velocity_;
 }
 
 bool StableStoppedGoalChecker::getTolerances(
@@ -249,14 +196,8 @@ StableStoppedGoalChecker::dynamicParametersCallback(std::vector<rclcpp::Paramete
         trans_stopped_velocity_ = parameter.as_double();
       } else if (name == plugin_name_ + ".rot_stopped_velocity") {
         rot_stopped_velocity_ = parameter.as_double();
-      } else if (name == plugin_name_ + ".xy_stability_duration") {
-        xy_stability_duration_ = parameter.as_double();
-      } else if (name == plugin_name_ + ".yaw_stability_duration") {
-        yaw_stability_duration_ = parameter.as_double();
-      }
-    } else if (type == ParameterType::PARAMETER_BOOL) {
-      if (name == plugin_name_ + ".stateful") {
-        stateful_ = parameter.as_bool();
+      } else if (name == plugin_name_ + ".stability_duration") {
+        stability_duration_ = parameter.as_double();
       }
     }
   }
