@@ -77,16 +77,23 @@ class RobotStatusManager(Node):
             self.log_callback,
             10)
         
-        # self.action_status_sub = self.create_subscription(
-        #     GoalStatusArray,
-        #     '/navigate_through_poses/_action/status',
-        #     self.action_status_callback,
-        #     10)
-        self.action_status_sub = self.create_subscription(
+        self.nav_to_pose_sub = self.create_subscription(
             GoalStatusArray,
             '/navigate_to_pose/_action/status',
-            self.action_status_callback,
-            10)        
+            self.action_status_callback,  # 작성하신 함수
+            10)
+
+        self.nav_through_poses_sub = self.create_subscription(
+            GoalStatusArray,
+            '/navigate_through_poses/_action/status',
+            self.action_status_callback,  # 작성하신 함수 (재사용)
+            10)
+        
+        # self.action_status_sub = self.create_subscription(
+        #     GoalStatusArray,
+        #     '/navigate_to_pose/_action/status',
+        #     self.action_status_callback,
+        #     10)        
 
         self.status_publisher = self.create_publisher(
             String,
@@ -99,6 +106,7 @@ class RobotStatusManager(Node):
             self.publish_status_callback)
 
         self.get_logger().info('Robot Status Manager (즉시 발행 v3)가 시작되었습니다.')
+        self.get_logger().info('#### Robot Status Manager (즉시 발행 v3)가 시작되었습니다.')
 
     def log_callback(self, msg: BehaviorTreeLog):
         """
@@ -238,47 +246,89 @@ class RobotStatusManager(Node):
     #             self.get_logger().info(f"액션 상태 변경으로 인해 상태 재평가 트리거됨. {final_status_code}")
     #             # self._evaluate_and_publish_if_changed(reason="Action Status Event")
 
+    # def action_status_callback(self, msg: GoalStatusArray):
+    #     """
+    #     1. 실행 중인 Goal이 없으면 새로 등록합니다.
+    #     2. 등록된 Goal이 있다면 상태를 확인하여 CANCELED일 때 로그를 남기고 추적을 종료합니다.
+    #     """
+    #     with self.state_lock:
+    #         # --- [Case 1] 현재 추적 중인 골이 없을 때 (새로운 골 탐색) ---
+    #         if self.active_goal_id is None:
+    #             for status in msg.status_list:
+    #                 if status.status == GoalStatus.STATUS_EXECUTING:
+    #                     self.active_goal_id = status.goal_info.goal_id
+    #                     self.get_logger().info(f"New Action Started: {list(self.active_goal_id.uuid)}")
+    #                     break # 첫 번째 실행 중인 골을 잡고 종료
+    #             return # 이번 콜백에서는 등록만 하고 빠져나갑니다.
+
+    #         # --- [Case 2] 현재 추적 중인 골이 있을 때 (상태 모니터링) ---
+    #         goal_found = False
+    #         for status in msg.status_list:
+    #             # UUID 일치 확인
+    #             if tuple(status.goal_info.goal_id.uuid) == tuple(self.active_goal_id.uuid):
+    #                 goal_found = True
+                    
+    #                 # 요청하신 핵심 로직: CANCELED 감지
+    #                 if status.status == GoalStatus.STATUS_CANCELED:
+    #                     self.get_logger().warn(f"Action Canceled Detected! UUID: {list(self.active_goal_id.uuid)}")
+    #                     self.active_goal_id = None # 종료되었으므로 리셋
+    #                     self.curr_status_ = RobotStatus.CANCELED
+    #                     if self.prev_status_ != self.curr_status_:
+    #                         self.get_logger().info(f"###### 로봇 상태가 {self.prev_status_} --> {self.curr_status_}으로 변경.")
+    #                         self.status_publisher.publish(String(data=self.curr_status_))
+    #                         self.prev_status_ = self.curr_status_
+                    
+    #                 # 성공하거나(SUCCEEDED) 중단된(ABORTED) 경우에도 리셋해야 다음 골을 잡을 수 있음
+    #                 elif status.status in [GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_ABORTED]:
+    #                     self.active_goal_id = None # 종료되었으므로 리셋
+                    
+    #                 break # 내 골을 찾았으니 루프 종료
+
+    #         # (선택 사항) 만약 status_list에서 내 골이 아예 사라졌다면? (Nav2 서버 재시작 등)
+    #         if not goal_found:
+    #              self.active_goal_id = None
+
     def action_status_callback(self, msg: GoalStatusArray):
-        """
-        1. 실행 중인 Goal이 없으면 새로 등록합니다.
-        2. 등록된 Goal이 있다면 상태를 확인하여 CANCELED일 때 로그를 남기고 추적을 종료합니다.
-        """
         with self.state_lock:
-            # --- [Case 1] 현재 추적 중인 골이 없을 때 (새로운 골 탐색) ---
+            # 1. 현재 추적 중인 액션이 없는 경우: '실행 시작(EXECUTING)'인 놈만 찾습니다.
             if self.active_goal_id is None:
                 for status in msg.status_list:
                     if status.status == GoalStatus.STATUS_EXECUTING:
                         self.active_goal_id = status.goal_info.goal_id
-                        self.get_logger().info(f"New Action Started: {list(self.active_goal_id.uuid)}")
-                        break # 첫 번째 실행 중인 골을 잡고 종료
-                return # 이번 콜백에서는 등록만 하고 빠져나갑니다.
+                        # (선택) 시작 로그가 필요 없다면 아래 줄 주석 처리
+                        # self.get_logger().info(f"Nav2 Action Started: {list(self.active_goal_id.uuid)}")
+                        break 
+                return
 
-            # --- [Case 2] 현재 추적 중인 골이 있을 때 (상태 모니터링) ---
-            goal_found = False
+            # 2. 현재 추적 중인 액션이 있는 경우: 내 액션이 어떻게 됐는지 감시합니다.
+            target_status = None
             for status in msg.status_list:
-                # UUID 일치 확인
                 if tuple(status.goal_info.goal_id.uuid) == tuple(self.active_goal_id.uuid):
-                    goal_found = True
-                    
-                    # 요청하신 핵심 로직: CANCELED 감지
-                    if status.status == GoalStatus.STATUS_CANCELED:
-                        self.get_logger().warn(f"Action Canceled Detected! UUID: {list(self.active_goal_id.uuid)}")
-                        self.active_goal_id = None # 종료되었으므로 리셋
-                        self.curr_status_ = RobotStatus.CANCELED
-                        if self.prev_status_ != self.curr_status_:
-                            self.get_logger().info(f"###### 로봇 상태가 {self.prev_status_} --> {self.curr_status_}으로 변경.")
-                            self.status_publisher.publish(String(data=self.curr_status_))
-                            self.prev_status_ = self.curr_status_
-                    
-                    # 성공하거나(SUCCEEDED) 중단된(ABORTED) 경우에도 리셋해야 다음 골을 잡을 수 있음
-                    elif status.status in [GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_ABORTED]:
-                        self.active_goal_id = None # 종료되었으므로 리셋
-                    
-                    break # 내 골을 찾았으니 루프 종료
+                    target_status = status
+                    break
 
-            # (선택 사항) 만약 status_list에서 내 골이 아예 사라졌다면? (Nav2 서버 재시작 등)
-            if not goal_found:
-                 self.active_goal_id = None
+            # 내 액션이 리스트에 있다면 상태 검사
+            if target_status:
+                if target_status.status == GoalStatus.STATUS_CANCELED:
+                    # [핵심] 의도하신 대로 '취소'된 경우에만 경고 로그
+                    self.get_logger().warn(f"!!! Action CANCELED !!! UUID: {list(self.active_goal_id.uuid)}")
+                    self.active_goal_id = None # 추적 종료 및 리셋
+                    self.curr_status_ = RobotStatus.CANCELED
+                    if self.prev_status_ != self.curr_status_:
+                        self.get_logger().info(f"###### 로봇 상태가 {self.prev_status_} --> {self.curr_status_}으로 변경.")
+                        self.status_publisher.publish(String(data=self.curr_status_))
+                        self.prev_status_ = self.curr_status_
+
+
+
+                elif target_status.status in [GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_ABORTED]:
+                    # 취소 외의 종료 상황에서도 리셋은 필수 (로그는 없음)
+                    self.active_goal_id = None 
+            else:
+                # 내 액션이 상태 리스트에서 갑자기 사라진 경우 (Nav2 재시작 등) 안전하게 리셋
+                self.active_goal_id = None
+
+
 
 
     def _evaluate_and_publish_if_changed(self, reason: str):
