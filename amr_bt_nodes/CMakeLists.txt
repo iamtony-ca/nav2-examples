@@ -23,6 +23,7 @@ find_package(nav2_util REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
 
+# find_package(tf2 REQUIRED)
 
 # find_package(robot_interfaces REQUIRED)
 
@@ -378,6 +379,23 @@ target_include_directories(check_pause_reset_condition PUBLIC
   $<INSTALL_INTERFACE:include>)
 
 
+# ───── Build check_final_goal_yaw_action ─────
+add_library(check_final_goal_yaw_action SHARED
+  src/check_final_goal_yaw_action.cpp)
+
+ament_target_dependencies(check_final_goal_yaw_action
+  rclcpp
+  std_msgs
+  behaviortree_cpp
+  geometry_msgs
+  tf2_geometry_msgs
+  # tf2
+  pluginlib)
+
+target_include_directories(check_final_goal_yaw_action PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+
 
 
 # ───── Pluginlib Export ─────
@@ -411,6 +429,7 @@ install(TARGETS
   set_blackboard_ushort_action
   reactive_round_robin_control
   check_pause_reset_condition
+  check_final_goal_yaw_action
 
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib

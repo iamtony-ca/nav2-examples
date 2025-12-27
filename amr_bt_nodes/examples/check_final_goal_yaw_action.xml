@@ -1,0 +1,19 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence>
+      <CheckFinalGoalYaw 
+          input_goals="{goals}" 
+          input_pose="{pose}" 
+          result="{yaw_check_result}" 
+          difference_radian="{yaw_diff}" />
+          
+      <BlackboardCheckDouble 
+          value_A="{yaw_check_result}" 
+          value_B="0.5" 
+          return_on_mismatch="FAILURE">
+          <AlwaysSuccess/>
+      </BlackboardCheckDouble>
+      
+    </Sequence>
+  </BehaviorTree>
+</root>

@@ -242,3 +242,13 @@
     <description>Return SUCCESS if flag is true, otherwise FAILURE for controller_pause</description>
   </class>
 </library>
+
+
+<library path="check_final_goal_yaw_action">
+  <class name="amr_bt_nodes::CheckFinalGoalYawAction"
+         type="amr_bt_nodes::CheckFinalGoalYawAction"
+         base_class_type="BT::SyncActionNode">
+    <description>Checks if the yaw difference between the input pose and the last goal is within a tight threshold (0.2 degrees).</description>
+  </class>
+</library>
+
