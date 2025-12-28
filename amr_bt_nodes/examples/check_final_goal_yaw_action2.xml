@@ -1,0 +1,24 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence>
+        <FollowPath path="{path}" controller_id="{selected_controller}" 
+                    goal_checker_id="general_goal_checker" progress_checker_id="progress_checker" 
+                    error_code_id="{follow_path_error_code}"/>
+
+        <GetCurrentPose name="GetCurrentPoseAfterFollowPath" output_pose="{pose}"/>
+
+        <CheckFinalGoalYaw name="CheckFinalGoalYawAfterFollowPath"
+            input_goals="{goals}" 
+            input_pose="{pose}" 
+            result="{yaw_check_result}" 
+            difference_radian="{yaw_diff}" />
+
+        <Precondition name="PreconditionSpinFinalYaw"
+            if="yaw_check_result == 1.0" else="SUCCESS">
+
+            <Spin name="SpinFinalYaw" spin_dist="{yaw_diff}" is_recovery="false" time_allowance="12" error_code_id="{spin_error_code}"/>
+
+        </Precondition>
+    </Sequence>
+  </BehaviorTree>
+</root>
