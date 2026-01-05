@@ -44,6 +44,34 @@ public:
     geometry_msgs::msg::Pose & pose_tolerance,
     geometry_msgs::msg::Twist & vel_tolerance) override;
 
+
+/**
+   * @brief Graceful Controller가 XY 완료(Latch) 상태를 확인하기 위한 함수
+   * @return true if XY check is passed and latched (now checking Yaw)
+   */
+  bool isXYLatched() const {
+    // stateful 모드일 때 check_xy_가 false라면 XY 검사는 통과했다는 뜻
+    return stateful_ && !check_xy_;
+  }
+
+  /**
+   * @brief X축 허용 오차 Getter
+   */
+  double getXGoalTolerance() const {
+    return x_goal_tolerance_;
+  }
+
+  /**
+   * @brief Y축 허용 오차 Getter
+   */
+  double getYGoalTolerance() const {
+    return y_goal_tolerance_;
+  }
+
+
+
+
+
 protected:
   // --- Parameters ---
   double x_goal_tolerance_;
