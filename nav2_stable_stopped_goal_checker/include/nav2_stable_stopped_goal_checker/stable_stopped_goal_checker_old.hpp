@@ -49,7 +49,7 @@ namespace nav2_controller
 
 /**
  * @class StableStoppedGoalChecker
- * @brief Checks if goal is reached with separate X/Y tolerances, stability duration, and zero velocity.
+ * @brief Checks if goal is reached with separate X/Y/Yaw tolerances, split stability durations, and stateful logic.
  */
 class StableStoppedGoalChecker : public nav2_core::GoalChecker
 {
@@ -71,22 +71,59 @@ public:
     geometry_msgs::msg::Pose & pose_tolerance,
     geometry_msgs::msg::Twist & vel_tolerance) override;
 
+
+/**
+   * @brief Graceful Controller가 XY 완료(Latch) 상태를 확인하기 위한 함수
+   * @return true if XY check is passed and latched (now checking Yaw)
+   */
+  bool isXYLatched() const {
+    // stateful 모드일 때 check_xy_가 false라면 XY 검사는 통과했다는 뜻
+    return stateful_ && !check_xy_;
+  }
+
+  /**
+   * @brief X축 허용 오차 Getter
+   */
+  double getXGoalTolerance() const {
+    return x_goal_tolerance_;
+  }
+
+  /**
+   * @brief Y축 허용 오차 Getter
+   */
+  double getYGoalTolerance() const {
+    return y_goal_tolerance_;
+  }
+
+
+
+
+
 protected:
   // Tolerance parameters
   double x_goal_tolerance_;
   double y_goal_tolerance_;
   double yaw_goal_tolerance_;
   
-  // Velocity parameters (from StoppedGoalChecker)
+  // Velocity parameters
   double rot_stopped_velocity_;
   double trans_stopped_velocity_;
 
   // Time stability parameters
-  double stability_duration_;
+  double xy_stability_duration_;
+  double yaw_stability_duration_;
 
-  // State variables for time checking
-  bool in_pose_tolerance_;
-  rclcpp::Time first_tolerance_time_;
+  // Logic control parameters
+  bool stateful_;
+
+  // State variables
+  bool check_xy_; // If true, we are checking XY. If false (and stateful), we are checking Yaw.
+  
+  // Time tracking variables
+  bool in_xy_tolerance_;
+  bool in_yaw_tolerance_;
+  rclcpp::Time first_xy_tolerance_time_;
+  rclcpp::Time first_yaw_tolerance_time_;
   rclcpp::Clock::SharedPtr clock_;
 
   // Dynamic parameters handler

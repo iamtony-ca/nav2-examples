@@ -11,3 +11,7 @@ controller_server:
       xy_stability_duration: 1.0      # 위 조건을 1초 이상 만족해야 함
       yaw_stability_duration: 1.0     # 위 조건을 1초 이상 만족해야 함
       stateful: true
+
+      # [새로 추가된 기능]
+      path_topic: "/plan"              # Planner가 발행하는 Global Path 토픽
+      path_tolerance_multiplier: 1.5   # 허용 오차의 1.5배 이내로 경로가 남았을 때만 도착 인정
