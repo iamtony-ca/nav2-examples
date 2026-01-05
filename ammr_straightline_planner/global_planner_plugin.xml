@@ -1,0 +1,5 @@
+<library path="ammr_straightline_planner_plugin">
+	<class name="ammr_straightline_planner::StraightLine" type="ammr_straightline_planner::StraightLine" base_class_type="nav2_core::GlobalPlanner">
+	  <description>This is an example plugin which produces straight path.</description>
+	</class>
+</library>

@@ -1,0 +1,5 @@
+<library path="ammr_theta_star_planner">
+    <class type="ammr_theta_star_planner::ThetaStarPlanner" base_class_type="nav2_core::GlobalPlanner">
+        <description>An implementation of the Theta* Algorithm</description>
+    </class>
+</library>

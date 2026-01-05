@@ -1,0 +1,5 @@
+<library path="ammr_navfn_planner">
+	<class type="ammr_navfn_planner::NavfnPlanner" base_class_type="nav2_core::GlobalPlanner">
+	  <description></description>
+	</class>
+</library>
