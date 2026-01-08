@@ -10,15 +10,15 @@ VelocityModifierNode::VelocityModifierNode(const rclcpp::NodeOptions & options)
 {
   RCLCPP_INFO(this->get_logger(), "Velocity Modifier Node is initializing...");
 
-  // 최소 속도 파라미터
+  // 최소 속도 파라미터 & 
+  // 비율 보정 시 적용될 상한선 파라미터 
   this->declare_parameter<double>("min_abs_linear_vel", 0.05);
   this->declare_parameter<double>("min_abs_angular_vel", 0.05);
-  this->get_parameter("min_abs_linear_vel", min_abs_linear_vel_);
-  this->get_parameter("min_abs_angular_vel", min_abs_angular_vel_);
-
-  // 비율 보정 시 적용될 상한선 파라미터 
   this->declare_parameter<double>("ratio_scaling_max_linear_vel", 0.35);
   this->declare_parameter<double>("ratio_scaling_max_angular_vel", 0.25);
+
+  this->get_parameter("min_abs_linear_vel", min_abs_linear_vel_);
+  this->get_parameter("min_abs_angular_vel", min_abs_angular_vel_);
   this->get_parameter("ratio_scaling_max_linear_vel", ratio_scaling_max_linear_vel_);
   this->get_parameter("ratio_scaling_max_angular_vel", ratio_scaling_max_angular_vel_);
   
@@ -61,7 +61,7 @@ VelocityModifierNode::VelocityModifierNode(const rclcpp::NodeOptions & options)
   // qos_recovery.transient_local(); 
   recovery_mode_sub_ = this->create_subscription<String>(
     // "/bt_recovery_mode", qos_recovery,
-    "/bt_recovery_mode", 10,
+    "/robot_status", 10,
     std::bind(&VelocityModifierNode::recoveryModeCallback, this, std::placeholders::_1),
     sub_recovery_opt);
 
@@ -76,12 +76,12 @@ void VelocityModifierNode::recoveryModeCallback(const String::SharedPtr msg)
   const std::lock_guard<std::mutex> lock(data_mutex_);
   
   if (msg->data == "start") {
-    if (!recovery_mode_) {
+    if (!recovery_mode_ == false) {
       recovery_mode_ = true;
       RCLCPP_INFO(this->get_logger(), "Recovery mode ENABLED. Low-speed correction is active.");
     }
   } else if (msg->data == "finish") {
-    if (recovery_mode_) {
+    if (recovery_mode_ == true) {
       recovery_mode_ = false;
       RCLCPP_INFO(this->get_logger(), "Recovery mode DISABLED. Low-speed correction is inactive.");
     }
@@ -151,7 +151,7 @@ void VelocityModifierNode::cmdVelCallback(const geometry_msgs::msg::Twist::Share
   // [수정된 로직 끝]
 
   // 3. 저속 보정 로직 
-  if (recovery_mode_) {
+  if (recovery_mode_ == true) {
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
       "[RECOVERY_ACTIVE] Recovery logic is running! linear_max: %.2f", ratio_scaling_max_linear_vel_);
 
