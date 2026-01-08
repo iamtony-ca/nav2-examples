@@ -75,12 +75,12 @@ void VelocityModifierNode::recoveryModeCallback(const String::SharedPtr msg)
   // lock_guard를 통해 공유 변수인 recovery_mode_를 안전하게 수정
   const std::lock_guard<std::mutex> lock(data_mutex_);
   
-  if (msg->data == "start") {
-    if (!recovery_mode_ == false) {
+  if (msg->data == "recovery_start") {
+    if (recovery_mode_ == false) {
       recovery_mode_ = true;
       RCLCPP_INFO(this->get_logger(), "Recovery mode ENABLED. Low-speed correction is active.");
     }
-  } else if (msg->data == "finish") {
+  } else if (msg->data == "recovery_finish") {
     if (recovery_mode_ == true) {
       recovery_mode_ = false;
       RCLCPP_INFO(this->get_logger(), "Recovery mode DISABLED. Low-speed correction is inactive.");
