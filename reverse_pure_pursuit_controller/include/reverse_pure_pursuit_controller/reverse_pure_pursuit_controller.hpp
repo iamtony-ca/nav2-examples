@@ -37,21 +37,21 @@ namespace reverse_pure_pursuit_controller
 {
 
 /**
- * @class reverse_pure_pursuit_controller::RegulatedPurePursuitController
+ * @class reverse_pure_pursuit_controller::ReversePurePursuitController
  * @brief Regulated pure pursuit controller plugin
  */
-class RegulatedPurePursuitController : public nav2_core::Controller
+class ReversePurePursuitController : public nav2_core::Controller
 {
 public:
   /**
-   * @brief Constructor for reverse_pure_pursuit_controller::RegulatedPurePursuitController
+   * @brief Constructor for reverse_pure_pursuit_controller::ReversePurePursuitController
    */
-  RegulatedPurePursuitController() = default;
+  ReversePurePursuitController() = default;
 
   /**
-   * @brief Destrructor for reverse_pure_pursuit_controller::RegulatedPurePursuitController
+   * @brief Destrructor for reverse_pure_pursuit_controller::ReversePurePursuitController
    */
-  ~RegulatedPurePursuitController() override = default;
+  ~ReversePurePursuitController() override = default;
 
   /**
    * @brief Configure controller state machine
@@ -212,7 +212,7 @@ protected:
   std::string plugin_name_;
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros_;
   nav2_costmap_2d::Costmap2D * costmap_;
-  rclcpp::Logger logger_ {rclcpp::get_logger("RegulatedPurePursuitController")};
+  rclcpp::Logger logger_ {rclcpp::get_logger("ReversePurePursuitController")};
 
   Parameters * params_;
   double goal_dist_tol_;
