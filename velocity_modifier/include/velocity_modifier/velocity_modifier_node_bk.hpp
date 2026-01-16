@@ -6,11 +6,10 @@
 #include <robot_interfaces/msg/modifier_control.hpp>
 #include <std_msgs/msg/string.hpp>
 
-#include <mutex>
+#include <mutex> // <atomic> 대신 <mutex>를 포함
 #include <limits>
 #include <memory>
 #include <cmath>
-#include <string> // string 추가
 
 namespace velocity_modifier
 {
@@ -57,6 +56,7 @@ private:
   };
   SpeedMode current_mode_ = SpeedMode::STANDARD_LIMIT;  
 
+
   double min_abs_linear_vel_ = 0.05;
   double min_abs_angular_vel_ = 0.05;
   
@@ -65,11 +65,6 @@ private:
   double ratio_scaling_max_angular_vel_ = 0.25;
   
   bool recovery_mode_ = false;
-
-  // === [Added] 주행 시작 속도 제한을 위한 변수 ===
-  rclcpp::Time driving_start_time_;      // 주행 시작 시각 저장
-  std::string last_robot_status_ = "";   // 상태 변화 감지용
-  double startup_phase2_limit_ = 0.3;    // 1초 ~ 2.5초 사이의 속도 제한 값 (파라미터화)
 
 };
 
