@@ -13,8 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef NAV2_REGULATED_PURE_PURSUIT_CONTROLLER__REGULATED_PURE_PURSUIT_CONTROLLER_HPP_
-#define NAV2_REGULATED_PURE_PURSUIT_CONTROLLER__REGULATED_PURE_PURSUIT_CONTROLLER_HPP_
+#ifndef REVERSE_PURE_PURSUIT_CONTROLLER__REGULATED_PURE_PURSUIT_CONTROLLER_HPP_
+#define REVERSE_PURE_PURSUIT_CONTROLLER__REGULATED_PURE_PURSUIT_CONTROLLER_HPP_
 
 #include <string>
 #include <vector>
@@ -28,28 +28,28 @@
 #include "pluginlib/class_list_macros.hpp"
 #include "geometry_msgs/msg/pose2_d.hpp"
 #include "std_msgs/msg/bool.hpp"
-#include "nav2_regulated_pure_pursuit_controller/path_handler.hpp"
-#include "nav2_regulated_pure_pursuit_controller/collision_checker.hpp"
-#include "nav2_regulated_pure_pursuit_controller/parameter_handler.hpp"
-#include "nav2_regulated_pure_pursuit_controller/regulation_functions.hpp"
+#include "reverse_pure_pursuit_controller/path_handler.hpp"
+#include "reverse_pure_pursuit_controller/collision_checker.hpp"
+#include "reverse_pure_pursuit_controller/parameter_handler.hpp"
+#include "reverse_pure_pursuit_controller/regulation_functions.hpp"
 
-namespace nav2_regulated_pure_pursuit_controller
+namespace reverse_pure_pursuit_controller
 {
 
 /**
- * @class nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
+ * @class reverse_pure_pursuit_controller::RegulatedPurePursuitController
  * @brief Regulated pure pursuit controller plugin
  */
 class RegulatedPurePursuitController : public nav2_core::Controller
 {
 public:
   /**
-   * @brief Constructor for nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
+   * @brief Constructor for reverse_pure_pursuit_controller::RegulatedPurePursuitController
    */
   RegulatedPurePursuitController() = default;
 
   /**
-   * @brief Destrructor for nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
+   * @brief Destrructor for reverse_pure_pursuit_controller::RegulatedPurePursuitController
    */
   ~RegulatedPurePursuitController() override = default;
 
@@ -230,11 +230,11 @@ protected:
   std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::Bool>>
   is_rotating_to_heading_pub_;
   std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>> carrot_arc_pub_;
-  std::unique_ptr<nav2_regulated_pure_pursuit_controller::PathHandler> path_handler_;
-  std::unique_ptr<nav2_regulated_pure_pursuit_controller::ParameterHandler> param_handler_;
-  std::unique_ptr<nav2_regulated_pure_pursuit_controller::CollisionChecker> collision_checker_;
+  std::unique_ptr<reverse_pure_pursuit_controller::PathHandler> path_handler_;
+  std::unique_ptr<reverse_pure_pursuit_controller::ParameterHandler> param_handler_;
+  std::unique_ptr<reverse_pure_pursuit_controller::CollisionChecker> collision_checker_;
 };
 
-}  // namespace nav2_regulated_pure_pursuit_controller
+}  // namespace reverse_pure_pursuit_controller
 
-#endif  // NAV2_REGULATED_PURE_PURSUIT_CONTROLLER__REGULATED_PURE_PURSUIT_CONTROLLER_HPP_
+#endif  // REVERSE_PURE_PURSUIT_CONTROLLER__REGULATED_PURE_PURSUIT_CONTROLLER_HPP_
