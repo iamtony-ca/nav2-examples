@@ -425,6 +425,10 @@ class FleetDecisionNode(Node):
         return min(group_ids) if group_ids else None
 
     def _policy_gate(self, desired: str, primary: Candidate, group_ids: List[int]) -> str:
+        if self.policy_mode == "rule" :
+            self.get_logger().info(f"policy_gate -> rule")
+            return desired
+
         heavy = {"REPLAN", "REROUTE", "STOP"}
 
         # 컨텍스트 산출
@@ -709,8 +713,12 @@ class FleetDecisionNode(Node):
             self.pub_req_replan.publish(Bool(data=True))
             self.last_heavy_time = self.get_clock().now()
         elif state == "REROUTE":
-            self.pub_req_reroute.publish(Bool(data=True))
+            # self.pub_req_reroute.publish(Bool(data=True))
+            # self.last_heavy_time = self.get_clock().now()
+            self.get_logger().info(f"##########[STATE] -> {state}")
+            self.pub_req_replan.publish(Bool(data=True))
             self.last_heavy_time = self.get_clock().now()
+
 
     def _set_state_and_emit(self, state: str, reason: str = ""):
         self.state = state
