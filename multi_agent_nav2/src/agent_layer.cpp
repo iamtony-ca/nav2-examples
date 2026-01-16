@@ -356,8 +356,42 @@ unsigned char AgentLayer::computeCost(const multi_agent_msgs::msg::MultiAgentInf
 // [CHANGED] 등방성(모든 방향) 팽창만 반환. 전방 스미어는 여기서 제외!
 double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo & a) const
 {
+  using S = multi_agent_msgs::msg::AgentStatus;
+  const uint8_t phase = a.status.phase;
+
   double r = dilation_m_;
+
+
+  switch (phase) {
+
+    case S::STATUS_AUTORECOVERY;
+    case S::STATUS_ERROR;
+      r = std::max(r, 0.0); // min 0.05 at least
+      break;
+
+
+    case S::STATUS_RECOVERING;
+    case S::STATUS_UNKNOWN;
+      r = std::max(r, 0.1);  // min 0.1 m
+      break;
+
+    // default
+    case S::STATUS_INIT;
+    case S::STATUS_MOVING;
+    default;
+      break;
+
+
+
+
+
+  }
+
+
+  // localization_uncertainty
   // if (a.pos_std_m >= 0.0) r += sigma_k_ * a.pos_std_m;   // need to edit
+
+  
   return r;
 }
 
