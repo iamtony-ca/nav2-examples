@@ -21,7 +21,7 @@
 #include <utility>
 
 #include "angles/angles.h"
-#include "nav2_regulated_pure_pursuit_controller/regulated_pure_pursuit_controller.hpp"
+#include "reverse_pure_pursuit_controller/regulated_pure_pursuit_controller.hpp"
 #include "nav2_core/controller_exceptions.hpp"
 #include "nav2_util/node_utils.hpp"
 #include "nav2_util/geometry_utils.hpp"
@@ -33,10 +33,10 @@ using std::max;
 using std::abs;
 using namespace nav2_costmap_2d;  // NOLINT
 
-namespace nav2_regulated_pure_pursuit_controller
+namespace reverse_pure_pursuit_controller
 {
 
-void RegulatedPurePursuitController::configure(
+void ReversePurePursuitController::configure(
   const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
   std::string name, std::shared_ptr<tf2_ros::Buffer> tf,
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros)
@@ -80,12 +80,12 @@ void RegulatedPurePursuitController::configure(
     "is_rotating_to_heading", 1);
 }
 
-void RegulatedPurePursuitController::cleanup()
+void ReversePurePursuitController::cleanup()
 {
   RCLCPP_INFO(
     logger_,
     "Cleaning up controller: %s of type"
-    " regulated_pure_pursuit_controller::RegulatedPurePursuitController",
+    " regulated_pure_pursuit_controller::ReversePurePursuitController",
     plugin_name_.c_str());
   global_path_pub_.reset();
   carrot_pub_.reset();
@@ -93,12 +93,12 @@ void RegulatedPurePursuitController::cleanup()
   is_rotating_to_heading_pub_.reset();
 }
 
-void RegulatedPurePursuitController::activate()
+void ReversePurePursuitController::activate()
 {
   RCLCPP_INFO(
     logger_,
     "Activating controller: %s of type "
-    "regulated_pure_pursuit_controller::RegulatedPurePursuitController",
+    "regulated_pure_pursuit_controller::ReversePurePursuitController",
     plugin_name_.c_str());
   global_path_pub_->on_activate();
   carrot_pub_->on_activate();
@@ -106,12 +106,12 @@ void RegulatedPurePursuitController::activate()
   is_rotating_to_heading_pub_->on_activate();
 }
 
-void RegulatedPurePursuitController::deactivate()
+void ReversePurePursuitController::deactivate()
 {
   RCLCPP_INFO(
     logger_,
     "Deactivating controller: %s of type "
-    "regulated_pure_pursuit_controller::RegulatedPurePursuitController",
+    "regulated_pure_pursuit_controller::ReversePurePursuitController",
     plugin_name_.c_str());
   global_path_pub_->on_deactivate();
   carrot_pub_->on_deactivate();
@@ -119,7 +119,7 @@ void RegulatedPurePursuitController::deactivate()
   is_rotating_to_heading_pub_->on_deactivate();
 }
 
-std::unique_ptr<geometry_msgs::msg::PointStamped> RegulatedPurePursuitController::createCarrotMsg(
+std::unique_ptr<geometry_msgs::msg::PointStamped> ReversePurePursuitController::createCarrotMsg(
   const geometry_msgs::msg::PoseStamped & carrot_pose)
 {
   auto carrot_msg = std::make_unique<geometry_msgs::msg::PointStamped>();
@@ -130,7 +130,7 @@ std::unique_ptr<geometry_msgs::msg::PointStamped> RegulatedPurePursuitController
   return carrot_msg;
 }
 
-double RegulatedPurePursuitController::getLookAheadDistance(
+double ReversePurePursuitController::getLookAheadDistance(
   const geometry_msgs::msg::Twist & speed)
 {
   // If using velocity-scaled look ahead distances, find and clamp the dist
@@ -164,7 +164,7 @@ double calculateCurvature(geometry_msgs::msg::Point lookahead_point)
 
 // computeVelocityCommands 함수 내부 수정 부분
 
-geometry_msgs::msg::TwistStamped RegulatedPurePursuitController::computeVelocityCommands(
+geometry_msgs::msg::TwistStamped ReversePurePursuitController::computeVelocityCommands(
   const geometry_msgs::msg::PoseStamped & pose,
   const geometry_msgs::msg::Twist & speed,
   nav2_core::GoalChecker * goal_checker)
@@ -253,7 +253,7 @@ geometry_msgs::msg::TwistStamped RegulatedPurePursuitController::computeVelocity
   if (params_->allow_reversing) {
     // 후진 전용 모드 체크
     // bool reverse_only_mode = params_->desired_linear_vel < 0.0;
-    bool reverse_only_mode = params_->allow_reversing;
+    bool reverse_only_mode = params_->allow_reversing < 0.0;
     
     
     if (reverse_only_mode) {
@@ -309,7 +309,7 @@ geometry_msgs::msg::TwistStamped RegulatedPurePursuitController::computeVelocity
   if (params_->use_collision_detection &&
     collision_checker_->isCollisionImminent(pose, linear_vel, angular_vel, carrot_dist))
   {
-    throw nav2_core::NoValidControl("RegulatedPurePursuitController detected collision ahead!");
+    throw nav2_core::NoValidControl("ReversePurePursuitController detected collision ahead!");
   }
 
   // Publish whether we are rotating to goal heading
@@ -327,7 +327,7 @@ geometry_msgs::msg::TwistStamped RegulatedPurePursuitController::computeVelocity
 
 
 
-// geometry_msgs::msg::TwistStamped RegulatedPurePursuitController::computeVelocityCommands(
+// geometry_msgs::msg::TwistStamped ReversePurePursuitController::computeVelocityCommands(
 //   const geometry_msgs::msg::PoseStamped & pose,
 //   const geometry_msgs::msg::Twist & speed,
 //   nav2_core::GoalChecker * goal_checker)
@@ -442,7 +442,7 @@ geometry_msgs::msg::TwistStamped RegulatedPurePursuitController::computeVelocity
 //   if (params_->use_collision_detection &&
 //     collision_checker_->isCollisionImminent(pose, linear_vel, angular_vel, carrot_dist))
 //   {
-//     throw nav2_core::NoValidControl("RegulatedPurePursuitController detected collision ahead!");
+//     throw nav2_core::NoValidControl("ReversePurePursuitController detected collision ahead!");
 //   }
 
 //   // Publish whether we are rotating to goal heading
@@ -458,7 +458,7 @@ geometry_msgs::msg::TwistStamped RegulatedPurePursuitController::computeVelocity
 //   return cmd_vel;
 // }
 
-bool RegulatedPurePursuitController::cancel()
+bool ReversePurePursuitController::cancel()
 {
   // if false then publish zero velocity
   if (!params_->use_cancel_deceleration) {
@@ -468,7 +468,7 @@ bool RegulatedPurePursuitController::cancel()
   return finished_cancelling_;
 }
 
-bool RegulatedPurePursuitController::shouldRotateToPath(
+bool ReversePurePursuitController::shouldRotateToPath(
   const geometry_msgs::msg::PoseStamped & carrot_pose, double & angle_to_path,
   double & x_vel_sign)
 {
@@ -482,7 +482,7 @@ bool RegulatedPurePursuitController::shouldRotateToPath(
          fabs(angle_to_path) > params_->rotate_to_heading_min_angle;
 }
 
-bool RegulatedPurePursuitController::shouldRotateToGoalHeading(
+bool ReversePurePursuitController::shouldRotateToGoalHeading(
   const geometry_msgs::msg::PoseStamped & carrot_pose)
 {
   // Whether we should rotate robot to goal heading
@@ -503,7 +503,7 @@ bool RegulatedPurePursuitController::shouldRotateToGoalHeading(
   return dist_to_goal < goal_dist_tol_;
 }
 
-void RegulatedPurePursuitController::rotateToHeading(
+void ReversePurePursuitController::rotateToHeading(
   double & linear_vel, double & angular_vel,
   const double & angle_to_path, const geometry_msgs::msg::Twist & curr_speed)
 {
@@ -516,9 +516,16 @@ void RegulatedPurePursuitController::rotateToHeading(
   const double min_feasible_angular_speed = curr_speed.angular.z - params_->max_angular_accel * dt;
   const double max_feasible_angular_speed = curr_speed.angular.z + params_->max_angular_accel * dt;
   angular_vel = std::clamp(angular_vel, min_feasible_angular_speed, max_feasible_angular_speed);
+
+  double max_vel_to_stop = std::sqrt(2 * params_->max_angular_accel * fabs(angle_to_path));
+  if (fabs(angular_vel) > max_vel_to_stop) {
+    angular_vel = sign * max_vel_to_stop;
+  }
+
+
 }
 
-geometry_msgs::msg::Point RegulatedPurePursuitController::circleSegmentIntersection(
+geometry_msgs::msg::Point ReversePurePursuitController::circleSegmentIntersection(
   const geometry_msgs::msg::Point & p1,
   const geometry_msgs::msg::Point & p2,
   double r)
@@ -553,7 +560,7 @@ geometry_msgs::msg::Point RegulatedPurePursuitController::circleSegmentIntersect
   return p;
 }
 
-geometry_msgs::msg::PoseStamped RegulatedPurePursuitController::getLookAheadPoint(
+geometry_msgs::msg::PoseStamped ReversePurePursuitController::getLookAheadPoint(
   const double & lookahead_dist,
   const nav_msgs::msg::Path & transformed_plan,
   bool interpolate_after_goal)
@@ -612,7 +619,7 @@ geometry_msgs::msg::PoseStamped RegulatedPurePursuitController::getLookAheadPoin
   return *goal_pose_it;
 }
 
-void RegulatedPurePursuitController::applyConstraints(
+void ReversePurePursuitController::applyConstraints(
   const double & curvature, const geometry_msgs::msg::Twist & /*curr_speed*/,
   const double & pose_cost, const nav_msgs::msg::Path & path, double & linear_vel, double & sign)
 {
@@ -643,13 +650,13 @@ void RegulatedPurePursuitController::applyConstraints(
   linear_vel = sign * linear_vel;
 }
 
-void RegulatedPurePursuitController::setPlan(const nav_msgs::msg::Path & path)
+void ReversePurePursuitController::setPlan(const nav_msgs::msg::Path & path)
 {
   has_reached_xy_tolerance_ = false;
   path_handler_->setPlan(path);
 }
 
-void RegulatedPurePursuitController::setSpeedLimit(
+void ReversePurePursuitController::setSpeedLimit(
   const double & speed_limit,
   const bool & percentage)
 {
@@ -669,14 +676,14 @@ void RegulatedPurePursuitController::setSpeedLimit(
   }
 }
 
-void RegulatedPurePursuitController::reset()
+void ReversePurePursuitController::reset()
 {
   cancelling_ = false;
   finished_cancelling_ = false;
   has_reached_xy_tolerance_ = false;
 }
 
-double RegulatedPurePursuitController::findVelocitySignChange(
+double ReversePurePursuitController::findVelocitySignChange(
   const nav_msgs::msg::Path & transformed_plan)
 {
   // Iterating through the transformed global path to determine the position of the cusp
@@ -722,9 +729,9 @@ double RegulatedPurePursuitController::findVelocitySignChange(
 
   return std::numeric_limits<double>::max();
 }
-}  // namespace nav2_regulated_pure_pursuit_controller
+}  // namespace reverse_pure_pursuit_controller
 
 // Register this controller as a nav2_core plugin
 PLUGINLIB_EXPORT_CLASS(
-  nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController,
+  reverse_pure_pursuit_controller::ReversePurePursuitController,
   nav2_core::Controller)
