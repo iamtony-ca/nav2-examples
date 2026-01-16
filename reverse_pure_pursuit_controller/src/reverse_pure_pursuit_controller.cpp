@@ -21,7 +21,7 @@
 #include <utility>
 
 #include "angles/angles.h"
-#include "reverse_pure_pursuit_controller/regulated_pure_pursuit_controller.hpp"
+#include "reverse_pure_pursuit_controller/reverse_pure_pursuit_controller.hpp"
 #include "nav2_core/controller_exceptions.hpp"
 #include "nav2_util/node_utils.hpp"
 #include "nav2_util/geometry_utils.hpp"
@@ -85,7 +85,7 @@ void ReversePurePursuitController::cleanup()
   RCLCPP_INFO(
     logger_,
     "Cleaning up controller: %s of type"
-    " regulated_pure_pursuit_controller::ReversePurePursuitController",
+    " reverse_pure_pursuit_controller::ReversePurePursuitController",
     plugin_name_.c_str());
   global_path_pub_.reset();
   carrot_pub_.reset();
@@ -98,7 +98,7 @@ void ReversePurePursuitController::activate()
   RCLCPP_INFO(
     logger_,
     "Activating controller: %s of type "
-    "regulated_pure_pursuit_controller::ReversePurePursuitController",
+    "reverse_pure_pursuit_controller::ReversePurePursuitController",
     plugin_name_.c_str());
   global_path_pub_->on_activate();
   carrot_pub_->on_activate();
@@ -111,7 +111,7 @@ void ReversePurePursuitController::deactivate()
   RCLCPP_INFO(
     logger_,
     "Deactivating controller: %s of type "
-    "regulated_pure_pursuit_controller::ReversePurePursuitController",
+    "reverse_pure_pursuit_controller::ReversePurePursuitController",
     plugin_name_.c_str());
   global_path_pub_->on_deactivate();
   carrot_pub_->on_deactivate();
