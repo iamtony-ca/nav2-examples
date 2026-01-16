@@ -88,12 +88,12 @@ void VelocityModifierNode::recoveryModeCallback(const String::SharedPtr msg)
 
   // 기존 Recovery Logic 유지
   if (current_status == "recovery_start") {
-    if (!recovery_mode_) {
+    if (recovery_mode_ == false) {
       recovery_mode_ = true;
       RCLCPP_INFO(this->get_logger(), "Recovery mode ENABLED.");
     }
   } else if (current_status == "recovery_finish") {
-    if (recovery_mode_) {
+    if (recovery_mode_ == true) {
       recovery_mode_ = false;
       RCLCPP_INFO(this->get_logger(), "Recovery mode DISABLED.");
     }
@@ -101,9 +101,9 @@ void VelocityModifierNode::recoveryModeCallback(const String::SharedPtr msg)
     // driving 등 다른 상태일 때는 recovery_mode_를 false로 두는 것이 안전할 수 있음
     // 하지만 기존 로직 유지를 위해 명시적 finish가 아닐 경우의 처리는 기존 코드 존중
     // (기존 코드의 else { recovery_mode_ = false; } 부분 유지)
-    if (current_status != "recovery_start" && current_status != "driving") { 
-        recovery_mode_ = false; 
-    }
+    // if (current_status != "recovery_start" && current_status != "driving") { 
+      recovery_mode_ = false; 
+    // }
   }
 }
 
