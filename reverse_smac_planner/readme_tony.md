@@ -10,7 +10,7 @@ modified in reverse_smac_planner/src/node_hybrid.cpp
 planner_server:
   ros__parameters:
     GridBased:
-      plugin: "reverse_smac_planner/SmacPlannerHybrid"
+      plugin: "reverse_smac_planner::SmacPlannerHybrid"
       motion_model_for_search: "DUBIN" # (수정된 코드 사용)
       
       # [핵심] 후진이 기본 주행이므로 페널티 없음
