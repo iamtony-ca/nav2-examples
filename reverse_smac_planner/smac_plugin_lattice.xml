@@ -1,0 +1,5 @@
+<library path="reverse_smac_planner_lattice">
+	<class type="reverse_smac_planner::SmacPlannerLattice" base_class_type="nav2_core::GlobalPlanner">
+	  <description>State Lattice SMAC planner</description>
+	</class>
+</library>
