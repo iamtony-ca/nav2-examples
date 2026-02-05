@@ -187,7 +187,27 @@ class FleetDecisionNode(Node):
         # [수정] Watchdog Timer 생성 (0.1초 간격으로 메시지 끊김 확인)
         self.create_timer(0.1, self.check_collision_timeout)
 
-        self.get_logger().info(f"FleetDecisionNode (Reroute Cooldown: {self.reroute_cooldown_sec}s). ID: {self.my_id}")
+        # ------------------------------------------------------------------
+        # Log All Parameters
+        # ------------------------------------------------------------------
+        self.get_logger().info("========== Fleet Decision Node Parameters ==========")
+        self.get_logger().info(f" - my_machine_id           : {self.my_id}")
+        self.get_logger().info(f" - use_reroute             : {self.use_reroute}")
+        self.get_logger().info(f" - wait_detect_sec         : {self.wait_detect_sec}")
+        self.get_logger().info(f" - wait_other_long_sec     : {self.wait_other_long_sec}")
+        self.get_logger().info(f" - wait_other_short_sec    : {self.wait_other_short_sec}")
+        self.get_logger().info(f" - wait_abnormal_long_sec  : {self.wait_abnormal_long_sec}")
+        self.get_logger().info(f" - wait_abnormal_short_sec : {self.wait_abnormal_short_sec}")
+        self.get_logger().info(f" - wait_obstacle_sec       : {self.wait_obstacle_sec}")
+        self.get_logger().info(f" - replan_ignore_sec       : {self.replan_ignore_sec}")
+        self.get_logger().info(f" - collision_msg_timeout   : {self.collision_msg_timeout}")
+        self.get_logger().info(f" - reroute_cooldown_sec    : {self.reroute_cooldown_sec}")
+        self.get_logger().info(f" - topic_collision         : {self.get_parameter('topic_collision').value}")
+        self.get_logger().info(f" - topic_request_replan    : {self.get_parameter('topic_request_replan').value}")
+        self.get_logger().info(f" - topic_request_reroute   : {self.get_parameter('topic_request_reroute').value}")
+        self.get_logger().info(f" - topic_cmd_resume        : {self.get_parameter('topic_cmd_resume').value}")
+        self.get_logger().info(f" - topic_cmd_stop          : {self.get_parameter('topic_cmd_stop').value}")
+        self.get_logger().info("====================================================")
 
     # ------------------------------------------------------------------
     # [NEW] Watchdog Timer Callback
