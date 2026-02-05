@@ -28,5 +28,5 @@ fleet_decision_node:
     topic_request_replan: "/request_replan"
     topic_request_reroute: "/request_reroute" # [NEW] 추가됨    
     topic_cmd_run: "/cmd/run"
-    topic_cmd_resume: "/cmd/resume"   # <--- [NEW] 추가됨
-    topic_cmd_stop: "/cmd/stop"
+    topic_cmd_resume: "/controller_pause_flag"   # <--- [NEW] 추가됨
+    topic_cmd_stop: "/controller_pause_flag"

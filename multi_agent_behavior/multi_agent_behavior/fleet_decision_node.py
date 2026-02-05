@@ -115,8 +115,8 @@ class FleetDecisionNode(Node):
         self.declare_parameter("topic_request_replan", "/request_replan")
         self.declare_parameter("topic_request_reroute", "/request_reroute")
         self.declare_parameter("topic_cmd_run", "/cmd/run")
-        self.declare_parameter("topic_cmd_resume", "/cmd/resume")
-        self.declare_parameter("topic_cmd_stop", "/cmd/stop")
+        self.declare_parameter("topic_cmd_resume", "/controller_pause_flag")
+        self.declare_parameter("topic_cmd_stop", "/controller_pause_flag")
 
         # Fetch Params
         self.my_id = self.get_parameter("my_machine_id").value
@@ -179,10 +179,10 @@ class FleetDecisionNode(Node):
 
         # [수정] Resume Publisher 생성
         self.pub_cmd_resume = self.create_publisher(Bool, 
-            self.get_parameter("topic_cmd_resume").value, 10)
+            self.get_parameter("topic_cmd_resume").value, qos_req)
         
         self.pub_cmd_stop = self.create_publisher(Bool, 
-            self.get_parameter("topic_cmd_stop").value, 10)
+            self.get_parameter("topic_cmd_stop").value, qos_req)
 
         # [수정] Watchdog Timer 생성 (0.1초 간격으로 메시지 끊김 확인)
         self.create_timer(0.1, self.check_collision_timeout)
@@ -489,7 +489,7 @@ class FleetDecisionNode(Node):
 
             # 2. Resume 요청 (무조건 발행 - BT Stop 해제용)
             # Reroute 토픽은 아껴도 Resume 토픽은 계속 보내줘야 로봇이 멈추지 않음
-            self.pub_cmd_resume.publish(Bool(data=True))
+            self.pub_cmd_resume.publish(Bool(data=False))
             
             self._publish_state(state_str + " -> REROUTE & RESUME")
             return
@@ -516,7 +516,7 @@ class FleetDecisionNode(Node):
                 self.wait_manager.reset()
                 self._publish_replan()
                 # BT의 Stop 노드를 풀기 위해 Resume 토픽도 같이 발행!
-                self.pub_cmd_resume.publish(Bool(data=True))
+                self.pub_cmd_resume.publish(Bool(data=False))
                 self._publish_state(state_str + " -> TIMEOUT REPLAN & RESUME")
             else:
                 self._publish_stop()
@@ -531,7 +531,7 @@ class FleetDecisionNode(Node):
         if self._pre_moving_stop_type != MovingStopType.TYPE_NONE:
             # [CASE: RESUME] 멈췄다가 출발하는 경우
             self.get_logger().info("[Decision] Clear -> RESUME")
-            self.pub_cmd_resume.publish(Bool(data=True)) 
+            self.pub_cmd_resume.publish(Bool(data=False)) 
         else:
             self.pub_cmd_run.publish(Bool(data=True))    
         
