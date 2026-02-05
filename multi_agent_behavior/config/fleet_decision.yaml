@@ -24,4 +24,5 @@ fleet_decision_node:
     topic_decision_state: "/decision_state"
     topic_request_replan: "/request_replan"
     topic_cmd_run: "/cmd/run"
+    topic_cmd_resume: "/cmd/resume"   # <--- [NEW] 추가됨
     topic_cmd_stop: "/cmd/stop"
