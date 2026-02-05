@@ -107,6 +107,7 @@ class FleetDecisionNode(Node):
         # Output Topics
         self.declare_parameter("topic_decision_state", "/decision_state")
         self.declare_parameter("topic_request_replan", "/request_replan")
+        self.declare_parameter("topic_request_reroute", "/request_reroute") # [NEW]
         self.declare_parameter("topic_cmd_run", "/cmd/run")
         self.declare_parameter("topic_cmd_resume", "/cmd/resume") # [수정] Resume 토픽 추가
         self.declare_parameter("topic_cmd_stop", "/cmd/stop")
@@ -150,6 +151,10 @@ class FleetDecisionNode(Node):
         self.pub_req_replan = self.create_publisher(Bool, 
             self.get_parameter("topic_request_replan").value, qos_req)
         
+            # [수정] Reroute 전용 Publisher 생성
+        self.pub_req_reroute = self.create_publisher(Bool, 
+            self.get_parameter("topic_request_reroute").value, 10)        
+
         self.pub_state = self.create_publisher(String, 
             self.get_parameter("topic_decision_state").value, 10)
         
@@ -412,8 +417,13 @@ class FleetDecisionNode(Node):
 
         if command == MovingCommand.REROUTE:
             self.wait_manager.reset()
-            self._publish_replan()
-            self._publish_state(state_str + " -> REPLAN")
+            # 1. Reroute 요청 (별도 토픽)
+            self._publish_reroute()
+            
+            # 2. Resume 요청 (무조건 주행 재개 신호)
+            self.pub_cmd_resume.publish(Bool(data=True))
+            
+            self._publish_state(state_str + " -> REROUTE & RESUME")
             return
 
         # 대기 시간 매핑
@@ -437,7 +447,9 @@ class FleetDecisionNode(Node):
                 self.get_logger().warn(f"Wait finished for {stop_type.name}. Requesting Replan.")
                 self.wait_manager.reset()
                 self._publish_replan()
-                self._publish_state(state_str + " -> TIMEOUT REPLAN")
+                # BT의 Stop 노드를 풀기 위해 Resume 토픽도 같이 발행!
+                self.pub_cmd_resume.publish(Bool(data=True))
+                self._publish_state(state_str + " -> TIMEOUT REPLAN & RESUME")
             else:
                 self._publish_stop()
 
@@ -466,6 +478,7 @@ class FleetDecisionNode(Node):
     # ------------------------------------------------------------------
     def _publish_stop(self): self.pub_cmd_stop.publish(Bool(data=True))
     def _publish_replan(self): self.pub_req_replan.publish(Bool(data=True))
+    def _publish_reroute(self): self.pub_req_reroute.publish(Bool(data=True)) # [NEW]
     def _publish_state(self, txt: str): self.pub_state.publish(String(data=txt))
 
     # ------------------------------------------------------------------
