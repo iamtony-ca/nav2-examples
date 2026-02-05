@@ -14,6 +14,9 @@ fleet_decision_node:
 
     # --- Thresholds ---
     replan_ignore_sec_after_agent: 0.5
+    collision_msg_timeout_sec: 3.0  # [수정] 충돌 메시지 타임아웃 설정
+    reroute_cooldown_sec: 5.0       # [수정] Reroute 요청 쿨다운 시간 설정
+
 
     # --- Input Topics ---
     topic_collision: "/path_agent_collision_info"

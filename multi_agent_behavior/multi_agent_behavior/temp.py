@@ -15,30 +15,30 @@ from multi_agent_msgs.msg import MultiAgentInfoArray, MultiAgentInfo, AgentStatu
 from enum import IntEnum
 from typing import Optional, Dict, Tuple, List
 
-# ... (Enum 및 WaitManager 클래스는 기존과 동일하여 생략) ...
-# ... (MovingCommand, MovingStopType, RerouteStatus, WaitManager 그대로 사용) ...
+# ... (Enum, WaitManager 클래스는 기존과 동일하므로 생략) ...
+# (MovingCommand, MovingStopType, RerouteStatus, WaitManager 그대로 사용)
 
 class MovingCommand(IntEnum):
-    WAIT = 0             # 일반 대기
-    WAIT_DETECT_AMR = 1  # 2초 대기 후 재탐색
-    WAIT_OHTHER_AMR = 2  # 30초/450초 대기 후 재탐색
-    WAIT_ABNORMAL = 3    # 30초/300초 대기 후 재탐색
-    REROUTE = 4          # 즉시 재라우팅 요청
+    WAIT = 0
+    WAIT_DETECT_AMR = 1
+    WAIT_OHTHER_AMR = 2
+    WAIT_ABNORMAL = 3
+    REROUTE = 4
 
 class MovingStopType(IntEnum):
     TYPE_NONE = 0
-    TYPE_1 = 1   # Manual AMR
-    TYPE_2 = 2   # Auto 동일 경로
-    TYPE_3 = 3   # Auto 상대 Reroute & 경로 겹침
-    TYPE_4 = 4   # (Reserved)
-    TYPE_5 = 5   # 내 ID > 상대 (오래 대기)
-    TYPE_6 = 6   # 내 ID < 상대 (짧게 대기)
-    TYPE_7 = 7   # 상대 Reroute & 나 Reroute 안함
-    TYPE_8 = 8   # 상대 Reroute 안함 & 나 Reroute 중
-    TYPE_9 = 9   # 둘다 안함 & 내 ID > 상대
-    TYPE_10 = 10 # 둘다 안함 & 내 ID < 상대
-    TYPE_11 = 11 # 일반 장애물
-    TYPE_12 = 12 # 전방 AMR 정지 상태
+    TYPE_1 = 1
+    TYPE_2 = 2
+    TYPE_3 = 3
+    TYPE_4 = 4
+    TYPE_5 = 5
+    TYPE_6 = 6
+    TYPE_7 = 7
+    TYPE_8 = 8
+    TYPE_9 = 9
+    TYPE_10 = 10
+    TYPE_11 = 11
+    TYPE_12 = 12
 
 class RerouteStatus(IntEnum):
     NONE = 0
@@ -95,6 +95,10 @@ class FleetDecisionNode(Node):
         self.declare_parameter("wait_obstacle_sec", 15.0)
         
         self.declare_parameter("replan_ignore_sec_after_agent", 0.5)
+        self.declare_parameter("collision_msg_timeout_sec", 3.0) 
+        
+        # [수정] Reroute 요청 쿨다운 시간 설정 (예: 2초 동안 재요청 금지)
+        self.declare_parameter("reroute_cooldown_sec", 2.0)
 
         # Topics
         self.declare_parameter("topic_collision", "/path_agent_collision_info")
@@ -104,8 +108,9 @@ class FleetDecisionNode(Node):
         # Output Topics
         self.declare_parameter("topic_decision_state", "/decision_state")
         self.declare_parameter("topic_request_replan", "/request_replan")
+        self.declare_parameter("topic_request_reroute", "/request_reroute")
         self.declare_parameter("topic_cmd_run", "/cmd/run")
-        self.declare_parameter("topic_cmd_resume", "/cmd/resume") # [수정] Resume 토픽 추가
+        self.declare_parameter("topic_cmd_resume", "/cmd/resume")
         self.declare_parameter("topic_cmd_stop", "/cmd/stop")
 
         # Fetch Params
@@ -120,12 +125,21 @@ class FleetDecisionNode(Node):
         self.wait_obstacle_sec = self.get_parameter("wait_obstacle_sec").value
         
         self.replan_ignore_sec = self.get_parameter("replan_ignore_sec_after_agent").value
+        self.collision_msg_timeout = self.get_parameter("collision_msg_timeout_sec").value
+        
+        # [수정] Reroute 쿨다운 값 가져오기
+        self.reroute_cooldown_sec = self.get_parameter("reroute_cooldown_sec").value
 
         # Internal State
         self._is_reroute_status = RerouteStatus.NONE
         self._pre_moving_stop_type = MovingStopType.TYPE_NONE
         self._last_agent_event_time: Optional[Time] = None
         self._cached_agents: Dict[int, MultiAgentInfo] = {}
+        
+        self._last_collision_msg_time: Optional[Time] = None 
+        
+        # [수정] 마지막 Reroute 요청 시각 저장용
+        self._last_reroute_req_time: Optional[Time] = None
 
         self.wait_manager = WaitManager(self.get_clock())
 
@@ -147,30 +161,47 @@ class FleetDecisionNode(Node):
         self.pub_req_replan = self.create_publisher(Bool, 
             self.get_parameter("topic_request_replan").value, qos_req)
         
+        self.pub_req_reroute = self.create_publisher(Bool, 
+            self.get_parameter("topic_request_reroute").value, qos_req) # [권장] qos_req 사용        
+
         self.pub_state = self.create_publisher(String, 
             self.get_parameter("topic_decision_state").value, 10)
         
         self.pub_cmd_run = self.create_publisher(Bool, 
             self.get_parameter("topic_cmd_run").value, 10)
 
-        # [수정] Resume Publisher 생성
         self.pub_cmd_resume = self.create_publisher(Bool, 
             self.get_parameter("topic_cmd_resume").value, 10)
         
         self.pub_cmd_stop = self.create_publisher(Bool, 
             self.get_parameter("topic_cmd_stop").value, 10)
 
-        self.get_logger().info(f"FleetDecisionNode Refactored (Resume Separated). ID: {self.my_id}")
+        self.create_timer(0.1, self.check_collision_timeout)
 
+        self.get_logger().info(f"FleetDecisionNode (Reroute Cooldown: {self.reroute_cooldown_sec}s). ID: {self.my_id}")
+
+    # ... (check_collision_timeout, on_agents, on_replan_flag, on_collision 등 기존 로직 동일) ...
     # ------------------------------------------------------------------
-    # Callbacks
+    # Watchdog Timer Callback
     # ------------------------------------------------------------------
-    # ... (on_agents, on_replan_flag 는 기존과 동일) ...
+    def check_collision_timeout(self):
+        if self._last_collision_msg_time is None:
+            if self._pre_moving_stop_type != MovingStopType.TYPE_NONE:
+                 self._handle_no_obstacle()
+            return
+
+        now = self.get_clock().now()
+        dt = (now - self._last_collision_msg_time).nanoseconds * 1e-9
+
+        if dt > self.collision_msg_timeout:
+            self._handle_no_obstacle()
+
     def on_agents(self, msg: MultiAgentInfoArray):
         self._cached_agents = {a.machine_id: a for a in msg.agents}
         if self.my_id in self._cached_agents:
             me = self._cached_agents[self.my_id]
-            self._is_reroute_status = RerouteStatus.EXECUTE if me.reroute else RerouteStatus.NONE
+            if me.reroute: self._is_reroute_status = RerouteStatus.EXECUTE
+            else: self._is_reroute_status = RerouteStatus.NONE
 
     def on_replan_flag(self, msg: Bool):
         if not msg.data: return
@@ -183,14 +214,14 @@ class FleetDecisionNode(Node):
         self._publish_state("REPLAN (Flag)")
 
     def on_collision(self, msg: PathAgentCollisionInfo):
-        # 1. 장애물 없음 -> [수정] Run 또는 Resume 로직 수행
+        self._last_collision_msg_time = self.get_clock().now()
+        
         if not msg.x: 
-            self._handle_no_obstacle() # (이름 변경: _reset_wait_and_run -> _handle_no_obstacle)
+            self._handle_no_obstacle()
             return
 
         self._last_agent_event_time = self.get_clock().now()
 
-        # ... (이하 충돌 처리 로직 동일) ...
         if not msg.machine_id:
             self._execute_command(MovingCommand.WAIT, MovingStopType.TYPE_11)
             return
@@ -210,10 +241,7 @@ class FleetDecisionNode(Node):
         command, stop_type = self._decide_obstacle_action(target_id, (collision_x, collision_y))
         self._execute_command(command, stop_type)
 
-    # ------------------------------------------------------------------
-    # Core Logic & Helper Functions (기존과 동일하여 생략)
-    # ------------------------------------------------------------------
-    # ... (_decide_obstacle_action, _check_vehicle_* 함수들은 그대로 사용) ...
+    # ... (Core Logic & Helper Functions 변경 없음) ...
     def _decide_obstacle_action(self, target_id: int, collision_xy: Tuple[float, float]) -> Tuple[MovingCommand, MovingStopType]:
         n_check_complete = MovingCommand.WAIT
         moving_stop_type = MovingStopType.TYPE_NONE
@@ -307,7 +335,7 @@ class FleetDecisionNode(Node):
         return min_dist < THRESHOLD
 
     # ------------------------------------------------------------------
-    # Execution
+    # Execution (수정됨: Reroute 쿨다운 적용)
     # ------------------------------------------------------------------
     def _execute_command(self, command: MovingCommand, stop_type: MovingStopType):
         
@@ -319,10 +347,34 @@ class FleetDecisionNode(Node):
 
         if command == MovingCommand.REROUTE:
             self.wait_manager.reset()
-            self._publish_replan()
-            self._publish_state(state_str + " -> REPLAN")
+            
+            # [수정] Reroute 요청 쿨다운 체크
+            now = self.get_clock().now()
+            should_publish = True
+            
+            if self._last_reroute_req_time is not None:
+                dt = (now - self._last_reroute_req_time).nanoseconds * 1e-9
+                if dt < self.reroute_cooldown_sec:
+                    should_publish = False # 쿨타임 중이면 발행 생략
+            
+            if should_publish:
+                # 1. Reroute 요청
+                self._publish_reroute()
+                self._last_reroute_req_time = now # 시간 갱신
+                self.get_logger().warn("Request REROUTE sent.")
+            else:
+                # 쿨타임 중일 때는 로그 정도만 (선택 사항)
+                # self.get_logger().debug("Reroute skipped due to cooldown.")
+                pass
+
+            # 2. Resume 요청 (무조건 발행 - BT Stop 해제용)
+            # Reroute 토픽은 아껴도 Resume 토픽은 계속 보내줘야 로봇이 멈추지 않음
+            self.pub_cmd_resume.publish(Bool(data=True))
+            
+            self._publish_state(state_str + " -> REROUTE & RESUME")
             return
 
+        # ... (이하 WAIT 로직 기존 동일) ...
         wait_time = 0.0
         if command == MovingCommand.WAIT_DETECT_AMR: wait_time = self.wait_detect_sec
         elif command == MovingCommand.WAIT_OHTHER_AMR: wait_time = self.wait_other_long_sec if self.use_reroute else self.wait_other_short_sec
@@ -338,26 +390,18 @@ class FleetDecisionNode(Node):
                 self.get_logger().warn(f"Wait finished for {stop_type.name}. Requesting Replan.")
                 self.wait_manager.reset()
                 self._publish_replan()
-                self._publish_state(state_str + " -> TIMEOUT REPLAN")
+                self.pub_cmd_resume.publish(Bool(data=True))
+                self._publish_state(state_str + " -> TIMEOUT REPLAN & RESUME")
             else:
                 self._publish_stop()
 
-    # ------------------------------------------------------------------
-    # [수정] 장애물 없음 처리 (RUN vs RESUME 분기)
-    # ------------------------------------------------------------------
     def _handle_no_obstacle(self):
-        """ 장애물이 없는 상태 처리: RUN 또는 RESUME """
-        
-        # 1. 이전에 멈춰있었는가? (MovingStopType이 NONE이 아님)
         if self._pre_moving_stop_type != MovingStopType.TYPE_NONE:
-            # [CASE: RESUME] 멈췄다가 출발하는 경우
             self.get_logger().info("[Decision] Clear -> RESUME")
-            self.pub_cmd_resume.publish(Bool(data=True)) # Resume 전용 토픽
+            self.pub_cmd_resume.publish(Bool(data=True)) 
         else:
-            # [CASE: RUN] 평소대로 잘 주행 중인 경우
-            self.pub_cmd_run.publish(Bool(data=True))    # Run 전용 토픽
+            self.pub_cmd_run.publish(Bool(data=True))    
         
-        # 공통 상태 초기화
         self._pre_moving_stop_type = MovingStopType.TYPE_NONE
         self.wait_manager.reset()
         self._publish_state("RUN")
@@ -367,6 +411,7 @@ class FleetDecisionNode(Node):
     # ------------------------------------------------------------------
     def _publish_stop(self): self.pub_cmd_stop.publish(Bool(data=True))
     def _publish_replan(self): self.pub_req_replan.publish(Bool(data=True))
+    def _publish_reroute(self): self.pub_req_reroute.publish(Bool(data=True))
     def _publish_state(self, txt: str): self.pub_state.publish(String(data=txt))
 
     # ------------------------------------------------------------------
