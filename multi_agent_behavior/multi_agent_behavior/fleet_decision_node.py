@@ -426,7 +426,7 @@ class FleetDecisionNode(Node):
         if not self.wait_manager.is_waiting:
             self.wait_manager.start_wait(wait_time, stop_type)
             self._publish_stop()
-            self._publish_state(state_str + f" -> WAIT({fwait_time}s)")
+            self._publish_state(state_str + f" -> WAIT({wait_time}s)")
         else:
             if self.wait_manager.check_finished():
                 self.get_logger().warn(f"Wait finished for {stop_type.name}. Requesting Replan.")
