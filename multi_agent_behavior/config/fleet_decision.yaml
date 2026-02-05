@@ -1,0 +1,27 @@
+fleet_decision_node:
+  ros__parameters:
+    # --- Robot Identity ---
+    my_machine_id: 1
+    use_reroute: true
+
+    # --- Wait Timeouts (Seconds) ---
+    wait_detect_amr_sec: 2.0        # TYPE 1, 6, 7, 10, 12
+    wait_other_amr_long_sec: 450.0  # TYPE 5 (Reroute ON)
+    wait_other_amr_short_sec: 30.0  # TYPE 5 (Reroute OFF)
+    wait_abnormal_long_sec: 300.0   # TYPE 2 (Reroute ON)
+    wait_abnormal_short_sec: 30.0   # TYPE 2 (Reroute OFF)
+    wait_obstacle_sec: 15.0         # TYPE 11 (General Obstacle)
+
+    # --- Thresholds ---
+    replan_ignore_sec_after_agent: 0.5
+
+    # --- Input Topics ---
+    topic_collision: "/path_agent_collision_info"
+    topic_agents: "/multi_agent_infos"
+    topic_replan_flag: "/replan_flag"
+    
+    # --- Output Topics ---
+    topic_decision_state: "/decision_state"
+    topic_request_replan: "/request_replan"
+    topic_cmd_run: "/cmd/run"
+    topic_cmd_stop: "/cmd/stop"
