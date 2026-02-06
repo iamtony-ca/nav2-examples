@@ -364,20 +364,36 @@ double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo &
 
   switch (phase) {
 
-    case S::STATUS_AUTORECOVERY;
-    case S::STATUS_ERROR;
+    case S::STATUS_AUTORECOVERY:
+    case S::STATUS_ERROR:
+    case S::STATUS_PAUSE:
+    case S::STATUS_WAITING_FOR_SAFETY:
+    case S::STATUS_WAITING_FOR_CONTROL:
+    case S::STATUS_WAITING_FOR_STATUS:
       r = std::max(r, 0.0); // min 0.05 at least
       break;
 
-
-    case S::STATUS_RECOVERING;
-    case S::STATUS_UNKNOWN;
+    case S::STATUS_LOADING:
+    case S::STATUS_UNLOADING:
+    case S::STATUS_UNLOADED:
+    case S::STATUS_LOADED:
+    case S::STATUS_RECOVERING:
+    case S::STATUS_UNKNOWN:
+    case S::STATUS_MANUAL_RUNNING:
+    case S::STATUS_MANUAL_COMPLETE:
       r = std::max(r, 0.1);  // min 0.1 m
       break;
 
     // default
-    case S::STATUS_INIT;
-    case S::STATUS_MOVING;
+    case S::STATUS_INIT:
+    case S::STATUS_PATH_PLANNING:
+    case S::STATUS_WAITING_FOR_THING:
+    case S::STATUS_MOVING:
+    case S::STATUS_ARRIVED:
+    case S::STATUS_MARKING:
+    case S::STATUS_CHARGING:
+    case S::STATUS_CHARGE_DONE:
+
     default;
       break;
 
