@@ -394,7 +394,7 @@ double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo &
     case S::STATUS_CHARGING:
     case S::STATUS_CHARGE_DONE:
 
-    default;
+    default:
       break;
 
 
