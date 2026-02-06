@@ -248,9 +248,10 @@ void AgentLayer::onInitialize()
   // [IMPORTANT] Costmap Publisher 초기화
   costmap_pub_ = std::make_unique<nav2_costmap_2d::Costmap2DPublisher>(
       node_, 
-      costmap_, 
+      this, 
       layered_costmap_->getGlobalFrameID(), 
-      name_ + "/costmap", 
+      // name_ + "/costmap", 
+      name_,
       false,
       0.0);
 
@@ -338,8 +339,8 @@ double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo &
     case S::STATUS_ERROR:
     case S::STATUS_PAUSE:
     case S::STATUS_WAITING_FOR_SAFETY:
-    case S::STATUS_WAITING_FOR_CONTROL:
-    case S::STATUS_WAITING_FOR_STATUS:
+    case S::STATUS_WAITING_FOR_FLOWCONTROL:
+    case S::STATUS_WAITING_FOR_ROS_STATUS:
       r = std::max(r, 0.0); 
       break;
 
@@ -357,8 +358,8 @@ double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo &
 
     // default
     case S::STATUS_INIT:
-    case S::STATUS_PATH_PLANNING:
-    case S::STATUS_WAITING_FOR_THING:
+    case S::STATUS_PATH_SEARCHING:
+    case S::STATUS_WAITING_FOR_OBS:
     case S::STATUS_MOVING:
     case S::STATUS_ARRIVED:
     case S::STATUS_MARKING:
@@ -599,7 +600,7 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
     if (std::hypot(dx, dy) > roi_range_m_) continue;
 
     // [MODIFIED] Pass 'this->costmap_' instead of 'master_grid'
-    rasterizeAgentPath(a, this->costmap_, meta_hits);
+    rasterizeAgentPath(a, this, meta_hits);
   }
 
   // [IMPORTANT] Merge internal costmap into master_grid
