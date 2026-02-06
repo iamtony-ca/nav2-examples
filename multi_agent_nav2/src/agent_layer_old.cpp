@@ -2,20 +2,28 @@
 
 #include <pluginlib/class_list_macros.hpp>
 #include <tf2/utils.h>
+
+// [NEW] For makeFootprintFromString and makeFootprintFromRadius
 #include <nav2_costmap_2d/footprint.hpp>
+
 #include <geometry_msgs/msg/point32.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <multi_agent_msgs/msg/agent_status.hpp>
 #include <multi_agent_msgs/msg/agent_layer_cell_meta.hpp>
+
+
+// [NEW] Include TF2 buffer (although tf_ is inherited, explicit include is safer)
 #include "tf2_ros/buffer.h"
+
+// #include <cmath>
+// #include <algorithm>
+// #include <utility>
+
 
 namespace multi_agent_nav2
 {
 
-// ==========================================
-// Helper Implementations
-// ==========================================
-
+// [NEW] Implementation of static helper
 std::vector<geometry_msgs::msg::Point32> AgentLayer::toPoint32(
     const std::vector<geometry_msgs::msg::Point>& points)
 {
@@ -25,83 +33,102 @@ std::vector<geometry_msgs::msg::Point32> AgentLayer::toPoint32(
         geometry_msgs::msg::Point32 p32;
         p32.x = static_cast<float>(p.x);
         p32.y = static_cast<float>(p.y);
-        p32.z = 0.0f; 
+        p32.z = 0.0f; // Z is not used in 2D footprint
         points32.push_back(p32);
     }
     return points32;
 }
 
+// [NEW] Implementation of helper to get footprint from loaded map
 geometry_msgs::msg::PolygonStamped 
 AgentLayer::getFootprintForAgent(const multi_agent_msgs::msg::MultiAgentInfo & a)
 {
     geometry_msgs::msg::PolygonStamped fp_stamped;
     
+    // Find the data loaded from YAML
     auto it = agent_footprints_.find(a.machine_id);
     if (it == agent_footprints_.end()) {
+        // If not found, log a warning once and return empty
         RCLCPP_WARN_ONCE(logger_, 
           "No footprint data found in YAML for machine_id %u. Cannot draw agent.",
           a.machine_id);
-        return fp_stamped; 
+        return fp_stamped; // Return empty
     }
 
     const auto& data = it->second;
+
     if (data.use_radius) {
+        // Generate circular footprint from radius
         std::vector<geometry_msgs::msg::Point> points = 
             nav2_costmap_2d::makeFootprintFromRadius(data.radius);
         fp_stamped.polygon.points = toPoint32(points);
     } else {
+        // Use pre-loaded polygon points
         fp_stamped.polygon.points = data.points;
     }
 
-    fp_stamped.header.frame_id = "base_link"; // Local frame
+    // Header is mostly for convention; frame_id should be local (base_link)
+    fp_stamped.header.frame_id = "base_link";
     fp_stamped.header.stamp = a.current_pose.header.stamp;
     return fp_stamped;
 }
 
+
+// [NEW] Implementation for the TF helper function
 bool AgentLayer::transformAgentInfo(
     const multi_agent_msgs::msg::MultiAgentInfo & agent_in_map,
     multi_agent_msgs::msg::MultiAgentInfo & agent_in_costmap_frame,
     const std::string & costmap_frame) const
 {
+  // We assume agent_in_map data is in the frame_id of last_infos_->header
   const std::string& map_frame = last_infos_->header.frame_id;
-  const rclcpp::Time& map_stamp = last_infos_->header.stamp;
+  const rclcpp::Time& map_stamp = last_infos_->header.stamp; // Use the stamp from the array
 
   if (map_frame.empty()) {
     RCLCPP_WARN_ONCE(logger_, "MultiAgentInfoArray message has empty frame_id. Cannot transform.");
     return false;
   }
 
+  // If frames are already the same, just copy
   if (map_frame == costmap_frame) {
     agent_in_costmap_frame = agent_in_map;
     return true;
   }
 
+  // Copy non-transformable data (status, id, etc.)
   agent_in_costmap_frame = agent_in_map; 
-  agent_in_costmap_frame.truncated_path.poses.clear(); 
+  agent_in_costmap_frame.truncated_path.poses.clear(); // Clear poses to re-fill
 
   try {
     // 1. Transform current_pose
     geometry_msgs::msg::PoseStamped pose_to_transform = agent_in_map.current_pose;
-    pose_to_transform.header.frame_id = map_frame; 
-    pose_to_transform.header.stamp = map_stamp;     
+    pose_to_transform.header.frame_id = map_frame; // Ensure correct source frame
+    pose_to_transform.header.stamp = map_stamp;     // Use array stamp for TF lookup
 
     geometry_msgs::msg::PoseStamped transformed_pose;
+    // tf_ is the inherited buffer from nav2_costmap_2d::Layer
     tf_->transform(pose_to_transform, transformed_pose, costmap_frame);
     agent_in_costmap_frame.current_pose = transformed_pose;
 
     // 2. Transform truncated_path
     for (const auto& pose_stamped_in_map : agent_in_map.truncated_path.poses) {
+      
+      // [FIX] Create a NEW PoseStamped for each path point
       geometry_msgs::msg::PoseStamped path_pose_to_transform;
+      // [FIX] Explicitly set the header for *this* point
       path_pose_to_transform.header.frame_id = map_frame;
       path_pose_to_transform.header.stamp = map_stamp;
+      // [FIX] Copy the pose from the path
       path_pose_to_transform.pose = pose_stamped_in_map.pose; 
 
       geometry_msgs::msg::PoseStamped pose_in_costmap_frame;
+      // [FIX] Transform the new, correct object
       tf_->transform(path_pose_to_transform, pose_in_costmap_frame, costmap_frame);
       
       agent_in_costmap_frame.truncated_path.poses.push_back(pose_in_costmap_frame);
     }
 
+    // Update header of the path
     agent_in_costmap_frame.truncated_path.header.frame_id = costmap_frame;
     agent_in_costmap_frame.truncated_path.header.stamp = transformed_pose.header.stamp;
     return true;
@@ -113,38 +140,25 @@ bool AgentLayer::transformAgentInfo(
       agent_in_map.machine_id, map_frame.c_str(), costmap_frame.c_str(), ex.what());
     return false;
   }
+  return false;
 }
 
-// ==========================================
-// AgentLayer Implementation
-// ==========================================
 
-AgentLayer::AgentLayer()
-{
-  // CostmapLayer 생성자에서 내부 costmap_은 nullptr로 초기화됨
-  costmap_ = nullptr; 
-}
-
-AgentLayer::~AgentLayer()
-{
-}
+AgentLayer::AgentLayer() {}
 
 void AgentLayer::onInitialize()
 {
-  // [IMPORTANT] 부모 클래스 초기화 (내부 Costmap 생성)
-  CostmapLayer::onInitialize();
-
-  // [IMPORTANT] 기본값을 FREE_SPACE(0)로 설정하여 resetMaps 호출 시 0으로 초기화되게 함.
-  // 255(NO_INFORMATION)으로 하면 updateWithMax 시 기존 장애물을 덮어쓸 위험이 있음(설정에 따라 다름).
-  // 에이전트 레이어는 "아무것도 없는 곳 = 0"으로 보는 것이 안전합니다.
-  default_value_ = nav2_costmap_2d::FREE_SPACE;
-
   node_shared_ = node_.lock();
   if (!node_shared_) {
     throw std::runtime_error("AgentLayer: failed to lock lifecycle node");
   }
-
-  // --- Parameters ---
+// --- [수정] ---
+  // Layer의 내장 헬퍼를 사용하거나, name_을 수동으로 붙입니다.
+  // Layer의 내장 헬퍼(declareParameter)를 사용하는 것을 권장합니다.
+  // 이 함수는 내부적으로 name_을 처리해 줍니다.
+  
+  // declareParameter는 base class (Layer)의 헬퍼 함수를 사용합니다.
+  // 이 함수는 내부적으로 name_을 붙여줍니다. (node_shared_-> 불필요)
   declareParameter("enabled", rclcpp::ParameterValue(true));
   declareParameter("topic", rclcpp::ParameterValue(std::string("/multi_agent_infos")));
   declareParameter("self_machine_id", rclcpp::ParameterValue(0));
@@ -153,7 +167,7 @@ void AgentLayer::onInitialize()
   declareParameter("roi_range_m", rclcpp::ParameterValue(12.0));
   declareParameter("time_decay_sec", rclcpp::ParameterValue(1.0));
   declareParameter("lethal_cost", rclcpp::ParameterValue(254));
-  declareParameter("moving_cost", rclcpp::ParameterValue(254));
+  declareParameter("moving_cost", rclcpp::ParameterValue(254)); // 180
   declareParameter("waiting_cost", rclcpp::ParameterValue(254));
   declareParameter("manual_cost_bias", rclcpp::ParameterValue(30));
   declareParameter("dilation_m", rclcpp::ParameterValue(0.05));
@@ -165,6 +179,9 @@ void AgentLayer::onInitialize()
   declareParameter("max_poses", rclcpp::ParameterValue(10000));
   declareParameter("qos_reliable", rclcpp::ParameterValue(true));
 
+
+  // Get parameters
+  // get_parameter는 헬퍼가 없으므로, node_shared_-> 와 'name_' 을 명시적으로 사용합니다.
   node_shared_->get_parameter(name_ + "." + "enabled", enabled_);
   node_shared_->get_parameter(name_ + "." + "topic", topic_);
   {
@@ -192,33 +209,42 @@ void AgentLayer::onInitialize()
     waiting_cost_ = static_cast<unsigned char>(std::clamp(tmp, 0, 254));
   }
   node_shared_->get_parameter(name_ + "." + "manual_cost_bias", manual_cost_bias_);
+
   node_shared_->get_parameter(name_ + "." + "dilation_m", dilation_m_);
   node_shared_->get_parameter(name_ + "." + "forward_smear_m", forward_smear_m_);
   node_shared_->get_parameter(name_ + "." + "sigma_k", sigma_k_);
+
   node_shared_->get_parameter(name_ + "." + "publish_meta", publish_meta_);
   node_shared_->get_parameter(name_ + "." + "meta_stride", meta_stride_);
   node_shared_->get_parameter(name_ + "." + "freshness_timeout_ms", freshness_timeout_ms_);
   node_shared_->get_parameter(name_ + "." + "max_poses", max_poses_);
   node_shared_->get_parameter(name_ + "." + "qos_reliable", qos_reliable_);
 
-  // --- Robot Footprint Parsing ---
+
+// [NEW] Add declaration for the robot list
   declareParameter("robot_ids", rclcpp::ParameterValue(std::vector<std::string>({})));
+
+  // [NEW] Get the list of robot IDs
   std::vector<std::string> robot_ids;
   node_shared_->get_parameter(name_ + "." + "robot_ids", robot_ids);
 
+  // [NEW] Loop 1: Declare all sub-parameters for each robot_id
   for (const auto & id_str : robot_ids) {
+    // std::string id_ns = name_ + "." + id_str; // e.g., "agent_layer.robot_001"
+    // declareParameter(id_ns + ".type_id", rclcpp::ParameterValue(std::string(""))); // Not strictly needed
     declareParameter(id_str + ".machine_id", rclcpp::ParameterValue(0));
     declareParameter(id_str + ".robot_radius", rclcpp::ParameterValue(0.0));
     declareParameter(id_str + ".footprint", rclcpp::ParameterValue(std::string("[]")));
   }
 
+  // [NEW] Loop 2: Get parameters and populate the map
   agent_footprints_.clear();
   for (const auto & id_str : robot_ids) {
     std::string id_ns = name_ + "." + id_str;
     
     int machine_id_int = 0;
     node_shared_->get_parameter(id_ns + ".machine_id", machine_id_int);
-    if (machine_id_int == 0) continue; 
+    if (machine_id_int == 0) continue; // Skip invalid ID
 
     uint16_t machine_id = static_cast<uint16_t>(machine_id_int);
     
@@ -228,34 +254,45 @@ void AgentLayer::onInitialize()
     node_shared_->get_parameter(id_ns + ".robot_radius", data.radius);
 
     std::vector<geometry_msgs::msg::Point> footprint_points;
+    // Use nav2_costmap_2d helper to parse footprint string
     if (nav2_costmap_2d::makeFootprintFromString(footprint_str, footprint_points) &&
         footprint_points.size() >= 3)
     {
-      data.points = toPoint32(footprint_points); 
+      data.points = toPoint32(footprint_points); // Convert Point to Point32
       data.use_radius = false;
     } else {
       data.use_radius = true;
+      // data.radius is already set
       RCLCPP_INFO(logger_, 
         "Using radius (%.2f) for machine_id %u (footprint string: '%s')",
         data.radius, machine_id, footprint_str.c_str());
     }
+
     agent_footprints_[machine_id] = data;
+    
+    RCLCPP_INFO(logger_, 
+      "Loaded footprint for machine_id %u: use_radius=%s, points=%zu",
+      machine_id, (data.use_radius ? "true" : "false"), data.points.size());
   }
 
-  RCLCPP_INFO(logger_, 
-      "AgentLayer '%s' initialized. Costmap topic: %s/costmap", name_.c_str(), name_.c_str());
 
-  // [IMPORTANT] Costmap Publisher 초기화
-  costmap_pub_ = std::make_unique<nav2_costmap_2d::Costmap2DPublisher>(
-      node_, 
-      costmap_, 
-      layered_costmap_->getGlobalFrameID(), 
-      name_ + "/costmap", 
-      false,
-      0.0);
+
+
+  RCLCPP_INFO(
+      logger_,  // Layer 기본 클래스에서 상속받은 logger_ 사용
+      "AgentLayer '%s' initialized: self_machine_id=%u, self_type_id='%s', moving_cost=%u",
+      name_.c_str(),
+      self_machine_id_,
+      self_type_id_.c_str(),
+      static_cast<unsigned int>(moving_cost_)
+    );
+
+
+// [NEW] Check if the costmap is rolling (like obstacle_layer)
+  // rolling_window_ = layered_costmap_->isRolling();
 
   current_ = true;
-  CostmapLayer::matchSize(); // 내부 그리드 크기 동기화
+  matchSize();
 
   if (enabled_) activate();
 }
@@ -272,24 +309,12 @@ void AgentLayer::activate()
     meta_pub_ = node_shared_->create_publisher<multi_agent_msgs::msg::AgentLayerMetaArray>(
         "agent_layer_meta", rclcpp::QoS(1).reliable().transient_local());
   }
-
-  // [ADDED] Publisher 활성화
-  if (costmap_pub_) costmap_pub_->on_activate();
 }
 
 void AgentLayer::deactivate()
 {
   sub_.reset();
   meta_pub_.reset();
-  // [ADDED] Publisher 비활성화
-  if (costmap_pub_) costmap_pub_->on_deactivate();
-}
-
-void AgentLayer::reset()
-{
-  // [IMPORTANT] 내부 그리드 초기화
-  resetMaps();
-  current_ = true;
 }
 
 void AgentLayer::infosCallback(
@@ -316,7 +341,8 @@ unsigned char AgentLayer::computeCost(const multi_agent_msgs::msg::MultiAgentInf
 {
   using S = multi_agent_msgs::msg::AgentStatus;
   const uint8_t p = a.status.phase;
-  const bool is_moving = (p == S::STATUS_MOVING) || (p == S::STATUS_PATH_SEARCHING);
+  const bool is_moving =
+      (p == S::STATUS_MOVING) || (p == S::STATUS_PATH_SEARCHING);
 
   unsigned char base = is_moving ? moving_cost_ : waiting_cost_;
 
@@ -327,20 +353,24 @@ unsigned char AgentLayer::computeCost(const multi_agent_msgs::msg::MultiAgentInf
   return base;
 }
 
+// [CHANGED] 등방성(모든 방향) 팽창만 반환. 전방 스미어는 여기서 제외!
 double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo & a) const
 {
   using S = multi_agent_msgs::msg::AgentStatus;
   const uint8_t phase = a.status.phase;
+
   double r = dilation_m_;
 
+
   switch (phase) {
+
     case S::STATUS_AUTORECOVERY:
     case S::STATUS_ERROR:
     case S::STATUS_PAUSE:
     case S::STATUS_WAITING_FOR_SAFETY:
     case S::STATUS_WAITING_FOR_CONTROL:
     case S::STATUS_WAITING_FOR_STATUS:
-      r = std::max(r, 0.0); 
+      r = std::max(r, 0.0); // min 0.05 at least
       break;
 
     case S::STATUS_LOADING:
@@ -351,9 +381,8 @@ double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo &
     case S::STATUS_UNKNOWN:
     case S::STATUS_MANUAL_RUNNING:
     case S::STATUS_MANUAL_COMPLETE:
-      r = std::max(r, 0.1);  
+      r = std::max(r, 0.1);  // min 0.1 m
       break;
-
 
     // default
     case S::STATUS_INIT:
@@ -367,47 +396,76 @@ double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo &
 
     default:
       break;
+
+
+
+
+
   }
+
+
+  // localization_uncertainty
+  // if (a.pos_std_m >= 0.0) r += sigma_k_ * a.pos_std_m;   // need to edit
+
+  
   return r;
 }
+
 
 void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw*/,
                               double* min_x, double* min_y, double* max_x, double* max_y)
 {
-  // [MODIFIED] Rolling Window라면 내부 Costmap의 원점을 로봇 위치에 맞춥니다.
-  // ObstacleLayer는 여기서 updateOrigin을 호출합니다.
-  if (layered_costmap_->isRolling()) {
-    updateOrigin(robot_x - getSizeInMetersX() / 2, robot_y - getSizeInMetersY() / 2);
+  // 1. [FIXED] rolling_window_ 관련 코드를 모두 제거합니다.
+  //    LayeredCostmap이 이 함수 *전에* updateOrigin()을 호출해줍니다.
+
+  if (!enabled_) {
+    return;
   }
 
-  if (!enabled_) return;
-
+  // 2. updateCosts에서 사용할 로봇의 현재 위치를 캐시합니다. (정상)
   cached_robot_x_ = robot_x;
   cached_robot_y_ = robot_y;
 
+  // 3. 바운드 캐시를 초기화합니다. (정상)
   touched_ = false;
   touch_min_x_ =  1e9; touch_min_y_ =  1e9;
   touch_max_x_ = -1e9; touch_max_y_ = -1e9;
 
+  // 4. 최신 에이전트 정보를 가져옵니다. (정상)
   std::vector<multi_agent_msgs::msg::MultiAgentInfo> infos;
   {
     std::lock_guard<std::mutex> lk(data_mtx_);
-    if (!last_infos_ || stale(last_stamp_)) return;
+    if (!last_infos_ || stale(last_stamp_)) {
+      return;
+    }
     infos.assign(last_infos_->agents.begin(), last_infos_->agents.end());
   }
 
+  // 5. 현재 코스트맵의 기준 프레임("map" 또는 "odom")을 가져옵니다. (정상)
   const std::string & costmap_frame = layered_costmap_->getGlobalFrameID();
 
-  for (const auto & a_map : infos) {
-    if (isSelf(a_map)) continue;
+  // 6. 모든 에이전트를 순회하며 TF 변환 및 바운드 계산을 수행합니다.
+  for (const auto & a_map : infos) { // a_map은 "map" 프레임 기준 원본 데이터
+    if (isSelf(a_map)) {
+      continue;
+    }
 
-    multi_agent_msgs::msg::MultiAgentInfo a;
-    if (!transformAgentInfo(a_map, a, costmap_frame)) continue;
+    // 6a. [FIXED] 에이전트 정보를 "map" -> "costmap_frame"("odom" 등)으로 변환
+    multi_agent_msgs::msg::MultiAgentInfo a; // 변환된 데이터가 저장될 변수
+    if (!transformAgentInfo(a_map, a, costmap_frame)) {
+      continue; // TF 변환 실패 시 이 에이전트 무시
+    }
 
+    // 6b. [FIXED] ROI 검사를 *변환된* 좌표 'a' 기준으로 수행
     const double dx = a.current_pose.pose.position.x - robot_x;
     const double dy = a.current_pose.pose.position.y - robot_y;
-    if (std::hypot(dx, dy) > roi_range_m_) continue;
+    if (std::hypot(dx, dy) > roi_range_m_) {
+      continue;
+    }
 
+    // 6c. [REMOVED] use_path_header_frame_ 체크 제거 (TF 변환이 이미 처리함)
+
+    // 6d. [FIXED] *변환된* 'a'의 좌표를 사용하여 바운드 업데이트
     {
       const auto & p = a.current_pose.pose.position;
       touch_min_x_ = std::min(touch_min_x_, p.x);
@@ -417,8 +475,10 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
       touched_ = true;
     }
 
+    // 6e. [FIXED] *변환된* 'a.truncated_path'를 사용하여 바운드 업데이트
     const int limit = std::min<int>(a.truncated_path.poses.size(), max_poses_);
     for (int i = 0; i < limit; ++i) {
+      // transformAgentInfo가 이미 'a.truncated_path'의 모든 포즈를 변환했음
       const auto & p = a.truncated_path.poses[i].pose.position; 
       touch_min_x_ = std::min(touch_min_x_, p.x);
       touch_min_y_ = std::min(touch_min_y_, p.y);
@@ -428,6 +488,7 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
     }
   }
 
+  // 7. 최종 바운드를 부모 코스트맵에 전달합니다. (정상)
   if (touched_) {
     *min_x = std::min(*min_x, touch_min_x_);
     *min_y = std::min(*min_y, touch_min_y_);
@@ -436,7 +497,14 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
   }
 }
 
+
+
+
+
+
+
 // === 내부 헬퍼: 로컬 프레임에서 등방성 + 전방(+x) 스미어 적용 ===
+// [NEW]
 static inline std::vector<geometry_msgs::msg::Point>
 dilateFootprintDirectional(const std::vector<geometry_msgs::msg::Point32> & in,
                            double iso_dilate_m,
@@ -445,18 +513,21 @@ dilateFootprintDirectional(const std::vector<geometry_msgs::msg::Point32> & in,
   std::vector<geometry_msgs::msg::Point> out; out.reserve(in.size());
   if (in.empty()) return out;
 
+  // 로컬 폴리곤의 중심
   double cx=0, cy=0;
   for (auto & p : in) { cx += p.x; cy += p.y; }
   cx /= static_cast<double>(in.size());
   cy /= static_cast<double>(in.size());
 
   for (auto & p : in) {
+    // 1) 등방성(모든 방향) 기본 여유
     double vx = p.x - cx, vy = p.y - cy;
     double n = std::hypot(vx, vy); if (n < 1e-6) n = 1.0;
 
     double x_local = p.x + iso_dilate_m * (vx / n);
     double y_local = p.y + iso_dilate_m * (vy / n);
 
+    // 2) 전방(+x) 여유: 중심 기준 전방측 점들만 +x로 평행 이동
     if (forward_len_m > 1e-6 && (p.x - cx) >= 0.0) {
       x_local += forward_len_m;
     }
@@ -468,16 +539,19 @@ dilateFootprintDirectional(const std::vector<geometry_msgs::msg::Point32> & in,
   return out;
 }
 
+// [CHANGED] forward_len_m을 인자로 받아 전방(+x)으로만 스미어 적용
 void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
                                  const geometry_msgs::msg::Pose & pose,
                                  double extra_dilation_m,
-                                 double forward_len_m,
+                                 double forward_len_m,   // [NEW]
                                  nav2_costmap_2d::Costmap2D * grid,
                                  unsigned char cost,
                                  std::vector<std::pair<unsigned int,unsigned int>> * meta_hits)
 {
+  // 1) 로컬 폴리곤을 등방성 + 전방(+x)으로만 늘리기
   auto poly = dilateFootprintDirectional(fp.polygon.points, extra_dilation_m, forward_len_m);
 
+  // 2) 로컬→월드 변환
   const double yaw = tf2::getYaw(pose.orientation);
   const double c = std::cos(yaw), s = std::sin(yaw);
   for (auto & p : poly) {
@@ -486,6 +560,7 @@ void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
     p.y = pose.position.y + s * x + c * y;
   }
 
+  // 3) bbox in world
   double minx=1e9, miny=1e9, maxx=-1e9, maxy=-1e9;
   for (auto & p : poly) {
     minx = std::min(minx, p.x);
@@ -494,14 +569,17 @@ void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
     maxy = std::max(maxy, p.y);
   }
 
+  // 4) bbox → map index
   int min_i, min_j, max_i, max_j;
   grid->worldToMapEnforceBounds(minx, miny, min_i, min_j);
   grid->worldToMapEnforceBounds(maxx, maxy, max_i, max_j);
 
+  // 5) 래스터 채우기 (Max-merge)
   for (int j = min_j; j <= max_j; ++j) {
     for (int i = min_i; i <= max_i; ++i) {
       double wx, wy; grid->mapToWorld(i, j, wx, wy);
 
+      // ray-casting (point-in-polygon)
       bool inside = false;
       const size_t n = poly.size();
       for (size_t k=0, h=n-1; k<n; h=k++) {
@@ -513,7 +591,10 @@ void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
       }
 
       if (inside) {
-        // [MODIFIED] Max-Merge with internal grid logic
+        // const unsigned char old = grid->getCost(i, j);
+        // if (cost > old) {
+        // 치사 또는 강한 footprint 코스트: TrueOverwrite(footprint 우선) 느낌으로 덮되
+        // Max-merge로도 충분히 강함
         const unsigned char old_raw = grid->getCost(i, j);
         const int old = (old_raw == nav2_costmap_2d::NO_INFORMATION) ? 0 : static_cast<int>(old_raw);
         const int cand = static_cast<int>(cost);
@@ -525,6 +606,18 @@ void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
             static_cast<unsigned int>(i), static_cast<unsigned int>(j));
       }
     }
+  }
+
+  // 6) bounds bookkeeping for updateBounds
+  if (!touched_) {
+    touch_min_x_ = minx; touch_min_y_ = miny;
+    touch_max_x_ = maxx; touch_max_y_ = maxy;
+    touched_ = true;
+  } else {
+    touch_min_x_ = std::min(touch_min_x_, minx);
+    touch_min_y_ = std::min(touch_min_y_, miny);
+    touch_max_x_ = std::max(touch_max_x_, maxx);
+    touch_max_y_ = std::max(touch_max_y_, maxy);
   }
 }
 
@@ -543,35 +636,51 @@ bool AgentLayer::pointInPolygon(const std::vector<geometry_msgs::msg::Point> & p
   return inside;
 }
 
+
+
+/* ****************************************
+ * [AFTER] agent_layer.cpp - rasterizeAgentPath()
+ * ****************************************
+ */
 void AgentLayer::rasterizeAgentPath(
   const multi_agent_msgs::msg::MultiAgentInfo & a,
   nav2_costmap_2d::Costmap2D * grid,
   std::vector<std::pair<unsigned int,unsigned int>> & meta_hits)
 {
+  // [NEW] Get footprint from YAML map using machine_id
   geometry_msgs::msg::PolygonStamped fp = getFootprintForAgent(a);
-  if (fp.polygon.points.empty()) return;
+  if (fp.polygon.points.empty()) {
+    return; // No footprint found (logged in helper), skip rasterizing this agent
+  }
 
+  // 코스트 & 등방성 팽창
   const unsigned char cost_now = computeCost(a);
   const double iso_extra = computeDilation(a);
+
+  // 이동 여부에 따라 전방 스미어 적용
   const double forward_len = isMovingPhase(a.status.phase) ? forward_smear_m_ : 0.0;
 
-  fillFootprintAt(fp, a.current_pose.pose, iso_extra, forward_len,
+  // 1) 에이전트 현재 footprint 찍기 (전방 스미어 조건부 적용)
+  fillFootprintAt(fp, a.current_pose.pose, iso_extra, forward_len, // [CHANGED]
                   grid, cost_now, &meta_hits);
 
+  // 2) (선택) truncated_path의 각 pose에서도 footprint를 얇게/간격 띄워서 찍고 싶다면
+  //    아래 루프를 활성화하세요. 지금은 과도한 차단을 피하기 위해 "현재 위치만" 반영.
+  //
   const int limit = std::min<int>(a.truncated_path.poses.size(), max_poses_);
   for (int i = 0; i < limit; ++i) {
     const auto & ps = a.truncated_path.poses[i].pose;
-    fillFootprintAt(fp, ps, iso_extra * 0.5, 0.0, grid, cost_now, &meta_hits);
+    // 경로상의 footprint는 등방성만 소량(예: iso_extra*0.5), 전방 스미어는 0.0로 권장
+    fillFootprintAt(fp, ps, iso_extra * 0.5, 0.0, grid, cost_now, &meta_hits); // [CHANGED]
   }
 }
 
+
+
 void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
-                             int min_i, int min_j, int max_i, int max_j)
+                             int /*min_i*/, int /*min_j*/, int /*max_i*/, int /*max_j*/)
 {
   if (!enabled_) return;
-
-  // [IMPORTANT] 내부 그리드 초기화 (이전 프레임 잔상 제거)
-  resetMaps(); 
 
   std::vector<multi_agent_msgs::msg::MultiAgentInfo> infos;
   {
@@ -583,35 +692,32 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
   std::vector<std::pair<unsigned int,unsigned int>> meta_hits;
   meta_hits.reserve(256);
 
+
+// [NEW] Get the cached robot position from updateBounds
   const double robot_x = cached_robot_x_;
   const double robot_y = cached_robot_y_;
+
+
+// [NEW] Get the costmap frame ID ("map" 또는 "odom")
   const std::string & costmap_frame = layered_costmap_->getGlobalFrameID();
 
-  // Draw agents on INTERNAL costmap_ (this->costmap_)
-  for (const auto & a_map : infos) {
-    if (isSelf(a_map)) continue;
+  for (const auto & a_map : infos) { // "map" 프레임 기준 원본 데이터
+    if (isSelf(a_map)) continue;
 
-    multi_agent_msgs::msg::MultiAgentInfo a;
-    if (!transformAgentInfo(a_map, a, costmap_frame)) continue;
+    // [NEW] Transform agent info from "map" to costmap frame (e.g., "odom")
+    multi_agent_msgs::msg::MultiAgentInfo a; // 변환된 데이터가 저장될 변수
+    if (!transformAgentInfo(a_map, a, costmap_frame)) {
+      continue; // TF 변환 실패 시 이 에이전트 무시
+    }
 
-    const double dx = a.current_pose.pose.position.x - robot_x;
-    const double dy = a.current_pose.pose.position.y - robot_y;
-    if (std::hypot(dx, dy) > roi_range_m_) continue;
+    // [CHANGED] ROI check using the *transformed* pose 'a'
+    const double dx = a.current_pose.pose.position.x - robot_x;
+    const double dy = a.current_pose.pose.position.y - robot_y;
+    if (std::hypot(dx, dy) > roi_range_m_) continue;
 
-    // [MODIFIED] Pass 'this->costmap_' instead of 'master_grid'
-    rasterizeAgentPath(a, this->costmap_, meta_hits);
-  }
+    rasterizeAgentPath(a, &master_grid, meta_hits); // 변환된 'a'를 전달
+  }
 
-  // [IMPORTANT] Merge internal costmap into master_grid
-  updateWithMax(master_grid, min_i, min_j, max_i, max_j);
-
-  // [IMPORTANT] Publish the internal costmap
-  if (costmap_pub_) {
-      costmap_pub_->updateBounds(min_i, max_i, min_j, max_j);
-      costmap_pub_->publishCostmap();
-  }
-
-  // Meta Pub
   if (publish_meta_ && meta_pub_) {
     multi_agent_msgs::msg::AgentLayerMetaArray arr;
     arr.header.frame_id = layered_costmap_->getGlobalFrameID();
