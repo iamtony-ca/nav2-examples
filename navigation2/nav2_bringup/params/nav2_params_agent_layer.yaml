@@ -265,27 +265,43 @@ global_costmap:
       resolution: 0.05
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "agent_layer", "inflation_layer"]
+     # ================================
+      # AgentLayer (여기가 우리의 플러그인)
+      # ================================
       agent_layer:
-        plugin: "multi_agent_nav2::AgentLayer"
+        plugin: multi_agent_nav2::AgentLayer
+
+        # 기본 동작 스위치
         enabled: true
-        topic: "/multi_agent_infos"
-        self_machine_id: 1001
-        self_type_id: "CUSTOM_AMR_A"
-        use_path_header_frame: true
-        roi_range_m: 12.0
-        time_decay_sec: 1.0
-        lethal_cost: 254
-        moving_cost: 180
-        waiting_cost: 200
-        manual_cost_bias: 30
-        dilation_m: 0.05
-        forward_smear_m: 0.25
-        sigma_k: 2.0
+        qos_reliable: true
+
+        # 입력 토픽 및 좌표계 체크
+        topic: /multi_agent_infos
+        use_path_header_frame: true     # path.header.frame_id가 global_frame과 같을 때만 반영
+        roi_range_m: 12.0               # 우리 로봇 기준 반경 ROI (성능/노이즈 필터링용)
+
+        # 자기 식별(내 로봇은 무시)
+        self_machine_id: 0              # 내 robot의 machine_id
+        self_type_id: ""                # 내 robot의 type_id (문자열)
+
+        # 신선도/수신 실패 대비
+        freshness_timeout_ms: 800       # 최근 수신 기준 밀리초
+        max_poses: 40                   # 각 agent truncated_path에서 사용할 최대 포즈 수
+
+        # 비용/도형 관련
+        lethal_cost: 254                # 정지/치명적 상황의 코스트
+        waiting_cost: 200               # 대기/작업 등의 기본 코스트
+        moving_cost: 180                # 이동중 코스트
+        manual_cost_bias: 30            # mode=="manual" 시 가산치(클램프됨)
+
+        # 팽창(등방성)과 전방 스미어(이동중에만 +x방향)
+        dilation_m: 0.05                # 항상 적용되는 등방성 여유(모든 방향)
+        sigma_k: 2.0                    # pos_std_m * sigma_k 만큼 추가 여유
+        forward_smear_m: 0.25           # 이동중일 때만 전방(+x)으로 늘리는 길이
+
+        # 메타 퍼블리시(디버그/시각화용)
         publish_meta: true
         meta_stride: 3
-        freshness_timeout_ms: 800
-        max_poses: 40
-        qos_reliable: true
 
 
 
