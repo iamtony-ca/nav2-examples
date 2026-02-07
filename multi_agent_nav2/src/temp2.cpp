@@ -8,6 +8,7 @@
 #include <multi_agent_msgs/msg/agent_status.hpp>
 #include <multi_agent_msgs/msg/agent_layer_cell_meta.hpp>
 #include "tf2_ros/buffer.h"
+#include <cstring> // [NEW] for memset
 
 namespace multi_agent_nav2
 {
@@ -116,7 +117,6 @@ bool AgentLayer::transformAgentInfo(
 
 AgentLayer::AgentLayer()
 {
-  // costmap_ = nullptr; // CostmapLayer가 아니므로 사용 안 함
 }
 
 AgentLayer::~AgentLayer()
@@ -544,7 +544,12 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
                               master_grid.getOriginX(),
                               master_grid.getOriginY());
       }
-      viz_costmap_.resetMaps(); // 시각화용은 매번 0으로 클리어
+      
+      // [FIX] resetMaps()는 protected이므로 memset으로 raw buffer를 0으로 초기화
+      unsigned char* char_map = viz_costmap_.getCharMap();
+      unsigned int size_x = viz_costmap_.getSizeInCellsX();
+      unsigned int size_y = viz_costmap_.getSizeInCellsY();
+      std::memset(char_map, 0, size_x * size_y * sizeof(unsigned char));
   }
 
   // 데이터 준비
