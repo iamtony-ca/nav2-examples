@@ -1,6 +1,35 @@
 /*
+ * Software License Agreement (BSD License)
+ *
  * Copyright (c) 2024, Custom Robotics
- * ... (License 생략) ...
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ * * Redistributions of source code must retain the above copyright
+ * notice, this list of conditions and the following disclaimer.
+ * * Redistributions in binary form must reproduce the above
+ * copyright notice, this list of conditions and the following
+ * disclaimer in the documentation and/or other materials provided
+ * with the distribution.
+ * * Neither the name of the copyright holder nor the names of its
+ * contributors may be used to endorse or promote products derived
+ * from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+ * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include <cmath>
@@ -36,11 +65,10 @@ StableStoppedGoalChecker::StableStoppedGoalChecker()
   xy_stability_duration_(0.5),
   yaw_stability_duration_(0.5),
   stateful_(true),
-  path_tolerance_multiplier_(1.5), // 기본값 1.5배
-  path_topic_("/plan"),            // 기본 토픽명
   check_xy_(true),
   in_xy_tolerance_(false),
-  in_yaw_tolerance_(false)
+  in_yaw_tolerance_(false),
+  path_topic_("/plan_truncated_short") // 기본값
 {
 }
 
@@ -53,7 +81,7 @@ void StableStoppedGoalChecker::initialize(
   auto node = parent.lock();
   clock_ = node->get_clock();
 
-  // 1. Declare Standard Parameters
+  // Declare parameters
   nav2_util::declare_parameter_if_not_declared(
     node, plugin_name + ".x_goal_tolerance", rclcpp::ParameterValue(0.25));
   nav2_util::declare_parameter_if_not_declared(
@@ -65,7 +93,7 @@ void StableStoppedGoalChecker::initialize(
   nav2_util::declare_parameter_if_not_declared(
     node, plugin_name + ".rot_stopped_velocity", rclcpp::ParameterValue(0.25));
   
-  // 2. Declare Stability Parameters
+  // New parameters
   nav2_util::declare_parameter_if_not_declared(
     node, plugin_name + ".xy_stability_duration", rclcpp::ParameterValue(0.5));
   nav2_util::declare_parameter_if_not_declared(
@@ -73,13 +101,11 @@ void StableStoppedGoalChecker::initialize(
   nav2_util::declare_parameter_if_not_declared(
     node, plugin_name + ".stateful", rclcpp::ParameterValue(true));
 
-  // 3. Declare Path Check Parameters (NEW)
+// [추가] path_topic 파라미터 선언
   nav2_util::declare_parameter_if_not_declared(
-    node, plugin_name + ".path_tolerance_multiplier", rclcpp::ParameterValue(1.5));
-  nav2_util::declare_parameter_if_not_declared(
-    node, plugin_name + ".path_topic", rclcpp::ParameterValue("/plan"));
+    node, plugin_name + ".path_topic", rclcpp::ParameterValue("/plan_truncataed_short"));
 
-  // 4. Get Parameters
+  // Get parameters
   node->get_parameter(plugin_name + ".x_goal_tolerance", x_goal_tolerance_);
   node->get_parameter(plugin_name + ".y_goal_tolerance", y_goal_tolerance_);
   node->get_parameter(plugin_name + ".yaw_goal_tolerance", yaw_goal_tolerance_);
@@ -88,17 +114,16 @@ void StableStoppedGoalChecker::initialize(
   node->get_parameter(plugin_name + ".xy_stability_duration", xy_stability_duration_);
   node->get_parameter(plugin_name + ".yaw_stability_duration", yaw_stability_duration_);
   node->get_parameter(plugin_name + ".stateful", stateful_);
-  node->get_parameter(plugin_name + ".path_tolerance_multiplier", path_tolerance_multiplier_);
-  node->get_parameter(plugin_name + ".path_topic", path_topic_);
 
-  // 5. Initialize Path Subscription
-  rclcpp::QoS qos(1);
-  qos.transient_local(); // Plan topics usually act like latched topics
+// [추가] Path Subscription 생성 (TransientLocal QoS 사용)
+  // rclcpp::QoS qos(rclcpp::KeepLast(1));
+  // qos.transient_local();
   path_sub_ = node->create_subscription<nav_msgs::msg::Path>(
-    path_topic_, qos,
+    path_topic_, 10,
     std::bind(&StableStoppedGoalChecker::pathCallback, this, _1));
 
-  // 6. Dynamic Parameters
+
+  // Add callback for dynamic parameters
   dyn_params_handler_ = node->add_on_set_parameters_callback(
     std::bind(&StableStoppedGoalChecker::dynamicParametersCallback, this, _1));
 }
@@ -110,6 +135,7 @@ void StableStoppedGoalChecker::reset()
   in_yaw_tolerance_ = false;
 }
 
+// [추가] Path Callback 구현
 void StableStoppedGoalChecker::pathCallback(const nav_msgs::msg::Path::SharedPtr msg)
 {
   std::lock_guard<std::mutex> lock(path_mutex_);
@@ -120,7 +146,34 @@ bool StableStoppedGoalChecker::isGoalReached(
   const geometry_msgs::msg::Pose & query_pose, const geometry_msgs::msg::Pose & goal_pose,
   const geometry_msgs::msg::Twist & velocity)
 {
-  // 1. Calculate Errors (Euclidean & Yaw)
+
+// [추가] Path Length Check
+  {
+    std::lock_guard<std::mutex> lock(path_mutex_);
+    if (current_path_) {
+      // nav2_util을 사용하여 경로 길이 계산
+      double total_distance = nav2_util::geometry_utils::calculate_path_length(*current_path_);
+      
+      // 남은 경로의 길이가 허용 오차의 2배보다 크면, 아직 도착하지 않은 것으로 간주
+      if (total_distance > 2.0 * x_goal_tolerance_) {
+        // 단, 이미 latch(XY 완료) 상태라면 거리 체크를 무시하고 Yaw 체크로 넘어갈 수 있도록
+        // 아래 로직이 필요할 수 있으나, 요구사항에 맞춰 "엄격하게" 리턴합니다.
+        // 만약 XY가 이미 맞았더라도 경로가 갑자기 길어지면(Replanning 등) 멈추지 않아야 합니다.
+        // 여기서는 요구사항대로 "if distance <= ... 일 때만 체크"를 역으로 적용하여
+        // "if distance > ... 이면 False 리턴"으로 구현합니다.
+        
+        // 주의: XY가 이미 맞아서 Latch된 상태(check_xy_ == false)에서도 
+        // 경로가 다시 길어졌다면(새로운 계획) 체크를 재개해야 하는지는 정책에 따릅니다.
+        // 여기서는 단순하게 적용합니다.
+        return false; 
+      }
+    }
+    // current_path_가 아직 없으면(nullptr), 안전을 위해 기존 로직을 수행하거나 false를 리턴할 수 있습니다.
+    // 여기서는 path가 없으면 거리 체크를 패스하고 기존 로직으로 넘어갑니다.
+  }
+
+
+  // 1. Calculate Errors
   double dx = fabs(query_pose.position.x - goal_pose.position.x);
   double dy = fabs(query_pose.position.y - goal_pose.position.y);
   double dyaw = fabs(angles::shortest_angular_distance(
@@ -130,67 +183,12 @@ bool StableStoppedGoalChecker::isGoalReached(
   bool xy_ok = (dx <= x_goal_tolerance_) && (dy <= y_goal_tolerance_);
   bool yaw_ok = (dyaw <= yaw_goal_tolerance_);
 
-  // ---------------------------------------------------------
-  // [NEW] Global Path Distance Check Logic (Fixed & Optimized)
-  // ---------------------------------------------------------
-  if (xy_ok) {
-    std::lock_guard<std::mutex> lock(path_mutex_);
-    
-    // 경로 데이터가 수신된 상태에서만 검사
-    if (current_path_ && !current_path_->poses.empty()) {
-      
-      // A. [수정됨] 현재 로봇 위치에서 가장 가까운 경로상의 인덱스 직접 찾기
-      size_t closest_pose_idx = 0;
-      double min_dist_sq = std::numeric_limits<double>::max();
-
-      for (size_t i = 0; i < current_path_->poses.size(); ++i) {
-        double p_dx = current_path_->poses[i].pose.position.x - query_pose.position.x;
-        double p_dy = current_path_->poses[i].pose.position.y - query_pose.position.y;
-        double dist_sq = p_dx * p_dx + p_dy * p_dy;
-
-        if (dist_sq < min_dist_sq) {
-          min_dist_sq = dist_sq;
-          closest_pose_idx = i;
-        }
-      }
-
-      // ------------------------------------------------------------------
-      // [최적화] Early Exit Path Length Calculation
-      // ------------------------------------------------------------------
-      double max_tolerance = std::max(x_goal_tolerance_, y_goal_tolerance_);
-      double dist_threshold = max_tolerance * path_tolerance_multiplier_;
-      
-      double accumulated_dist = 0.0;
-      bool path_is_long = false;
-
-      // closest_pose_idx 부터 경로 끝까지 순회
-      for (size_t i = closest_pose_idx; i < current_path_->poses.size() - 1; ++i) {
-        double d = nav2_util::geometry_utils::euclidean_distance(
-          current_path_->poses[i], current_path_->poses[i + 1]);
-        
-        accumulated_dist += d;
-
-        // [핵심] 누적 거리가 이미 임계값을 넘었다면? 더 계산할 필요 없이 "도착 아님" 판정
-        if (accumulated_dist > dist_threshold) {
-          path_is_long = true;
-          break; // Loop 탈출! (연산량 절약)
-        }
-      }
-
-      // C. 비교
-      if (path_is_long) {
-        // 남은 경로가 임계값보다 깁니다. (교차점 통과 중으로 판단)
-        xy_ok = false; 
-      }
-    }
-  }
-  // ---------------------------------------------------------
-
   // 2. Logic based on 'stateful' parameter
   if (stateful_) {
-    // === STATEFUL MODE ===
+    // === STATEFUL MODE: Check XY first, then Yaw ===
+    
     if (check_xy_) {
-      // Phase 1: Checking XY
+      // Phase 1: Checking XY Stability
       if (xy_ok) {
         if (!in_xy_tolerance_) {
           first_xy_tolerance_time_ = clock_->now();
@@ -199,17 +197,19 @@ bool StableStoppedGoalChecker::isGoalReached(
         
         double time_in_xy = (clock_->now() - first_xy_tolerance_time_).seconds();
         
+        // If XY is stable for duration, switch to Yaw phase
         if (time_in_xy >= xy_stability_duration_) {
           check_xy_ = false;
-          in_xy_tolerance_ = false; 
-          in_yaw_tolerance_ = false;
+          in_xy_tolerance_ = false; // Reset for cleanliness (though not used anymore)
+          in_yaw_tolerance_ = false; // Reset for next phase
+          // Fall through to return false (next loop will check yaw)
         }
       } else {
         in_xy_tolerance_ = false;
       }
-      return false;
+      return false; // Still working on XY or just finished XY
     } else {
-      // Phase 2: Checking Yaw
+      // Phase 2: Checking Yaw Stability (XY is already assumed done)
       if (yaw_ok) {
         if (!in_yaw_tolerance_) {
           first_yaw_tolerance_time_ = clock_->now();
@@ -219,7 +219,7 @@ bool StableStoppedGoalChecker::isGoalReached(
         double time_in_yaw = (clock_->now() - first_yaw_tolerance_time_).seconds();
 
         if (time_in_yaw >= yaw_stability_duration_) {
-          // Final check: Velocity
+          // Both phases passed, now check velocity
           return fabs(velocity.angular.z) <= rot_stopped_velocity_ &&
                  hypot(velocity.linear.x, velocity.linear.y) <= trans_stopped_velocity_;
         }
@@ -230,9 +230,12 @@ bool StableStoppedGoalChecker::isGoalReached(
     }
 
   } else {
-    // === NON-STATEFUL MODE ===
+    // === NON-STATEFUL MODE: Check XY & Yaw Simultaneously ===
+    // Use xy_stability_duration for the combined check as requested
+    
     if (xy_ok && yaw_ok) {
       if (!in_xy_tolerance_) {
+        // Reuse xy variables for the combined state
         first_xy_tolerance_time_ = clock_->now();
         in_xy_tolerance_ = true;
       }
@@ -240,6 +243,7 @@ bool StableStoppedGoalChecker::isGoalReached(
       double time_in_combined = (clock_->now() - first_xy_tolerance_time_).seconds();
 
       if (time_in_combined >= xy_stability_duration_) {
+        // Tolerances & Duration met, now check velocity
         return fabs(velocity.angular.z) <= rot_stopped_velocity_ &&
                hypot(velocity.linear.x, velocity.linear.y) <= trans_stopped_velocity_;
       }
@@ -296,18 +300,10 @@ StableStoppedGoalChecker::dynamicParametersCallback(std::vector<rclcpp::Paramete
         xy_stability_duration_ = parameter.as_double();
       } else if (name == plugin_name_ + ".yaw_stability_duration") {
         yaw_stability_duration_ = parameter.as_double();
-      } else if (name == plugin_name_ + ".path_tolerance_multiplier") {
-        path_tolerance_multiplier_ = parameter.as_double();
       }
     } else if (type == ParameterType::PARAMETER_BOOL) {
       if (name == plugin_name_ + ".stateful") {
         stateful_ = parameter.as_bool();
-      }
-    } else if (type == ParameterType::PARAMETER_STRING) {
-      if (name == plugin_name_ + ".path_topic") {
-        // Topic name change requires restart usually, but we can try to update subs
-        // For simplicity in this snippet, we just update the variable.
-        path_topic_ = parameter.as_string();
       }
     }
   }
