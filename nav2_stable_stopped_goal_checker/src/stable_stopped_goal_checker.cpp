@@ -103,7 +103,7 @@ void StableStoppedGoalChecker::initialize(
 
 // [추가] path_topic 파라미터 선언
   nav2_util::declare_parameter_if_not_declared(
-    node, plugin_name + ".path_topic", rclcpp::ParameterValue("/plan_truncataed_short"));
+    node, plugin_name + ".path_topic", rclcpp::ParameterValue("/plan_truncated_short"));
 
   // Get parameters
   node->get_parameter(plugin_name + ".x_goal_tolerance", x_goal_tolerance_);
