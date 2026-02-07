@@ -397,6 +397,20 @@ target_include_directories(check_final_goal_yaw_action PUBLIC
   $<INSTALL_INTERFACE:include>)
 
 
+# ───── Build is_goals_occupied_agent_condition ─────
+add_library(is_goals_occupied_agent_condition SHARED
+  src/is_goals_occupied_agent_condition.cpp)
+
+ament_target_dependencies(is_goals_occupied_agent_condition
+  rclcpp geometry_msgs tf2_ros nav2_msgs nav2_costmap_2d nav2_util tf2_geometry_msgs behaviortree_cpp pluginlib)
+
+target_include_directories(is_goals_occupied_agent_condition PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
+
+
+
 
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
@@ -430,6 +444,7 @@ install(TARGETS
   reactive_round_robin_control
   check_pause_reset_condition
   check_final_goal_yaw_action
+  is_goals_occupied_agent_condition
 
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib

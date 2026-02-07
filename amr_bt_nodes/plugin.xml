@@ -252,3 +252,12 @@
   </class>
 </library>
 
+<library path="is_goals_occupied_agent_condition">
+  <class name="amr_bt_nodes::IsGoalsOccupiedAgentCondition"
+         type="amr_bt_nodes::IsGoalsOccupiedAgentCondition"
+         base_class_type="BT::ConditionNode">
+    <description>
+      Checks if any of the provided goals are in an occupied space by agents.
+    </description>
+  </class>
+</library>
