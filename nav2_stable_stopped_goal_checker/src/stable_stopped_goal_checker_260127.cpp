@@ -116,7 +116,6 @@ void StableStoppedGoalChecker::pathCallback(const nav_msgs::msg::Path::SharedPtr
   current_path_ = msg;
 }
 
-
 bool StableStoppedGoalChecker::isGoalReached(
   const geometry_msgs::msg::Pose & query_pose, const geometry_msgs::msg::Pose & goal_pose,
   const geometry_msgs::msg::Twist & velocity)
@@ -132,7 +131,7 @@ bool StableStoppedGoalChecker::isGoalReached(
   bool yaw_ok = (dyaw <= yaw_goal_tolerance_);
 
   // ---------------------------------------------------------
-  // [FIXED] Global Path Distance Check Logic
+  // [FIXED & OPTIMIZED] Global Path Distance Check Logic
   // ---------------------------------------------------------
   if (xy_ok) {
     std::lock_guard<std::mutex> lock(path_mutex_);
@@ -140,70 +139,52 @@ bool StableStoppedGoalChecker::isGoalReached(
     // 경로 데이터가 유효할 때만 검사
     if (current_path_ && !current_path_->poses.empty()) {
       
-      // A. [수정됨] "가장 가까운 점"이 아니라 "가장 먼저 만나는 가까운 점" 찾기
-      // 이유: 교차로에서 시작점과 끝점이 겹칠 때, 끝점으로 점프(Snap)하는 것을 방지하기 위함.
-      size_t closest_pose_idx = 0;
+      double max_tolerance = std::max(x_goal_tolerance_, y_goal_tolerance_);
+      double dist_threshold = max_tolerance * path_tolerance_multiplier_;
       
-      // 검색 범위: Goal Tolerance보다 약간 여유 있게 잡습니다 (예: 1.2배).
-      // 로봇이 경로에서 살짝 벗어나 주행 중일 수도 있기 때문입니다.
-      double search_dist_limit = std::max(x_goal_tolerance_, y_goal_tolerance_) * 1.2;
-      double search_dist_limit_sq = search_dist_limit * search_dist_limit;
-      
-      bool found_first_match = false;
-      double min_dist_sq_fallback = std::numeric_limits<double>::max();
-      size_t min_idx_fallback = 0;
+      // 검색 범위: Tolerance보다 약간 여유 있게 잡음 (1.2배)
+      double search_limit_sq = pow(max_tolerance * 1.2, 2);
 
+      bool goal_confirmed_by_path = false;
+
+      // [핵심 변경] 단순히 가까운 점을 찾는 게 아니라, 
+      // "남은 거리가 짧은(도착으로 인정되는) 점"이 내 주변에 있는지 확인합니다.
       for (size_t i = 0; i < current_path_->poses.size(); ++i) {
+        
+        // 1. 현재 인덱스(i)의 점이 로봇과 가까운가?
         double p_dx = current_path_->poses[i].pose.position.x - query_pose.position.x;
         double p_dy = current_path_->poses[i].pose.position.y - query_pose.position.y;
         double dist_sq = p_dx * p_dx + p_dy * p_dy;
 
-        // 1. 우선 순차적으로 검색하다가 허용 범위 내의 점을 만나면 그게 내 위치입니다.
-        if (dist_sq <= search_dist_limit_sq) {
-          closest_pose_idx = i;
-          found_first_match = true;
-          break; // 더 뒤의 경로(Goal 등)를 보지 않고 여기서 멈춥니다!
-        }
+        if (dist_sq <= search_limit_sq) {
+          // 2. 가깝다면, 이 점을 기준으로 했을 때 남은 경로가 짧은가? (Early Exit 적용)
+          double accumulated_dist = 0.0;
+          bool is_short_path = true;
 
-        // 2. (Fallback) 만약 허용 범위 내에 점이 하나도 없다면(Tracking 에러가 클 때),
-        //    기존처럼 전체에서 가장 가까운 점을 찾습니다.
-        if (dist_sq < min_dist_sq_fallback) {
-          min_dist_sq_fallback = dist_sq;
-          min_idx_fallback = i;
-        }
-      }
+          // i부터 끝까지 거리 계산 (임계값 넘으면 즉시 중단)
+          for (size_t j = i; j < current_path_->poses.size() - 1; ++j) {
+            accumulated_dist += nav2_util::geometry_utils::euclidean_distance(
+              current_path_->poses[j], current_path_->poses[j+1]);
+            
+            if (accumulated_dist > dist_threshold) {
+              is_short_path = false;
+              break; // 너무 기니까 이 점은 Goal이 아님 (교차점 등일 수 있음)
+            }
+          }
 
-      if (!found_first_match) {
-        closest_pose_idx = min_idx_fallback;
-      }
-
-      // ------------------------------------------------------------------
-      // [최적화] Early Exit Path Length Calculation
-      // ------------------------------------------------------------------
-      double max_tolerance = std::max(x_goal_tolerance_, y_goal_tolerance_);
-      double dist_threshold = max_tolerance * path_tolerance_multiplier_;
-      
-      double accumulated_dist = 0.0;
-      bool path_is_long = false;
-
-      // closest_pose_idx 부터 경로 끝까지 순회
-      for (size_t i = closest_pose_idx; i < current_path_->poses.size() - 1; ++i) {
-        double d = nav2_util::geometry_utils::euclidean_distance(
-          current_path_->poses[i], current_path_->poses[i + 1]);
-        
-        accumulated_dist += d;
-
-        // [핵심] 누적 거리가 이미 임계값을 넘었다면? 더 계산할 필요 없이 "도착 아님" 판정
-        if (accumulated_dist > dist_threshold) {
-          path_is_long = true;
-          break; // Loop 탈출!
+          if (is_short_path) {
+            // "내 주변에 있고" AND "남은 경로도 짧은" 점을 찾았습니다!
+            // 즉, 우리는 교차점이 아니라 진짜 Goal에 와있는 것입니다.
+            goal_confirmed_by_path = true;
+            break; // 더 이상 검사할 필요 없이 성공 확정
+          }
         }
       }
 
-      // C. 비교
-      if (path_is_long) {
-        // 남은 경로가 임계값보다 깁니다. (교차점 통과 중으로 판단)
-        xy_ok = false; 
+      // 내 주변의 모든 점을 검사했는데도, 남은 경로가 짧은 점이 하나도 없다면?
+      // -> 우리는 Goal 위치(좌표)에는 있지만, 경로상으로는 아직 멀었다(교차점이다)는 뜻입니다.
+      if (!goal_confirmed_by_path) {
+        xy_ok = false;
       }
     }
   }
@@ -230,7 +211,7 @@ bool StableStoppedGoalChecker::isGoalReached(
       } else {
         in_xy_tolerance_ = false;
       }
-      return false;
+      return false; // Still processing XY or just finished XY
     } else {
       // Phase 2: Checking Yaw
       if (yaw_ok) {
