@@ -1,123 +1,411 @@
-네, `/plan` 토픽(`nav_msgs/msg/Path`)을 구독하여 전체 경로의 거리(Path Length)를 계산하는 독립적인 C++ 노드 예제 코드를 작성해 드릴게요.
+요청하신 내용을 반영하여 **최소한의 수정**으로 기능을 구현했습니다.
 
-Nav2 환경에서 개발 중이시니 두 가지 방법을 알려드리겠습니다.
+주요 변경 사항은 다음과 같습니다.
 
-1. **Standalone 방식:** Nav2 라이브러리 없이 순수 C++와 ROS 2 기본 메시지만 사용하는 방법 (가볍고 어디서든 사용 가능).
-2. **Nav2 Util 방식:** 이미 Nav2 패키지를 쓰고 계시다면 `nav2_util`을 활용하는 한 줄 컷 방법.
+1. **`/plan` 토픽 구독 추가**: Global Path 정보를 받아오기 위해 `nav_msgs/msg/Path`를 구독합니다.
+2. **`pathCallback` 추가**: 수신된 경로를 저장합니다 (Thread-safety를 위해 Mutex 사용).
+3. **`isGoalReached` 수정**: 기존 로직 수행 **전**에 경로의 길이를 계산하여 `2 * x_goal_tolerance`보다 길다면 바로 `false`를 리턴하도록 했습니다.
 
----
+아래는 수정된 코드입니다.
 
-### 방법 1: Standalone ROS 2 Node (순수 C++ 구현)
+### 1. Header File (`stable_stopped_goal_checker.hpp`)
 
-이 코드는 `/plan` 토픽이 들어오면 점과 점 사이의 유클리드 거리를 모두 합산하여 출력합니다.
-
-**파일명:** `path_distance_calculator.cpp`
+`nav_msgs` 헤더와, 토픽 구독을 위한 변수(`path_sub_`, `current_path_`, `mutex`)가 추가되었습니다.
 
 ```cpp
+/*
+ * ... (License 주석 생략) ...
+ */
+
+#ifndef NAV2_CONTROLLER__PLUGINS__STABLE_STOPPED_GOAL_CHECKER_HPP_
+#define NAV2_CONTROLLER__PLUGINS__STABLE_STOPPED_GOAL_CHECKER_HPP_
+
 #include <memory>
-#include <cmath>
+#include <string>
 #include <vector>
+#include <mutex> // [추가] Thread safety를 위해 필요
 
 #include "rclcpp/rclcpp.hpp"
-#include "nav_msgs/msg/path.hpp"
+#include "rclcpp_lifecycle/lifecycle_node.hpp"
+#include "nav2_core/goal_checker.hpp"
+#include "rcl_interfaces/msg/set_parameters_result.hpp"
+#include "nav_msgs/msg/path.hpp" // [추가] Path 메시지 타입
 
-using std::placeholders::_1;
+namespace nav2_controller
+{
 
-class PathDistanceCalculator : public rclcpp::Node
+class StableStoppedGoalChecker : public nav2_core::GoalChecker
 {
 public:
-  PathDistanceCalculator()
-  : Node("path_distance_calculator")
-  {
-    // QoS 설정 (Transient Local: 늦게 구독해도 기존 메시지를 받음, Nav2 Path 특성)
-    rclcpp::QoS qos(10);
-    qos.transient_local();
+  StableStoppedGoalChecker();
+  
+  void initialize(
+    const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
+    const std::string & plugin_name,
+    const std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros) override;
+    
+  void reset() override;
+  
+  bool isGoalReached(
+    const geometry_msgs::msg::Pose & query_pose, const geometry_msgs::msg::Pose & goal_pose,
+    const geometry_msgs::msg::Twist & velocity) override;
+    
+  bool getTolerances(
+    geometry_msgs::msg::Pose & pose_tolerance,
+    geometry_msgs::msg::Twist & vel_tolerance) override;
 
-    // /plan 토픽 구독
-    subscription_ = this->create_subscription<nav_msgs::msg::Path>(
-      "/plan", qos, std::bind(&PathDistanceCalculator::topic_callback, this, _1));
+  // ... (기존 Helper 함수들 생략) ...
+  bool isXYLatched() const { return stateful_ && !check_xy_; }
+  double getXGoalTolerance() const { return x_goal_tolerance_; }
+  double getYGoalTolerance() const { return y_goal_tolerance_; }
 
-    RCLCPP_INFO(this->get_logger(), "Waiting for /plan topic...");
-  }
+protected:
+  // Tolerance parameters
+  double x_goal_tolerance_;
+  double y_goal_tolerance_;
+  double yaw_goal_tolerance_;
+  
+  // Velocity parameters
+  double rot_stopped_velocity_;
+  double trans_stopped_velocity_;
 
-private:
-  void topic_callback(const nav_msgs::msg::Path::SharedPtr msg) const
-  {
-    if (msg->poses.empty()) {
-      RCLCPP_WARN(this->get_logger(), "Received empty path!");
-      return;
-    }
+  // Time stability parameters
+  double xy_stability_duration_;
+  double yaw_stability_duration_;
 
-    double total_distance = 0.0;
+  // Logic control parameters
+  bool stateful_;
 
-    // 경로의 점들을 순회하며 연속된 두 점 사이의 거리를 누적
-    for (size_t i = 0; i < msg->poses.size() - 1; ++i) {
-      double dx = msg->poses[i+1].pose.position.x - msg->poses[i].pose.position.x;
-      double dy = msg->poses[i+1].pose.position.y - msg->poses[i].pose.position.y;
-      
-      // 2D Navigation (z축 무시)
-      total_distance += std::hypot(dx, dy); 
-      
-      // 만약 3D 드론 등이라면 아래 사용:
-      // double dz = msg->poses[i+1].pose.position.z - msg->poses[i].pose.position.z;
-      // total_distance += std::sqrt(dx*dx + dy*dy + dz*dz);
-    }
+  // State variables
+  bool check_xy_;
+  
+  // Time tracking variables
+  bool in_xy_tolerance_;
+  bool in_yaw_tolerance_;
+  rclcpp::Time first_xy_tolerance_time_;
+  rclcpp::Time first_yaw_tolerance_time_;
+  rclcpp::Clock::SharedPtr clock_;
 
-    RCLCPP_INFO(this->get_logger(), 
-      "Received Path with %zu points. Total Distance: %.3f meters", 
-      msg->poses.size(), total_distance);
-  }
+  // [추가] Path Subscription 관련 변수
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
+  nav_msgs::msg::Path::SharedPtr current_path_;
+  std::mutex path_mutex_; 
+  std::string path_topic_; // 파라미터로 받기 위해 추가
 
-  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr subscription_;
+  // Dynamic parameters handler
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr dyn_params_handler_;
+  std::string plugin_name_;
+
+  /**
+   * @brief Callback executed when a parameter change is detected
+   */
+  rcl_interfaces::msg::SetParametersResult
+  dynamicParametersCallback(std::vector<rclcpp::Parameter> parameters);
+
+  // [추가] Path Callback 함수
+  void pathCallback(const nav_msgs::msg::Path::SharedPtr msg);
 };
 
-int main(int argc, char * argv[])
-{
-  rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<PathDistanceCalculator>());
-  rclcpp::shutdown();
-  return 0;
-}
+}  // namespace nav2_controller
+
+#endif  // NAV2_CONTROLLER__PLUGINS__STABLE_STOPPED_GOAL_CHECKER_HPP_
 
 ```
 
----
+### 2. Source File (`stable_stopped_goal_checker.cpp`)
 
-### 방법 2: Nav2 Util 활용 (가장 추천)
-
-개발 중이신 플러그인(`StableStoppedGoalChecker`) 내부에서 사용하거나, Nav2 의존성이 있는 패키지라면 굳이 for문을 직접 돌릴 필요가 없습니다. `nav2_util`에 이미 최적화된 함수가 있습니다.
-
-**필요 헤더:**
+`initialize`에서 구독 설정, `pathCallback` 구현, 그리고 `isGoalReached` 도입부에 거리 체크 로직이 추가되었습니다.
 
 ```cpp
+/*
+ * ... (License 주석 생략) ...
+ */
+
+#include <cmath>
+#include <string>
+#include <memory>
+#include <limits>
+#include <vector>
+
+#include "nav2_stable_stopped_goal_checker/stable_stopped_goal_checker.hpp"
+#include "pluginlib/class_list_macros.hpp"
+#include "angles/angles.h"
+#include "nav2_util/node_utils.hpp"
 #include "nav2_util/geometry_utils.hpp"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#include "tf2/utils.h"
+#pragma GCC diagnostic pop
 
-```
+using std::hypot;
+using std::fabs;
+using rcl_interfaces::msg::ParameterType;
+using std::placeholders::_1;
 
-**사용 코드:**
-
-```cpp
-void topic_callback(const nav_msgs::msg::Path::SharedPtr msg) const
+namespace nav2_controller
 {
-  // nav2_util 함수 한 줄로 끝!
-  double total_distance = nav2_util::geometry_utils::calculate_path_length(*msg);
-  
-  RCLCPP_INFO(this->get_logger(), "Path Distance: %.3f m", total_distance);
+
+StableStoppedGoalChecker::StableStoppedGoalChecker()
+: x_goal_tolerance_(0.25),
+  y_goal_tolerance_(0.25),
+  yaw_goal_tolerance_(0.25),
+  rot_stopped_velocity_(0.25),
+  trans_stopped_velocity_(0.25),
+  xy_stability_duration_(0.5),
+  yaw_stability_duration_(0.5),
+  stateful_(true),
+  check_xy_(true),
+  in_xy_tolerance_(false),
+  in_yaw_tolerance_(false),
+  path_topic_("/plan") // 기본값
+{
 }
 
+void StableStoppedGoalChecker::initialize(
+  const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
+  const std::string & plugin_name,
+  const std::shared_ptr<nav2_costmap_2d::Costmap2DROS> /*costmap_ros*/)
+{
+  plugin_name_ = plugin_name;
+  auto node = parent.lock();
+  clock_ = node->get_clock();
+
+  // Declare parameters
+  nav2_util::declare_parameter_if_not_declared(
+    node, plugin_name + ".x_goal_tolerance", rclcpp::ParameterValue(0.25));
+  nav2_util::declare_parameter_if_not_declared(
+    node, plugin_name + ".y_goal_tolerance", rclcpp::ParameterValue(0.25));
+  nav2_util::declare_parameter_if_not_declared(
+    node, plugin_name + ".yaw_goal_tolerance", rclcpp::ParameterValue(0.25));
+  nav2_util::declare_parameter_if_not_declared(
+    node, plugin_name + ".trans_stopped_velocity", rclcpp::ParameterValue(0.25));
+  nav2_util::declare_parameter_if_not_declared(
+    node, plugin_name + ".rot_stopped_velocity", rclcpp::ParameterValue(0.25));
+  
+  nav2_util::declare_parameter_if_not_declared(
+    node, plugin_name + ".xy_stability_duration", rclcpp::ParameterValue(0.5));
+  nav2_util::declare_parameter_if_not_declared(
+    node, plugin_name + ".yaw_stability_duration", rclcpp::ParameterValue(0.5));
+  nav2_util::declare_parameter_if_not_declared(
+    node, plugin_name + ".stateful", rclcpp::ParameterValue(true));
+  
+  // [추가] path_topic 파라미터 선언
+  nav2_util::declare_parameter_if_not_declared(
+    node, plugin_name + ".path_topic", rclcpp::ParameterValue("/plan"));
+
+  // Get parameters
+  node->get_parameter(plugin_name + ".x_goal_tolerance", x_goal_tolerance_);
+  node->get_parameter(plugin_name + ".y_goal_tolerance", y_goal_tolerance_);
+  node->get_parameter(plugin_name + ".yaw_goal_tolerance", yaw_goal_tolerance_);
+  node->get_parameter(plugin_name + ".trans_stopped_velocity", trans_stopped_velocity_);
+  node->get_parameter(plugin_name + ".rot_stopped_velocity", rot_stopped_velocity_);
+  node->get_parameter(plugin_name + ".xy_stability_duration", xy_stability_duration_);
+  node->get_parameter(plugin_name + ".yaw_stability_duration", yaw_stability_duration_);
+  node->get_parameter(plugin_name + ".stateful", stateful_);
+  node->get_parameter(plugin_name + ".path_topic", path_topic_);
+
+  // [추가] Path Subscription 생성 (TransientLocal QoS 사용)
+  rclcpp::QoS qos(rclcpp::KeepLast(1));
+  qos.transient_local();
+  path_sub_ = node->create_subscription<nav_msgs::msg::Path>(
+    path_topic_, qos,
+    std::bind(&StableStoppedGoalChecker::pathCallback, this, _1));
+
+  // Add callback for dynamic parameters
+  dyn_params_handler_ = node->add_on_set_parameters_callback(
+    std::bind(&StableStoppedGoalChecker::dynamicParametersCallback, this, _1));
+}
+
+void StableStoppedGoalChecker::reset()
+{
+  check_xy_ = true;
+  in_xy_tolerance_ = false;
+  in_yaw_tolerance_ = false;
+}
+
+// [추가] Path Callback 구현
+void StableStoppedGoalChecker::pathCallback(const nav_msgs::msg::Path::SharedPtr msg)
+{
+  std::lock_guard<std::mutex> lock(path_mutex_);
+  current_path_ = msg;
+}
+
+bool StableStoppedGoalChecker::isGoalReached(
+  const geometry_msgs::msg::Pose & query_pose, const geometry_msgs::msg::Pose & goal_pose,
+  const geometry_msgs::msg::Twist & velocity)
+{
+  // [추가] Path Length Check
+  {
+    std::lock_guard<std::mutex> lock(path_mutex_);
+    if (current_path_) {
+      // nav2_util을 사용하여 경로 길이 계산
+      double total_distance = nav2_util::geometry_utils::calculate_path_length(*current_path_);
+      
+      // 남은 경로의 길이가 허용 오차의 2배보다 크면, 아직 도착하지 않은 것으로 간주
+      if (total_distance > 2.0 * x_goal_tolerance_) {
+        // 단, 이미 latch(XY 완료) 상태라면 거리 체크를 무시하고 Yaw 체크로 넘어갈 수 있도록
+        // 아래 로직이 필요할 수 있으나, 요구사항에 맞춰 "엄격하게" 리턴합니다.
+        // 만약 XY가 이미 맞았더라도 경로가 갑자기 길어지면(Replanning 등) 멈추지 않아야 합니다.
+        // 여기서는 요구사항대로 "if distance <= ... 일 때만 체크"를 역으로 적용하여
+        // "if distance > ... 이면 False 리턴"으로 구현합니다.
+        
+        // 주의: XY가 이미 맞아서 Latch된 상태(check_xy_ == false)에서도 
+        // 경로가 다시 길어졌다면(새로운 계획) 체크를 재개해야 하는지는 정책에 따릅니다.
+        // 여기서는 단순하게 적용합니다.
+        return false; 
+      }
+    }
+    // current_path_가 아직 없으면(nullptr), 안전을 위해 기존 로직을 수행하거나 false를 리턴할 수 있습니다.
+    // 여기서는 path가 없으면 거리 체크를 패스하고 기존 로직으로 넘어갑니다.
+  }
+
+  // --- 기존 로직 시작 ---
+
+  // 1. Calculate Errors
+  double dx = fabs(query_pose.position.x - goal_pose.position.x);
+  double dy = fabs(query_pose.position.y - goal_pose.position.y);
+  double dyaw = fabs(angles::shortest_angular_distance(
+    tf2::getYaw(query_pose.orientation),
+    tf2::getYaw(goal_pose.orientation)));
+
+  bool xy_ok = (dx <= x_goal_tolerance_) && (dy <= y_goal_tolerance_);
+  bool yaw_ok = (dyaw <= yaw_goal_tolerance_);
+
+  // 2. Logic based on 'stateful' parameter
+  if (stateful_) {
+    // === STATEFUL MODE: Check XY first, then Yaw ===
+    
+    if (check_xy_) {
+      // Phase 1: Checking XY Stability
+      if (xy_ok) {
+        if (!in_xy_tolerance_) {
+          first_xy_tolerance_time_ = clock_->now();
+          in_xy_tolerance_ = true;
+        }
+        
+        double time_in_xy = (clock_->now() - first_xy_tolerance_time_).seconds();
+        
+        // If XY is stable for duration, switch to Yaw phase
+        if (time_in_xy >= xy_stability_duration_) {
+          check_xy_ = false;
+          in_xy_tolerance_ = false; // Reset for cleanliness
+          in_yaw_tolerance_ = false; // Reset for next phase
+        }
+      } else {
+        in_xy_tolerance_ = false;
+      }
+      return false; // Still working on XY or just finished XY
+    } else {
+      // Phase 2: Checking Yaw Stability (XY is already assumed done)
+      if (yaw_ok) {
+        if (!in_yaw_tolerance_) {
+          first_yaw_tolerance_time_ = clock_->now();
+          in_yaw_tolerance_ = true;
+        }
+
+        double time_in_yaw = (clock_->now() - first_yaw_tolerance_time_).seconds();
+
+        if (time_in_yaw >= yaw_stability_duration_) {
+          // Both phases passed, now check velocity
+          return fabs(velocity.angular.z) <= rot_stopped_velocity_ &&
+                 hypot(velocity.linear.x, velocity.linear.y) <= trans_stopped_velocity_;
+        }
+      } else {
+        in_yaw_tolerance_ = false;
+      }
+      return false;
+    }
+
+  } else {
+    // === NON-STATEFUL MODE: Check XY & Yaw Simultaneously ===
+    
+    if (xy_ok && yaw_ok) {
+      if (!in_xy_tolerance_) {
+        // Reuse xy variables for the combined state
+        first_xy_tolerance_time_ = clock_->now();
+        in_xy_tolerance_ = true;
+      }
+
+      double time_in_combined = (clock_->now() - first_xy_tolerance_time_).seconds();
+
+      if (time_in_combined >= xy_stability_duration_) {
+        // Tolerances & Duration met, now check velocity
+        return fabs(velocity.angular.z) <= rot_stopped_velocity_ &&
+               hypot(velocity.linear.x, velocity.linear.y) <= trans_stopped_velocity_;
+      }
+    } else {
+      in_xy_tolerance_ = false;
+    }
+    return false;
+  }
+}
+
+// ... (getTolerances 및 dynamicParametersCallback은 기존과 동일하지만 path_topic 처리 추가) ...
+
+bool StableStoppedGoalChecker::getTolerances(
+  geometry_msgs::msg::Pose & pose_tolerance,
+  geometry_msgs::msg::Twist & vel_tolerance)
+{
+  // (기존 코드와 동일)
+  double invalid_field = std::numeric_limits<double>::lowest();
+
+  pose_tolerance.position.x = x_goal_tolerance_;
+  pose_tolerance.position.y = y_goal_tolerance_;
+  pose_tolerance.position.z = invalid_field;
+  pose_tolerance.orientation =
+    nav2_util::geometry_utils::orientationAroundZAxis(yaw_goal_tolerance_);
+
+  vel_tolerance.linear.x = trans_stopped_velocity_;
+  vel_tolerance.linear.y = trans_stopped_velocity_;
+  vel_tolerance.linear.z = invalid_field;
+
+  vel_tolerance.angular.x = invalid_field;
+  vel_tolerance.angular.y = invalid_field;
+  vel_tolerance.angular.z = rot_stopped_velocity_;
+
+  return true;
+}
+
+rcl_interfaces::msg::SetParametersResult
+StableStoppedGoalChecker::dynamicParametersCallback(std::vector<rclcpp::Parameter> parameters)
+{
+  rcl_interfaces::msg::SetParametersResult result;
+  for (auto & parameter : parameters) {
+    const auto & type = parameter.get_type();
+    const auto & name = parameter.get_name();
+
+    if (type == ParameterType::PARAMETER_DOUBLE) {
+      if (name == plugin_name_ + ".x_goal_tolerance") {
+        x_goal_tolerance_ = parameter.as_double();
+      } else if (name == plugin_name_ + ".y_goal_tolerance") {
+        y_goal_tolerance_ = parameter.as_double();
+      } else if (name == plugin_name_ + ".yaw_goal_tolerance") {
+        yaw_goal_tolerance_ = parameter.as_double();
+      } else if (name == plugin_name_ + ".trans_stopped_velocity") {
+        trans_stopped_velocity_ = parameter.as_double();
+      } else if (name == plugin_name_ + ".rot_stopped_velocity") {
+        rot_stopped_velocity_ = parameter.as_double();
+      } else if (name == plugin_name_ + ".xy_stability_duration") {
+        xy_stability_duration_ = parameter.as_double();
+      } else if (name == plugin_name_ + ".yaw_stability_duration") {
+        yaw_stability_duration_ = parameter.as_double();
+      }
+    } else if (type == ParameterType::PARAMETER_BOOL) {
+      if (name == plugin_name_ + ".stateful") {
+        stateful_ = parameter.as_bool();
+      }
+    } else if (type == ParameterType::PARAMETER_STRING) { // [추가]
+        if (name == plugin_name_ + ".path_topic") {
+            path_topic_ = parameter.as_string();
+        }
+    }
+  }
+  result.successful = true;
+  return result;
+}
+
+}  // namespace nav2_controller
+
+PLUGINLIB_EXPORT_CLASS(nav2_controller::StableStoppedGoalChecker, nav2_core::GoalChecker)
+
 ```
-
-### 💡 팁: 특정 인덱스부터 끝까지만 계산하고 싶다면?
-
-앞서 Goal Checker에서 필요했던 기능(로봇 위치부터 끝까지)도 이 함수로 가능합니다.
-
-```cpp
-// path의 start_index 번째 점부터 끝점까지의 거리 계산
-double remaining = nav2_util::geometry_utils::calculate_path_length(*msg, start_index);
-
-```
-
-### 요약
-
-* 단순 테스트용 노드를 만드신다면 **방법 1**을 복사해서 빌드하세요.
-* 기존 Nav2 플러그인 내부나 Nav2 관련 코드라면 **방법 2**를 쓰시는 게 가장 깔끔하고 정확합니다.
