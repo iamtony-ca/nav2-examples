@@ -8,14 +8,12 @@
 #include <multi_agent_msgs/msg/agent_status.hpp>
 #include <multi_agent_msgs/msg/agent_layer_cell_meta.hpp>
 #include "tf2_ros/buffer.h"
-#include <cstring> // [필수] memset 사용을 위해 추가
+
+// [NEW] memset 사용을 위해 필수
+#include <cstring> 
 
 namespace multi_agent_nav2
 {
-
-// ==========================================
-// Helper Implementations
-// ==========================================
 
 std::vector<geometry_msgs::msg::Point32> AgentLayer::toPoint32(
     const std::vector<geometry_msgs::msg::Point>& points)
@@ -26,7 +24,7 @@ std::vector<geometry_msgs::msg::Point32> AgentLayer::toPoint32(
         geometry_msgs::msg::Point32 p32;
         p32.x = static_cast<float>(p.x);
         p32.y = static_cast<float>(p.y);
-        p32.z = 0.0f; 
+        p32.z = 0.0f;
         points32.push_back(p32);
     }
     return points32;
@@ -39,11 +37,14 @@ AgentLayer::getFootprintForAgent(const multi_agent_msgs::msg::MultiAgentInfo & a
     
     auto it = agent_footprints_.find(a.machine_id);
     if (it == agent_footprints_.end()) {
-        RCLCPP_WARN_ONCE(logger_, "No footprint data found in YAML for machine_id %u", a.machine_id);
+        RCLCPP_WARN_ONCE(logger_, 
+          "No footprint data found in YAML for machine_id %u. Cannot draw agent.",
+          a.machine_id);
         return fp_stamped; 
     }
 
     const auto& data = it->second;
+
     if (data.use_radius) {
         std::vector<geometry_msgs::msg::Point> points = 
             nav2_costmap_2d::makeFootprintFromRadius(data.radius);
@@ -52,7 +53,7 @@ AgentLayer::getFootprintForAgent(const multi_agent_msgs::msg::MultiAgentInfo & a
         fp_stamped.polygon.points = data.points;
     }
 
-    fp_stamped.header.frame_id = "base_link"; 
+    fp_stamped.header.frame_id = "base_link";
     fp_stamped.header.stamp = a.current_pose.header.stamp;
     return fp_stamped;
 }
@@ -60,67 +61,61 @@ AgentLayer::getFootprintForAgent(const multi_agent_msgs::msg::MultiAgentInfo & a
 bool AgentLayer::transformAgentInfo(
     const multi_agent_msgs::msg::MultiAgentInfo & agent_in_map,
     multi_agent_msgs::msg::MultiAgentInfo & agent_in_costmap_frame,
-    const std::string & source_frame_id,
-    const std::string & target_frame_id) const
+    const std::string & costmap_frame) const
 {
-  if (source_frame_id == target_frame_id) {
+  const std::string& map_frame = last_infos_->header.frame_id;
+  const rclcpp::Time& map_stamp = last_infos_->header.stamp;
+
+  if (map_frame.empty()) {
+    RCLCPP_WARN_ONCE(logger_, "MultiAgentInfoArray message has empty frame_id. Cannot transform.");
+    return false;
+  }
+
+  if (map_frame == costmap_frame) {
     agent_in_costmap_frame = agent_in_map;
     return true;
   }
 
   agent_in_costmap_frame = agent_in_map; 
-  agent_in_costmap_frame.truncated_path.poses.clear(); 
-
-  // [KEY] TF Lookup을 위한 시간 설정: rclcpp::Time(0) = Latest Available
-  rclcpp::Time latest_time(0);
+  agent_in_costmap_frame.truncated_path.poses.clear();
 
   try {
-    // --- Transform Current Pose ---
     geometry_msgs::msg::PoseStamped pose_to_transform = agent_in_map.current_pose;
-    pose_to_transform.header.frame_id = source_frame_id;
-    pose_to_transform.header.stamp = latest_time; 
+    pose_to_transform.header.frame_id = map_frame;
+    pose_to_transform.header.stamp = map_stamp;
 
     geometry_msgs::msg::PoseStamped transformed_pose;
-    tf_->transform(pose_to_transform, transformed_pose, target_frame_id);
+    tf_->transform(pose_to_transform, transformed_pose, costmap_frame);
     agent_in_costmap_frame.current_pose = transformed_pose;
 
-    // --- Transform Path Poses ---
     for (const auto& pose_stamped_in_map : agent_in_map.truncated_path.poses) {
-      geometry_msgs::msg::PoseStamped path_pose_to_transform = pose_stamped_in_map;
-      
-      path_pose_to_transform.header.frame_id = source_frame_id;
-      path_pose_to_transform.header.stamp = latest_time; 
+      geometry_msgs::msg::PoseStamped path_pose_to_transform;
+      path_pose_to_transform.header.frame_id = map_frame;
+      path_pose_to_transform.header.stamp = map_stamp;
+      path_pose_to_transform.pose = pose_stamped_in_map.pose; 
 
       geometry_msgs::msg::PoseStamped pose_in_costmap_frame;
-      tf_->transform(path_pose_to_transform, pose_in_costmap_frame, target_frame_id);
+      tf_->transform(path_pose_to_transform, pose_in_costmap_frame, costmap_frame);
       
       agent_in_costmap_frame.truncated_path.poses.push_back(pose_in_costmap_frame);
     }
 
-    agent_in_costmap_frame.truncated_path.header.frame_id = target_frame_id;
+    agent_in_costmap_frame.truncated_path.header.frame_id = costmap_frame;
     agent_in_costmap_frame.truncated_path.header.stamp = transformed_pose.header.stamp;
     return true;
 
   } catch (const tf2::TransformException & ex) {
     RCLCPP_WARN_THROTTLE(
       logger_, *node_shared_->get_clock(), 2000,
-      "TF Fail agent %u ('%s'->'%s'): %s",
-      agent_in_map.machine_id, source_frame_id.c_str(), target_frame_id.c_str(), ex.what());
+      "Failed to transform agent %u from '%s' to '%s': %s",
+      agent_in_map.machine_id, map_frame.c_str(), costmap_frame.c_str(), ex.what());
     return false;
   }
+  return false;
 }
 
-// ==========================================
-// AgentLayer Implementation
-// ==========================================
 
-AgentLayer::AgentLayer()
-{
-}
-
-AgentLayer::~AgentLayer()
-{
-}
+AgentLayer::AgentLayer() {}
 
 void AgentLayer::onInitialize()
 {
@@ -129,7 +124,6 @@ void AgentLayer::onInitialize()
     throw std::runtime_error("AgentLayer: failed to lock lifecycle node");
   }
 
-  // --- Parameters ---
   declareParameter("enabled", rclcpp::ParameterValue(true));
   declareParameter("topic", rclcpp::ParameterValue(std::string("/multi_agent_infos")));
   declareParameter("self_machine_id", rclcpp::ParameterValue(0));
@@ -138,8 +132,8 @@ void AgentLayer::onInitialize()
   declareParameter("roi_range_m", rclcpp::ParameterValue(12.0));
   declareParameter("time_decay_sec", rclcpp::ParameterValue(1.0));
   declareParameter("lethal_cost", rclcpp::ParameterValue(254));
-  declareParameter("moving_cost", rclcpp::ParameterValue(180));
-  declareParameter("waiting_cost", rclcpp::ParameterValue(200));
+  declareParameter("moving_cost", rclcpp::ParameterValue(254));
+  declareParameter("waiting_cost", rclcpp::ParameterValue(254));
   declareParameter("manual_cost_bias", rclcpp::ParameterValue(30));
   declareParameter("dilation_m", rclcpp::ParameterValue(0.05));
   declareParameter("forward_smear_m", rclcpp::ParameterValue(0.005));
@@ -186,10 +180,16 @@ void AgentLayer::onInitialize()
   node_shared_->get_parameter(name_ + "." + "max_poses", max_poses_);
   node_shared_->get_parameter(name_ + "." + "qos_reliable", qos_reliable_);
 
-  // --- Robot Footprints ---
   declareParameter("robot_ids", rclcpp::ParameterValue(std::vector<std::string>({})));
+
   std::vector<std::string> robot_ids;
   node_shared_->get_parameter(name_ + "." + "robot_ids", robot_ids);
+
+  for (const auto & id_str : robot_ids) {
+    declareParameter(id_str + ".machine_id", rclcpp::ParameterValue(0));
+    declareParameter(id_str + ".robot_radius", rclcpp::ParameterValue(0.0));
+    declareParameter(id_str + ".footprint", rclcpp::ParameterValue(std::string("[]")));
+  }
 
   agent_footprints_.clear();
   for (const auto & id_str : robot_ids) {
@@ -218,28 +218,35 @@ void AgentLayer::onInitialize()
         "Using radius (%.2f) for machine_id %u (footprint string: '%s')",
         data.radius, machine_id, footprint_str.c_str());
     }
+
     agent_footprints_[machine_id] = data;
+    
+    RCLCPP_INFO(logger_, 
+      "Loaded footprint for machine_id %u: use_radius=%s, points=%zu",
+      machine_id, (data.use_radius ? "true" : "false"), data.points.size());
   }
 
-  RCLCPP_INFO(logger_, 
-      "AgentLayer '%s' initialized. Topic: %s", name_.c_str(), topic_.c_str());
+  RCLCPP_INFO(
+      logger_,  
+      "AgentLayer '%s' initialized: self_machine_id=%u, self_type_id='%s', moving_cost=%u",
+      name_.c_str(), self_machine_id_, self_type_id_.c_str(), static_cast<unsigned int>(moving_cost_)
+    );
 
-  // [VISUALIZATION] 시각화용 맵 및 퍼블리셔 초기화
+  // [NEW] 시각화용 맵 및 퍼블리셔 초기화
   viz_costmap_.setDefaultValue(0); 
 
-  // 토픽 이름: /global_costmap/agent_layer/costmap
+  // 토픽 이름: 예) /global_costmap/agent_layer/raw_costmap
   costmap_pub_ = std::make_unique<nav2_costmap_2d::Costmap2DPublisher>(
       node_shared_, 
       &viz_costmap_, 
       layered_costmap_->getGlobalFrameID(), 
-      name_ + "/costmap", 
+      name_ + "/raw_costmap", 
       false);
 
   current_ = true;
-  
-  if (enabled_) {
-    activate();
-  }
+  matchSize();
+
+  if (enabled_) activate();
 }
 
 void AgentLayer::activate()
@@ -255,6 +262,7 @@ void AgentLayer::activate()
         "agent_layer_meta", rclcpp::QoS(1).reliable().transient_local());
   }
 
+  // [NEW] 시각화 퍼블리셔 활성화
   if (costmap_pub_) costmap_pub_->on_activate();
 }
 
@@ -263,13 +271,8 @@ void AgentLayer::deactivate()
   sub_.reset();
   meta_pub_.reset();
 
+  // [NEW] 시각화 퍼블리셔 비활성화
   if (costmap_pub_) costmap_pub_->on_deactivate();
-}
-
-void AgentLayer::reset()
-{
-  current_ = true;
-  touched_ = false;
 }
 
 void AgentLayer::infosCallback(
@@ -296,7 +299,8 @@ unsigned char AgentLayer::computeCost(const multi_agent_msgs::msg::MultiAgentInf
 {
   using S = multi_agent_msgs::msg::AgentStatus;
   const uint8_t p = a.status.phase;
-  const bool is_moving = (p == S::STATUS_MOVING) || (p == S::STATUS_PATH_SEARCHING);
+  const bool is_moving =
+      (p == S::STATUS_MOVING) || (p == S::STATUS_PATH_SEARCHING);
 
   unsigned char base = is_moving ? moving_cost_ : waiting_cost_;
 
@@ -318,11 +322,10 @@ double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo &
     case S::STATUS_ERROR:
     case S::STATUS_PAUSE:
     case S::STATUS_WAITING_FOR_SAFETY:
-    case S::STATUS_WAITING_FOR_FLOWCONTROL:
-    case S::STATUS_WAITING_FOR_ROS_STATUS:
-      r = std::max(r, 0.0); 
+    case S::STATUS_WAITING_FOR_CONTROL:
+    case S::STATUS_WAITING_FOR_STATUS:
+      r = std::max(r, 0.0);
       break;
-
     case S::STATUS_LOADING:
     case S::STATUS_UNLOADING:
     case S::STATUS_UNLOADED:
@@ -331,7 +334,7 @@ double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo &
     case S::STATUS_UNKNOWN:
     case S::STATUS_MANUAL_RUNNING:
     case S::STATUS_MANUAL_COMPLETE:
-      r = std::max(r, 0.1);  
+      r = std::max(r, 0.1); 
       break;
     default:
       break;
@@ -342,35 +345,43 @@ double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo &
 void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw*/,
                               double* min_x, double* min_y, double* max_x, double* max_y)
 {
-  if (!enabled_) return;
+  if (!enabled_) {
+    return;
+  }
 
   cached_robot_x_ = robot_x;
   cached_robot_y_ = robot_y;
 
   touched_ = false;
-  touch_min_x_ = 1e9; touch_min_y_ = 1e9;
+  touch_min_x_ =  1e9; touch_min_y_ =  1e9;
   touch_max_x_ = -1e9; touch_max_y_ = -1e9;
 
   std::vector<multi_agent_msgs::msg::MultiAgentInfo> infos;
-  std::string source_frame;
   {
     std::lock_guard<std::mutex> lk(data_mtx_);
-    if (!last_infos_ || stale(last_stamp_)) return;
-    source_frame = last_infos_->header.frame_id;
+    if (!last_infos_ || stale(last_stamp_)) {
+      return;
+    }
     infos.assign(last_infos_->agents.begin(), last_infos_->agents.end());
   }
 
-  const std::string & target_frame = layered_costmap_->getGlobalFrameID();
+  const std::string & costmap_frame = layered_costmap_->getGlobalFrameID();
 
-  for (const auto & a_map : infos) {
-    if (isSelf(a_map)) continue;
+  for (const auto & a_map : infos) { 
+    if (isSelf(a_map)) {
+      continue;
+    }
 
-    multi_agent_msgs::msg::MultiAgentInfo a;
-    if (!transformAgentInfo(a_map, a, source_frame, target_frame)) continue;
+    multi_agent_msgs::msg::MultiAgentInfo a; 
+    if (!transformAgentInfo(a_map, a, costmap_frame)) {
+      continue; 
+    }
 
     const double dx = a.current_pose.pose.position.x - robot_x;
     const double dy = a.current_pose.pose.position.y - robot_y;
-    if (std::hypot(dx, dy) > roi_range_m_) continue;
+    if (std::hypot(dx, dy) > roi_range_m_) {
+      continue;
+    }
 
     {
       const auto & p = a.current_pose.pose.position;
@@ -400,7 +411,7 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
   }
 }
 
-// Helper: Directional Footprint Dilation
+
 static inline std::vector<geometry_msgs::msg::Point>
 dilateFootprintDirectional(const std::vector<geometry_msgs::msg::Point32> & in,
                            double iso_dilate_m,
@@ -489,6 +500,17 @@ void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
       }
     }
   }
+
+  if (!touched_) {
+    touch_min_x_ = minx; touch_min_y_ = miny;
+    touch_max_x_ = maxx; touch_max_y_ = maxy;
+    touched_ = true;
+  } else {
+    touch_min_x_ = std::min(touch_min_x_, minx);
+    touch_min_y_ = std::min(touch_min_y_, miny);
+    touch_max_x_ = std::max(touch_max_x_, maxx);
+    touch_max_y_ = std::max(touch_max_y_, maxy);
+  }
 }
 
 void AgentLayer::rasterizeAgentPath(
@@ -497,7 +519,9 @@ void AgentLayer::rasterizeAgentPath(
   std::vector<std::pair<unsigned int,unsigned int>> & meta_hits)
 {
   geometry_msgs::msg::PolygonStamped fp = getFootprintForAgent(a);
-  if (fp.polygon.points.empty()) return;
+  if (fp.polygon.points.empty()) {
+    return; 
+  }
 
   const unsigned char cost_now = computeCost(a);
   const double iso_extra = computeDilation(a);
@@ -514,15 +538,18 @@ void AgentLayer::rasterizeAgentPath(
 }
 
 void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
-                             int min_i, int min_j, int max_i, int max_j)
+                             int /*min_i*/, int /*min_j*/, int /*max_i*/, int /*max_j*/)
 {
   if (!enabled_) return;
-  
+
   // =================================================================
-  // [VISUALIZATION] 시각화용 맵(viz_costmap_) 동기화 및 초기화
+  // [NEW] 시각화용 맵(viz_costmap_) 동기화 및 초기화 (memset 사용)
   // =================================================================
   {
+      // Costmap2D의 mutex를 잠급니다 (안전성 확보)
       std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(viz_costmap_.getMutex()));
+      
+      // Master Grid와 크기가 다르면 리사이즈
       if (viz_costmap_.getSizeInCellsX() != master_grid.getSizeInCellsX() ||
           viz_costmap_.getSizeInCellsY() != master_grid.getSizeInCellsY() ||
           viz_costmap_.getResolution() != master_grid.getResolution() ||
@@ -536,59 +563,58 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
                               master_grid.getOriginY());
       }
       
-      // [FIX] resetMaps() (protected) 대신 memset 사용
+      // [KEY] resetMaps()는 protected이므로 memset으로 raw buffer를 0으로 초기화
       unsigned char* char_map = viz_costmap_.getCharMap();
       unsigned int size_x = viz_costmap_.getSizeInCellsX();
       unsigned int size_y = viz_costmap_.getSizeInCellsY();
+      // 전체 맵을 0(FREE_SPACE)으로 밉니다.
       std::memset(char_map, 0, size_x * size_y * sizeof(unsigned char));
   }
 
-  // 데이터 준비
   std::vector<multi_agent_msgs::msg::MultiAgentInfo> infos;
-  std::string source_frame;
   {
     std::lock_guard<std::mutex> lk(data_mtx_);
     if (!last_infos_ || stale(last_stamp_)) return;
-    source_frame = last_infos_->header.frame_id;
     infos.assign(last_infos_->agents.begin(), last_infos_->agents.end());
   }
 
   std::vector<std::pair<unsigned int,unsigned int>> meta_hits;
   meta_hits.reserve(256);
-  std::vector<std::pair<unsigned int,unsigned int>> dummy_hits; 
+  std::vector<std::pair<unsigned int,unsigned int>> dummy_hits; // 시각화용 더미 벡터
 
   const double robot_x = cached_robot_x_;
   const double robot_y = cached_robot_y_;
-  const std::string & target_frame = layered_costmap_->getGlobalFrameID();
+  const std::string & costmap_frame = layered_costmap_->getGlobalFrameID();
 
-  for (const auto & a_map : infos) {
-    if (isSelf(a_map)) continue;
+  for (const auto & a_map : infos) { 
+    if (isSelf(a_map)) continue;
 
     multi_agent_msgs::msg::MultiAgentInfo a;
-    if (!transformAgentInfo(a_map, a, source_frame, target_frame)) continue;
+    if (!transformAgentInfo(a_map, a, costmap_frame)) {
+      continue;
+    }
 
-    const double dx = a.current_pose.pose.position.x - robot_x;
-    const double dy = a.current_pose.pose.position.y - robot_y;
-    if (std::hypot(dx, dy) > roi_range_m_) continue;
+    const double dx = a.current_pose.pose.position.x - robot_x;
+    const double dy = a.current_pose.pose.position.y - robot_y;
+    if (std::hypot(dx, dy) > roi_range_m_) continue;
 
-    // 1. [NAVIGATION] Master Grid에 직접 그리기
-    rasterizeAgentPath(a, &master_grid, meta_hits);
+    // 1. [기존 로직] 내비게이션용 Master Grid에 그리기 (변경 없음!)
+    rasterizeAgentPath(a, &master_grid, meta_hits);
 
-    // 2. [VISUALIZATION] Viz Grid에 따로 그리기
+    // 2. [NEW] 시각화용 Viz Grid에 따로 그리기
     rasterizeAgentPath(a, &viz_costmap_, dummy_hits);
-  }
+  }
 
-  // [VISUALIZATION] 별도 Costmap 발행
+  // [NEW] 시각화용 Costmap 발행
   if (costmap_pub_) {
       costmap_pub_->updateBounds(0, viz_costmap_.getSizeInCellsX(),
                                  0, viz_costmap_.getSizeInCellsY());
       costmap_pub_->publishCostmap();
   }
 
-  // Meta Data 발행
   if (publish_meta_ && meta_pub_) {
     multi_agent_msgs::msg::AgentLayerMetaArray arr;
-    arr.header.frame_id = target_frame;
+    arr.header.frame_id = layered_costmap_->getGlobalFrameID();
     arr.header.stamp = node_shared_->now();
 
     for (size_t k = 0; k < meta_hits.size(); k += std::max(1, meta_stride_)) {
@@ -596,9 +622,11 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
       double wx, wy; master_grid.mapToWorld(mx, my, wx, wy);
       multi_agent_msgs::msg::AgentLayerCellMeta cm;
       cm.header = arr.header;
-      cm.machine_id = 0; 
+
+      cm.machine_id = 0;
       cm.position.x = wx; cm.position.y = wy; cm.position.z = 0.0;
       cm.mx = mx; cm.my = my;
+
       arr.cells.emplace_back(std::move(cm));
     }
     meta_pub_->publish(std::move(arr));
@@ -607,5 +635,5 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
 
 } // namespace multi_agent_nav2
 
-// Export Plugin
+// pluginlib export
 PLUGINLIB_EXPORT_CLASS(multi_agent_nav2::AgentLayer, nav2_costmap_2d::Layer)
