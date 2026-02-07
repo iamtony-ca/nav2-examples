@@ -7,17 +7,16 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
-#include <memory>
+#include <memory> // unique_ptr
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 
-// [Core] CostmapLayer 상속 및 Publisher
 #include <nav2_costmap_2d/layer.hpp>
-#include <nav2_costmap_2d/costmap_layer.hpp> 
 #include <nav2_costmap_2d/layered_costmap.hpp>
 #include <nav2_costmap_2d/costmap_2d.hpp>
-#include <nav2_costmap_2d/costmap_2d_publisher.hpp>
+// [NEW] 시각화 토픽 발행을 위해 추가
+#include <nav2_costmap_2d/costmap_2d_publisher.hpp> 
 
 #include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/polygon_stamped.hpp>
@@ -33,19 +32,18 @@
 namespace multi_agent_nav2
 {
 
-class AgentLayer : public nav2_costmap_2d::CostmapLayer
+class AgentLayer : public nav2_costmap_2d::Layer
 {
 public:
   AgentLayer();
-  virtual ~AgentLayer();
 
-  // Lifecycle
+  // lifecycle
   void onInitialize() override;
   void activate() override;
   void deactivate() override;
-  void reset() override;
+  void reset() override { current_ = true; }
 
-  // Costmap callbacks
+  // costmap callbacks
   void updateBounds(double robot_x, double robot_y, double robot_yaw,
                     double* min_x, double* min_y, double* max_x, double* max_y) override;
 
@@ -55,22 +53,23 @@ public:
   bool isClearable() override { return true; }
 
 private:
-  // Node handle
+  // node handle
   rclcpp_lifecycle::LifecycleNode::SharedPtr node_shared_;
 
   // I/O
   rclcpp::Subscription<multi_agent_msgs::msg::MultiAgentInfoArray>::SharedPtr sub_;
   rclcpp::Publisher<multi_agent_msgs::msg::AgentLayerMetaArray>::SharedPtr meta_pub_;
-  
-  // [Added] 내부 Costmap 발행 Publisher
+
+  // [NEW] 시각화 전용: 마스터 그리드와 별개로 Agent만 그릴 캔버스 및 발행기
+  nav2_costmap_2d::Costmap2D viz_costmap_;
   std::unique_ptr<nav2_costmap_2d::Costmap2DPublisher> costmap_pub_;
 
-  // Last data
+  // last data
   std::mutex data_mtx_;
   multi_agent_msgs::msg::MultiAgentInfoArray::SharedPtr last_infos_;
   rclcpp::Time last_stamp_;
 
-  // Parameters
+  // parameters
   bool        enabled_{true};
   std::string topic_{"/multi_agent_infos"};
   uint16_t    self_machine_id_{0};
@@ -93,19 +92,15 @@ private:
   int         max_poses_{40};
   bool        qos_reliable_{true};
 
-  // [Optimization C1] Partial Reset을 위한 이전 프레임 영역 (Dirty Box)
-  double last_min_x_{1e9}, last_min_y_{1e9}, last_max_x_{-1e9}, last_max_y_{-1e9};
-  bool   last_touched_{false};
-
-  // Bounds cache for current cycle
+  // bounds cache for this cycle
   double touch_min_x_{0.0}, touch_min_y_{0.0}, touch_max_x_{0.0}, touch_max_y_{0.0};
   bool   touched_{false};
 
-  // Cached robot pose
+  // Cached robot pose for updateCosts
   double cached_robot_x_{0.0};
   double cached_robot_y_{0.0};
 
-  // Footprint cache
+  // Map to store footprint data from YAML
   struct AgentFootprintData
   {
     std::vector<geometry_msgs::msg::Point32> points;
@@ -121,12 +116,10 @@ private:
   static std::vector<geometry_msgs::msg::Point32> toPoint32(
       const std::vector<geometry_msgs::msg::Point>& points);
 
-  // [Fix A1] Thread-safe transform helper (인자로 frame_id 전달)
   bool transformAgentInfo(
       const multi_agent_msgs::msg::MultiAgentInfo & agent_in_map,
       multi_agent_msgs::msg::MultiAgentInfo & agent_in_costmap_frame,
-      const std::string & source_frame_id,
-      const std::string & target_frame_id) const;
+      const std::string & costmap_frame) const;
 
   void infosCallback(const multi_agent_msgs::msg::MultiAgentInfoArray::SharedPtr msg);
   bool isSelf(const multi_agent_msgs::msg::MultiAgentInfo & a) const;
@@ -148,6 +141,7 @@ private:
                              double x, double y);
 
   double computeDilation(const multi_agent_msgs::msg::MultiAgentInfo & a) const;
+
   unsigned char computeCost(const multi_agent_msgs::msg::MultiAgentInfo & a) const;
 
   static inline bool isMovingPhase(uint8_t phase)

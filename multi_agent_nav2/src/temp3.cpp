@@ -321,8 +321,8 @@ double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo &
     case S::STATUS_ERROR:
     case S::STATUS_PAUSE:
     case S::STATUS_WAITING_FOR_SAFETY:
-    case S::STATUS_WAITING_FOR_CONTROL:
-    case S::STATUS_WAITING_FOR_STATUS:
+    case S::STATUS_WAITING_FOR_FLOWCONTROL:
+    case S::STATUS_WAITING_FOR_ROS_STATUS:
       r = std::max(r, 0.0);
       break;
     case S::STATUS_LOADING:
@@ -582,24 +582,24 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
   const double robot_y = cached_robot_y_;
   const std::string & costmap_frame = layered_costmap_->getGlobalFrameID();
 
-  for (const auto & a_map : infos) { 
-    if (isSelf(a_map)) continue;
+  for (const auto & a_map : infos) { 
+    if (isSelf(a_map)) continue;
 
     multi_agent_msgs::msg::MultiAgentInfo a;
     if (!transformAgentInfo(a_map, a, costmap_frame)) {
       continue;
     }
 
-    const double dx = a.current_pose.pose.position.x - robot_x;
-    const double dy = a.current_pose.pose.position.y - robot_y;
-    if (std::hypot(dx, dy) > roi_range_m_) continue;
+    const double dx = a.current_pose.pose.position.x - robot_x;
+    const double dy = a.current_pose.pose.position.y - robot_y;
+    if (std::hypot(dx, dy) > roi_range_m_) continue;
 
     // 1. [NAVIGATION] Master Grid에 직접 그리기
-    rasterizeAgentPath(a, &master_grid, meta_hits);
+    rasterizeAgentPath(a, &master_grid, meta_hits);
 
     // 2. [VISUALIZATION] Viz Grid에 따로 그리기
     rasterizeAgentPath(a, &viz_costmap_, dummy_hits);
-  }
+  }
 
   // [VISUALIZATION] 별도 Costmap 발행
   if (costmap_pub_) {
