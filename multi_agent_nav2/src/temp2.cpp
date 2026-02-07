@@ -8,7 +8,7 @@
 #include <multi_agent_msgs/msg/agent_status.hpp>
 #include <multi_agent_msgs/msg/agent_layer_cell_meta.hpp>
 #include "tf2_ros/buffer.h"
-#include <cstring> // [NEW] for memset
+#include <cstring> // [필수] memset 사용을 위해 추가
 
 namespace multi_agent_nav2
 {
@@ -57,7 +57,6 @@ AgentLayer::getFootprintForAgent(const multi_agent_msgs::msg::MultiAgentInfo & a
     return fp_stamped;
 }
 
-// [FIX] TF 변환 시 '최신 시간(Time(0))'을 사용하여 Local Costmap 표시 문제 해결
 bool AgentLayer::transformAgentInfo(
     const multi_agent_msgs::msg::MultiAgentInfo & agent_in_map,
     multi_agent_msgs::msg::MultiAgentInfo & agent_in_costmap_frame,
@@ -72,7 +71,7 @@ bool AgentLayer::transformAgentInfo(
   agent_in_costmap_frame = agent_in_map; 
   agent_in_costmap_frame.truncated_path.poses.clear(); 
 
-  // [KEY FIX] TF Lookup을 위한 시간 설정: rclcpp::Time(0) = Latest Available
+  // [KEY] TF Lookup을 위한 시간 설정: rclcpp::Time(0) = Latest Available
   rclcpp::Time latest_time(0);
 
   try {
@@ -226,7 +225,7 @@ void AgentLayer::onInitialize()
       "AgentLayer '%s' initialized. Topic: %s", name_.c_str(), topic_.c_str());
 
   // [VISUALIZATION] 시각화용 맵 및 퍼블리셔 초기화
-  viz_costmap_.setDefaultValue(0); // 배경은 투명(0)
+  viz_costmap_.setDefaultValue(0); 
 
   // 토픽 이름: /global_costmap/agent_layer/costmap
   costmap_pub_ = std::make_unique<nav2_costmap_2d::Costmap2DPublisher>(
@@ -238,7 +237,6 @@ void AgentLayer::onInitialize()
 
   current_ = true;
   
-  // [CRITICAL] 활성화를 강제로 수행하여 Subscriber가 반드시 생성되도록 함
   if (enabled_) {
     activate();
   }
@@ -249,7 +247,6 @@ void AgentLayer::activate()
   auto qos = rclcpp::QoS(rclcpp::KeepLast(10));
   if (qos_reliable_) qos.reliable(); else qos.best_effort();
 
-  // Subscriber 생성
   sub_ = node_shared_->create_subscription<multi_agent_msgs::msg::MultiAgentInfoArray>(
       topic_, qos, std::bind(&AgentLayer::infosCallback, this, std::placeholders::_1));
 
@@ -258,7 +255,6 @@ void AgentLayer::activate()
         "agent_layer_meta", rclcpp::QoS(1).reliable().transient_local());
   }
 
-  // [VISUALIZATION] 퍼블리셔 활성화
   if (costmap_pub_) costmap_pub_->on_activate();
 }
 
@@ -267,7 +263,6 @@ void AgentLayer::deactivate()
   sub_.reset();
   meta_pub_.reset();
 
-  // [VISUALIZATION] 퍼블리셔 비활성화
   if (costmap_pub_) costmap_pub_->on_deactivate();
 }
 
@@ -371,14 +366,12 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
     if (isSelf(a_map)) continue;
 
     multi_agent_msgs::msg::MultiAgentInfo a;
-    // TF 변환 수행
     if (!transformAgentInfo(a_map, a, source_frame, target_frame)) continue;
 
     const double dx = a.current_pose.pose.position.x - robot_x;
     const double dy = a.current_pose.pose.position.y - robot_y;
     if (std::hypot(dx, dy) > roi_range_m_) continue;
 
-    // Bounds 계산
     {
       const auto & p = a.current_pose.pose.position;
       touch_min_x_ = std::min(touch_min_x_, p.x);
@@ -466,7 +459,6 @@ void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
   }
 
   int min_i, min_j, max_i, max_j;
-  // grid는 master_grid 혹은 viz_costmap_
   grid->worldToMapEnforceBounds(minx, miny, min_i, min_j);
   grid->worldToMapEnforceBounds(maxx, maxy, max_i, max_j);
 
@@ -485,7 +477,6 @@ void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
       }
 
       if (inside) {
-        // [IMPORTANT] Master Grid에 직접 쓸 때는 기존 값과 비교(Max-Merge)
         const unsigned char old_raw = grid->getCost(i, j);
         const int old = (old_raw == nav2_costmap_2d::NO_INFORMATION) ? 0 : static_cast<int>(old_raw);
         const int cand = static_cast<int>(cost);
@@ -545,7 +536,7 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
                               master_grid.getOriginY());
       }
       
-      // [FIX] resetMaps()는 protected이므로 memset으로 raw buffer를 0으로 초기화
+      // [FIX] resetMaps() (protected) 대신 memset 사용
       unsigned char* char_map = viz_costmap_.getCharMap();
       unsigned int size_x = viz_costmap_.getSizeInCellsX();
       unsigned int size_y = viz_costmap_.getSizeInCellsY();
@@ -564,7 +555,7 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
 
   std::vector<std::pair<unsigned int,unsigned int>> meta_hits;
   meta_hits.reserve(256);
-  std::vector<std::pair<unsigned int,unsigned int>> dummy_hits; // 시각화용 더미
+  std::vector<std::pair<unsigned int,unsigned int>> dummy_hits; 
 
   const double robot_x = cached_robot_x_;
   const double robot_y = cached_robot_y_;
@@ -574,23 +565,21 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
     if (isSelf(a_map)) continue;
 
     multi_agent_msgs::msg::MultiAgentInfo a;
-    // TF 변환 (Time(0) 적용됨 -> Local Costmap 문제 해결)
     if (!transformAgentInfo(a_map, a, source_frame, target_frame)) continue;
 
     const double dx = a.current_pose.pose.position.x - robot_x;
     const double dy = a.current_pose.pose.position.y - robot_y;
     if (std::hypot(dx, dy) > roi_range_m_) continue;
 
-    // 1. [NAVIGATION] Master Grid에 직접 그리기 (안전한 회피용)
+    // 1. [NAVIGATION] Master Grid에 직접 그리기
     rasterizeAgentPath(a, &master_grid, meta_hits);
 
-    // 2. [VISUALIZATION] Viz Grid에 따로 그리기 (화면 표시용)
+    // 2. [VISUALIZATION] Viz Grid에 따로 그리기
     rasterizeAgentPath(a, &viz_costmap_, dummy_hits);
   }
 
   // [VISUALIZATION] 별도 Costmap 발행
   if (costmap_pub_) {
-      // 전체 영역 발행
       costmap_pub_->updateBounds(0, viz_costmap_.getSizeInCellsX(),
                                  0, viz_costmap_.getSizeInCellsY());
       costmap_pub_->publishCostmap();
