@@ -24,7 +24,7 @@ IsGoalsOccupiedAgentCondition::IsGoalsOccupiedAgentCondition(
   getInput("costmap_topic", costmap_topic);
   if (costmap_topic.empty()) {
     
-    costmap_topic = "/global_costmap/agent_layer/raw/costmap_raw";
+    costmap_topic = "/global_costmap/agent_layer/raw_costmap_raw";
     RCLCPP_WARN(node_->get_logger(), "costmap_topic is empty and set as deafult : %s", costmap_topic.c_str());
   }
 
