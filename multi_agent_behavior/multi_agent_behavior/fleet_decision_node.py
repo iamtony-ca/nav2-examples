@@ -8,6 +8,8 @@ from rclpy.time import Time
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy, QoSDurabilityPolicy
 
 from std_msgs.msg import Bool, String
+from std_srvs.srv import Trigger
+
 from geometry_msgs.msg import Pose
 from multi_agent_msgs.msg import PathAgentCollisionInfo
 from multi_agent_msgs.msg import MultiAgentInfoArray, MultiAgentInfo, AgentStatus
@@ -113,7 +115,8 @@ class FleetDecisionNode(Node):
         # Output Topics
         self.declare_parameter("topic_decision_state", "/decision_state")
         self.declare_parameter("topic_request_replan", "/request_replan")
-        self.declare_parameter("topic_request_reroute", "/request_reroute")
+        # self.declare_parameter("topic_request_reroute", "/request_reroute")
+        self.declare_parameter("service_reroute", "/request_reroute_srv")
         self.declare_parameter("topic_cmd_run", "/cmd/run")
         self.declare_parameter("topic_cmd_resume", "/controller_pause_flag")
         self.declare_parameter("topic_cmd_stop", "/controller_pause_flag")
@@ -168,8 +171,12 @@ class FleetDecisionNode(Node):
             self.get_parameter("topic_request_replan").value, qos_req)
         
             # [수정] Reroute 전용 Publisher 생성
-        self.pub_req_reroute = self.create_publisher(Bool, 
-            self.get_parameter("topic_request_reroute").value, 10)        
+        # self.pub_req_reroute = self.create_publisher(Bool, 
+        #     self.get_parameter("topic_request_reroute").value, 10)        
+        # [NEW] Reroute Service Client
+        self.cli_reroute = self.create_client(Trigger, 
+            self.get_parameter("service_reroute").value)
+
 
         self.pub_state = self.create_publisher(String, 
             self.get_parameter("topic_decision_state").value, 10)
@@ -204,7 +211,8 @@ class FleetDecisionNode(Node):
         self.get_logger().info(f" - reroute_cooldown_sec    : {self.reroute_cooldown_sec}")
         self.get_logger().info(f" - topic_collision         : {self.get_parameter('topic_collision').value}")
         self.get_logger().info(f" - topic_request_replan    : {self.get_parameter('topic_request_replan').value}")
-        self.get_logger().info(f" - topic_request_reroute   : {self.get_parameter('topic_request_reroute').value}")
+        # self.get_logger().info(f" - topic_request_reroute   : {self.get_parameter('topic_request_reroute').value}")
+        self.get_logger().info(f" - service_reroute         : {self.get_parameter('service_reroute').value}")        
         self.get_logger().info(f" - topic_cmd_resume        : {self.get_parameter('topic_cmd_resume').value}")
         self.get_logger().info(f" - topic_cmd_stop          : {self.get_parameter('topic_cmd_stop').value}")
         self.get_logger().info("====================================================")
@@ -490,16 +498,17 @@ class FleetDecisionNode(Node):
             
             # [수정] Reroute 요청 쿨다운 체크
             now = self.get_clock().now()
-            should_publish = True
+            should_request = True
             
             if self._last_reroute_req_time is not None:
                 dt = (now - self._last_reroute_req_time).nanoseconds * 1e-9
                 if dt < self.reroute_cooldown_sec:
-                    should_publish = False # 쿨타임 중이면 발행 생략
+                    should_request = False # 쿨타임 중이면 발행 생략
             
-            if should_publish:
+            if should_request:
                 # 1. Reroute 요청
-                self._publish_reroute()
+                # self._publish_reroute()
+                self._call_reroute_service()
                 self._last_reroute_req_time = now # 시간 갱신
                 self.get_logger().warn("Request REROUTE sent.")
             else:
@@ -565,8 +574,32 @@ class FleetDecisionNode(Node):
     # ------------------------------------------------------------------
     def _publish_stop(self): self.pub_cmd_stop.publish(Bool(data=True))
     def _publish_replan(self): self.pub_req_replan.publish(Bool(data=True))
-    def _publish_reroute(self): self.pub_req_reroute.publish(Bool(data=True))
+    # def _publish_reroute(self): self.pub_req_reroute.publish(Bool(data=True))
     def _publish_state(self, txt: str): self.pub_state.publish(String(data=txt))
+
+    # [NEW] Service Call Wrapper with Done Callback
+    def _call_reroute_service(self):
+        # 서비스가 준비되었는지 0.1초만 짧게 확인 (Blocking 방지)
+        if not self.cli_reroute.service_is_ready():
+            self.get_logger().error("Reroute service is not ready!")
+            return
+        
+        req = Trigger.Request()
+        # Call Async: 콜백 내에서 blocking 되는 것을 막기 위해 비동기 호출
+        future = self.cli_reroute.call_async(req)
+        future.add_done_callback(self._reroute_done_callback)
+
+    # [NEW] Service Done Callback
+    def _reroute_done_callback(self, future):
+        try:
+            response = future.result()
+            if response.success:
+                self.get_logger().info(f"Reroute Service Succeeded: {response.message}")
+            else:
+                self.get_logger().warn(f"Reroute Service Failed: {response.message}")
+        except Exception as e:
+            self.get_logger().error(f"Reroute Service Call Exception: {e}")
+
 
     # ------------------------------------------------------------------
     # Math Utils
