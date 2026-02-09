@@ -41,13 +41,9 @@ class WaitInCallbackNode(Node):
         """
         self.get_logger().info('Beep... (Other callbacks are alive)', throttle_duration_sec=2.0)
 
+
+
     def trigger_callback(self, msg):
-        """
-        [사용자 요구 사항]
-        1. call_async 로 요청
-        2. 여기서 결과가 올 때까지 "기다림" (Blocking)
-        3. 하지만 다른 콜백(Timer 등)은 멈추면 안 됨
-        """
         self.get_logger().info('[Trigger] Request sent. Waiting for response inside callback...')
 
         req = AddTwoInts.Request()
@@ -57,19 +53,32 @@ class WaitInCallbackNode(Node):
         # 1. Async 호출
         future = self.cli.call_async(req)
 
-        # 2. 결과 기다리기 (Blocking)
-        # MultiThreadedExecutor 환경이므로, 현재 스레드만 멈추고
-        # 다른 스레드가 Service Response를 받아서 future를 완료시켜줍니다.
+        # 2. 결과 기다리기 (수동 타임아웃 구현)
+        timeout_sec = 5.0
+        start_time = time.time()
+
+        # future가 완료될 때까지 루프를 돕니다.
+        while not future.done():
+            # 타임아웃 체크
+            if time.time() - start_time > timeout_sec:
+                self.get_logger().error('[Trigger] Service timed out!')
+                # 필요 시 future 취소 (선택 사항)
+                future.cancel()
+                return
+
+            # 중요: 0.01초 정도 쉬어주어야 CPU를 독점하지 않고,
+            # MultiThreadedExecutor의 다른 스레드가 서비스 응답 처리를 할 수 있습니다.
+            time.sleep(0.01)
+
+        # 3. 루프를 빠져나왔다면 결과가 도착했다는 뜻입니다.
         try:
-            # timeout을 주는 것이 안전합니다 (예: 5초)
-            result = future.result(timeout=5.0) 
-            
-            # 3. 결과 받은 후 로직 실행
-            self.get_logger().info(f'[Trigger] Response received! Sum: {result.sum}')
+            response = future.result() # 이제 인자 없이 호출해도 안전합니다.
+            self.get_logger().info(f'[Trigger] Response received! Sum: {response.sum}')
             self.get_logger().info('[Trigger] Continuing next logic...')
             
         except Exception as e:
-            self.get_logger().error(f'[Trigger] Service call failed or timed out: {e}')
+            self.get_logger().error(f'[Trigger] Service call failed: {e}')
+
 
 def main(args=None):
     rclpy.init(args=args)
