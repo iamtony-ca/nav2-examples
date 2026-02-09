@@ -5,88 +5,122 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from std_msgs.msg import Bool
 from example_interfaces.srv import AddTwoInts
-import time
+from functools import partial
 
-class WaitInCallbackNode(Node):
+class AsyncTimeoutSafeTest(Node):
 
     def __init__(self):
-        super().__init__('wait_in_callback_node')
+        super().__init__('async_timeout_safe_test')
 
-        # [중요 1] ReentrantCallbackGroup 사용
-        # 이 그룹에 속한 콜백들은 서로 다른 스레드에서 동시에 실행될 수 있습니다.
-        # 즉, 내가 여기서 멈춰(Wait) 있어도, 다른 스레드가 내 서비스 응답을 받아줄 수 있습니다.
+        # [중요] ReentrantCallbackGroup
+        # 이 그룹을 사용해야 Timer와 Service Client가 서로 다른 스레드에서 병렬로 실행됩니다.
         self.cb_group = ReentrantCallbackGroup()
 
-        # Trigger Subscriber
+        # 1. Trigger Subscriber (테스트 시작용)
         self.sub = self.create_subscription(
-            Bool, 'trigger', self.trigger_callback, 10, 
+            Bool, 'trigger_service', self.trigger_callback, 10, 
             callback_group=self.cb_group)
-
-        # Service Client
+        
+        # 2. Service Client
         self.cli = self.create_client(
             AddTwoInts, 'add_two_ints', 
             callback_group=self.cb_group)
-        
-        # (테스트용) 다른 작업이 잘 도는지 확인하기 위한 Timer
-        self.timer = self.create_timer(
+
+        # 3. [검증용] Non-blocking 확인 Timer
+        # 서비스 요청을 보내고 응답을 기다리는 와중에도, 이 타이머는 절대 멈추면 안 됩니다.
+        self.check_timer = self.create_timer(
             0.5, self.timer_callback, 
             callback_group=self.cb_group)
 
+        # 서비스 서버 대기
         while not self.cli.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('Service not available, waiting...')
+        
+        self.get_logger().info('Node Ready. Publish /trigger_service to test.')
 
     def timer_callback(self):
         """
-        Trigger 콜백이 멈춰있는 동안에도 이 타이머는 계속 동작해야 함.
+        [검증용] 주기적으로 실행되어 노드가 멈추지(Block) 않았음을 증명합니다.
         """
-        self.get_logger().info('Beep... (Other callbacks are alive)', throttle_duration_sec=2.0)
-
-
+        self.get_logger().info('Beep... (I am alive & Non-blocking)', throttle_duration_sec=1.0)
 
     def trigger_callback(self, msg):
-        self.get_logger().info('[Trigger] Request sent. Waiting for response inside callback...')
-
+        """
+        Trigger 토픽이 들어오면 실행됩니다.
+        여기서 절대 time.sleep()이나 while 루프로 기다리지 않습니다.
+        """
+        self.get_logger().info('\n[Trigger] Sending Async Request...')
+        
         req = AddTwoInts.Request()
         req.a = 10
         req.b = 20
-
-        # 1. Async 호출
+        
+        # 1. 비동기 요청 전송 (즉시 future 반환)
         future = self.cli.call_async(req)
+        
+        # 2. [타임아웃 로직]
+        # 타임아웃 발생 시 실행될 내부 함수 정의
+        # 리스트(mutable)를 이용해 timer 변수를 캡처할 준비를 합니다.
+        timer_holder = []
 
-        # 2. 결과 기다리기 (수동 타임아웃 구현)
-        timeout_sec = 5.0
-        start_time = time.time()
-
-        # future가 완료될 때까지 루프를 돕니다.
-        while not future.done():
-            # 타임아웃 체크
-            if time.time() - start_time > timeout_sec:
-                self.get_logger().error('[Trigger] Service timed out!')
-                # 필요 시 future 취소 (선택 사항)
-                future.cancel()
-                return
-
-            # 중요: 0.01초 정도 쉬어주어야 CPU를 독점하지 않고,
-            # MultiThreadedExecutor의 다른 스레드가 서비스 응답 처리를 할 수 있습니다.
-            time.sleep(0.01)
-
-        # 3. 루프를 빠져나왔다면 결과가 도착했다는 뜻입니다.
-        try:
-            response = future.result() # 이제 인자 없이 호출해도 안전합니다.
-            self.get_logger().info(f'[Trigger] Response received! Sum: {response.sum}')
-            self.get_logger().info('[Trigger] Continuing next logic...')
+        def on_timeout():
+            self.get_logger().error('[Timeout] 2.0 seconds passed! Cancelling request...')
             
-        except Exception as e:
-            self.get_logger().error(f'[Trigger] Service call failed: {e}')
+            # (1) Future 취소 요청 -> 이것이 on_response를 유발할 수 있음
+            future.cancel()
+            
+            # (2) 타임아웃 타이머 정지 (반복 실행 방지)
+            if timer_holder:
+                timer_holder[0].cancel() 
+                # 주의: destroy_timer는 여기서 호출하면 위험할 수 있으므로 cancel만 합니다.
 
+        # 3. 타임아웃 타이머 생성 (2초 설정)
+        timeout_timer = self.create_timer(
+            2.0, 
+            on_timeout, 
+            callback_group=self.cb_group
+        )
+        timer_holder.append(timeout_timer) # 핸들 저장
+
+        # 4. 결과 처리 콜백 등록 (Non-blocking의 핵심)
+        # partial을 이용해 위에서 만든 timeout_timer를 전달합니다.
+        future.add_done_callback(
+            partial(self.on_response, timer=timeout_timer)
+        )
+        
+        self.get_logger().info('[Trigger] Function finished. Returning to main loop...\n')
+
+    def on_response(self, future, timer):
+        """
+        서비스 응답이 왔거나, 취소되었을 때 실행되는 콜백
+        """
+        # [방어 로직 1] 타임아웃 타이머 정리
+        # 응답이 왔으니 타임아웃 알람은 필요 없습니다. 끕니다.
+        try:
+            timer.cancel()
+            # self.destroy_timer(timer) # 안전을 위해 생략 (GC에 맡김)
+        except Exception:
+            pass
+
+        # [방어 로직 2] 취소 여부 확인
+        # 타임아웃 핸들러에 의해 취소된 요청이라면, 결과를 처리하지 않고 종료합니다.
+        if future.cancelled():
+            self.get_logger().warn('[Result] Request was cancelled. Ignoring result logic.')
+            return
+
+        # [정상 결과 처리]
+        try:
+            response = future.result()
+            self.get_logger().info(f'[Success] Response received: {response.sum}')
+        except Exception as e:
+            self.get_logger().error(f'[Result] Service call failed: {e}')
 
 def main(args=None):
     rclpy.init(args=args)
-    node = WaitInCallbackNode()
-
-    # [중요 2] MultiThreadedExecutor 필수
-    # 기본(Single) Executor를 쓰면 future.result()에서 영원히 멈춥니다 (Deadlock).
-    # 최소 2개 이상의 스레드가 있어야 "기다리는 놈"과 "받아오는 놈"이 공존할 수 있습니다.
+    node = AsyncTimeoutSafeTest()
+    
+    # [필수] MultiThreadedExecutor
+    # 이것이 있어야 Timer, Trigger, Service Response가 동시에 처리됩니다.
     executor = MultiThreadedExecutor()
     executor.add_node(node)
 
