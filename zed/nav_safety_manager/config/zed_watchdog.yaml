@@ -1,0 +1,18 @@
+zed_watchdog:
+  ros__parameters:
+    # 실행할 런치 커맨드 (리스트 형식)
+    launch_cmd: ["ros2", "launch", "zed_multi_camera", "zed_multi_camera.launch.py"]
+    
+    # 감시할 토픽 목록
+    check_topics:
+      - "/zed_node_0/left/camera_info"
+      - "/zed_node_1/left/camera_info"
+      - "/zed_node_2/left/camera_info"
+      - "/zed_node_3/left/camera_info"
+    
+    # 타임아웃 설정 (초)
+    boot_timeout: 60.0        # 부팅 허용 시간
+    stability_duration: 5.0   # 안정화 검사 시간
+    msg_timeout: 1.0          # 데이터 끊김 허용 시간
+    cooldown_sec: 10.0        # 재시작 대기 시간
+    max_attempts: 5           # 최대 재시도 횟수
