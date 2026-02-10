@@ -1,0 +1,4 @@
+robot_status_manager:
+  ros__parameters:
+    # BT 로그가 끊겼을 때 IDLE로 전환하기 전 대기 시간 (초)
+    idle_timeout_sec: 2.0
