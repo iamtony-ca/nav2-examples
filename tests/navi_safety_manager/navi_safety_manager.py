@@ -102,7 +102,7 @@ class SafetyLogicNode(Node):
         if (msg.protective_front is False) or (msg.protective_rear is False) :
             self.latest_plc_data = False
         else :
-            self.latest_plc_data = True 
+            self.latest_plc_data = True
 
 
     def collision_callback(self, msg):
