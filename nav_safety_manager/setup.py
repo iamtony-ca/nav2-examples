@@ -8,8 +8,8 @@ package_name = 'nav_safety_manager'
 setup(
     name=package_name,
     version='0.0.1',
-    # [수정 포인트] 패키지를 자동으로 찾게 설정 (test 폴더 제외)
-    # 서브모듈이 있든 없든 알아서 처리해줍니다.
+    # [핵심] find_packages()가 __init__.py가 있는 모든 폴더를 자동으로 찾아줍니다.
+    # 결과적으로 ['nav_safety_manager', 'nav_safety_manager.submodules']가 자동 등록됩니다.
     packages=find_packages(exclude=['test']),
     data_files=[
         ('share/ament_index/resource_index/packages',
@@ -29,17 +29,12 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            # 'nav_safety_manager_controller = nav_safety_manager.nav_safety_manager_controller:main',
-            # 'nav_safety_manager_driver = nav_safety_manager.nav_safety_manager_driver:main',
             # node_executable_name = package_name.python_file:main_func
+            # tree 구조에 있는 'nav_safety_manager_node.py' 파일명과 일치해야 합니다.
             'nav_safety_manager_node = nav_safety_manager.nav_safety_manager_node:main',            
         ],
     },
 )
-
-
-
-
 
 
 
