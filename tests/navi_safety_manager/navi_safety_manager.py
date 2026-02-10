@@ -1,22 +1,3 @@
-ROS 2 Jazzy와 Python 환경, 그리고 제공해주신 `ReentrantCallbackGroup` 기반의 비동기(Async) 패턴을 완벽하게 이해했습니다.
-
-요청하신 기능은 **순차적인 상태 머신(State Machine)** 로직이 필요합니다. 단순히 콜백에서 처리하면 타이밍 이슈가 발생하기 쉬우므로, **데이터 수신(Callback)**과 **로직 판단(Timer Loop)**을 분리하여 구현하는 것이 가장 안정적입니다.
-
-### 설계 구조 (State Machine)
-
-1. **Phase 0 (PLC 감시):** `/safety_plc_status_data`가 `False`인지 모니터링합니다. (N초 유지 시 → Service True 호출 → Phase 1 이동)
-2. **Phase 1 (PLC 복구 대기):** `/safety_plc_status_data`가 `True`로 돌아올 때까지 대기합니다. (True 확인 시 → Phase 2 이동)
-3. **Phase 2 (충돌 감지기 감시):** `/collision_detector_state`에서 `PolygonSafety`가 `False`(안전)인지 모니터링합니다. (M초 유지 시 → Service False 호출 → Phase 0 복귀)
-
-### 사용된 메시지 및 서비스
-
-* **Sub 1:** `/safety_plc_status_data` (`std_msgs/Bool`)
-* **Sub 2:** `/collision_detector_state` (`CollisionDetectorState` - Custom)
-* **Service:** `std_srvs/SetBool` (True/False 요청을 위해 가장 적합하여 채택했습니다. 필요시 변경 가능합니다.)
-
-아래는 완벽하게 동작하는 Python 코드입니다.
-
-```python
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
@@ -27,16 +8,18 @@ from rclpy.task import Future
 # 메시지 및 서비스 임포트
 from std_msgs.msg import Bool
 from std_srvs.srv import SetBool  # 요청을 위해 SetBool 사용 (data=True/False)
+from safety_plc_monitoring_msgs.msg import SafetyPlcMonitoring
+from safety_plc_interfaces.srv import SetArea
 # [중요] 사용자 정의 메시지 (실제 패키지명에 맞게 수정 필요)
-# from my_robot_interfaces.msg import CollisionDetectorState 
+from nav2_msgs.msg import CollisionDetectorState 
 # 테스트를 위해 아래와 같이 가정하거나, 실제 환경에 맞게 주석 해제하세요.
 # 여기서는 코드가 실행되도록 구조만 잡고, 실제 msg 타입은 주석 처리합니다.
-try:
-    from nav_msgs.msg import CollisionDetectorState # 예시
-except ImportError:
-    # 코드가 돌아가게 하기 위한 Mock Class (실제 사용시 삭제)
-    class CollisionDetectorState:
-        pass
+# try:
+#     from nav_msgs.msg import CollisionDetectorState # 예시
+# except ImportError:
+#     # 코드가 돌아가게 하기 위한 Mock Class (실제 사용시 삭제)
+#     class CollisionDetectorState:
+#         pass
 
 class SafetyLogicNode(Node):
 
@@ -44,7 +27,7 @@ class SafetyLogicNode(Node):
         super().__init__('safety_logic_controller')
 
         # 설정 변수 (N초, M초)
-        self.declare_parameter('plc_false_duration_sec', 2.0)
+        self.declare_parameter('plc_false_duration_sec', 30.0)
         self.declare_parameter('collision_clear_duration_sec', 3.0)
         self.declare_parameter('target_polygon_name', 'PolygonSafety')
 
@@ -57,8 +40,8 @@ class SafetyLogicNode(Node):
 
         # 1. Subscribers
         self.sub_plc = self.create_subscription(
-            Bool, 
-            '/safety_plc_status_data', 
+            SafetyPlcMonitoring, 
+            '/ros2_safety_plc_status_data', 
             self.plc_callback, 
             10, 
             callback_group=self.cb_group
@@ -74,7 +57,7 @@ class SafetyLogicNode(Node):
         # )
         # *코드 에러 방지를 위해 임시로 Bool로 둡니다. 실제 적용 시 위 주석 해제*
         self.sub_col = self.create_subscription(
-            Bool, # 실제로는 CollisionDetectorState
+            CollisionDetectorState, # 실제로는 CollisionDetectorState
             '/collision_detector_state', 
             self.collision_callback, 
             10, 
@@ -83,8 +66,8 @@ class SafetyLogicNode(Node):
 
         # 2. Service Client
         self.cli = self.create_client(
-            SetBool, 
-            'specific_service_request', 
+            SetArea, 
+            'set_area', 
             callback_group=self.cb_group
         )
 
@@ -116,7 +99,11 @@ class SafetyLogicNode(Node):
     # 1. Data Callbacks (데이터 갱신만 담당)
     # =========================================
     def plc_callback(self, msg):
-        self.latest_plc_data = msg.data
+        if (msg.protective_front is False) or (msg.protective_rear is False) :
+            self.latest_plc_data = False
+        else :
+            self.latest_plc_data = True    
+
 
     def collision_callback(self, msg):
         # CollisionDetectorState 메시지를 저장
@@ -148,7 +135,7 @@ class SafetyLogicNode(Node):
                 elapsed = (self.get_clock().now() - self.state_start_time).nanoseconds / 1e9
                 if elapsed >= self.N_sec:
                     self.get_logger().warn(f'[Phase 0] PLC False for {self.N_sec}s! Requesting Service TRUE.')
-                    self.send_async_request(True) # Service Request True
+                    self.send_async_request(0) # Service Request True
                     self.current_phase = 1 # 다음 단계로
                     self.state_start_time = None # 타이머 초기화
             else:
@@ -181,7 +168,7 @@ class SafetyLogicNode(Node):
                 elapsed = (self.get_clock().now() - self.state_start_time).nanoseconds / 1e9
                 if elapsed >= self.M_sec:
                     self.get_logger().info(f'[Phase 2] Safety Cleared for {self.M_sec}s! Requesting Service FALSE.')
-                    self.send_async_request(False) # Service Request False
+                    self.send_async_request(1) # Service Request False
                     self.current_phase = 0 # 처음으로 리셋
                     self.state_start_time = None
             else:
@@ -205,16 +192,16 @@ class SafetyLogicNode(Node):
         # msg 구조: polygons=['A', 'B'], detections=[True, False]
         try:
             # *실제 사용 시 아래 주석 해제 및 msg 타입에 맞춰 수정*
-            # polygons = self.latest_collision_msg.polygons
-            # detections = self.latest_collision_msg.detections
+            polygons = self.latest_collision_msg.polygons
+            detections = self.latest_collision_msg.detections
             
-            # if self.target_polygon in polygons:
-            #     idx = polygons.index(self.target_polygon)
-            #     is_detected = detections[idx]
-            #     return not is_detected # 감지가 안되어야(False) 안전(True)
+            if self.target_polygon in polygons:
+                idx = polygons.index(self.target_polygon)
+                is_detected = detections[idx]
+                return not is_detected # 감지가 안되어야(False) 안전(True)
             
             # [테스트용 더미 로직] 메시지 수신 시 무조건 안전하다고 가정
-            return True 
+            # return True 
 
         except Exception as e:
             self.get_logger().error(f'Error parsing collision msg: {e}')
@@ -222,17 +209,17 @@ class SafetyLogicNode(Node):
         
         return False
 
-    def send_async_request(self, req_data: bool):
+    def send_async_request(self, req_data: int):
         """
         비동기 서비스 요청
         """
-        if not self.cli.wait_for_service(timeout_sec=1.0):
+        if not self.cli.wait_for_service(timeout_sec=3.5):
             self.get_logger().error('Service not available!')
             # 서비스가 없으면 상태를 롤백하거나 재시도 로직 필요 (여기선 생략)
             return
 
-        req = SetBool.Request()
-        req.data = req_data
+        req = SetArea.Request()
+        req.input = req_data
         
         self.get_logger().info(f'Sending Service Request: {req_data}')
         self.service_future = self.cli.call_async(req)
@@ -244,7 +231,8 @@ class SafetyLogicNode(Node):
         """
         try:
             response = future.result()
-            self.get_logger().info(f'[Result] Service success: {response.success}, Msg: {response.message}')
+            # self.get_logger().info(f'[Result] Service success: {response.success}, Msg: {response.message}')
+            self.get_logger().info(f'[Result] Service success: {response.output}')
         except Exception as e:
             self.get_logger().error(f'[Result] Service call failed: {e}')
 
@@ -265,25 +253,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-
-```
-
-### 코드 작성 포인트 및 수정 가이드
-
-1. **ReentrantCallbackGroup & MultiThreadedExecutor**:
-* 타이머(`control_loop`)와 서비스 호출, 토픽 수신이 병렬로 처리되도록 하여, `time.sleep` 없이도 정교한 시간 로직이 가능합니다.
-
-
-2. **`control_loop` (10Hz)**:
-* 콜백 함수 안에 복잡한 시간 계산 로직(N초 대기 등)을 넣으면 디버깅이 어렵습니다.
-* 따라서 `latest_msg` 변수만 갱신하고, `control_loop`에서 현재 시간(`self.get_clock().now()`)과 비교하여 상태를 변경하는 방식을 사용했습니다. 이는 Nav2의 Lifecycle 노드나 Behavior Tree 노드에서 자주 사용하는 패턴입니다.
-
-
-3. **CollisionDetectorState 처리**:
-* 질문자님의 메시지 정의(`polygons string[]`, `detections bool[]`)에 맞춰 `check_polygon_safety` 함수를 작성했습니다.
-* `polygons.index('PolygonSafety')`를 통해 인덱스를 찾고, `detections` 배열의 해당 인덱스 값이 `False`(감지 안됨)여야 안전(`True`)을 리턴하도록 로직을 짰습니다.
-* *현재 코드는 실행을 위해 해당 부분은 주석 처리되어 있고 더미 값을 반환합니다. 실제 실행 시 주석을 풀어주세요.*
-
-
-4. **서비스 호출 (`SetBool`)**:
-* "특정 service request True/False"를 위해 표준 인터페이스인 `std_srvs/SetBool`을 사용했습니다. 만약 사용자 정의 서비스라면 타입을 교체하고 `req.data` 부분만 수정하면 됩니다.
