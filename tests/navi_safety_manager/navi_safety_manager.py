@@ -6,7 +6,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.task import Future
 
 # 메시지 및 서비스 임포트
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from std_srvs.srv import SetBool  # 요청을 위해 SetBool 사용 (data=True/False)
 from safety_plc_monitoring_msgs.msg import SafetyPlcMonitoring
 from safety_plc_interfaces.srv import SetArea
@@ -64,6 +64,15 @@ class SafetyLogicNode(Node):
             callback_group=self.cb_group
         )
 
+        self.sub_nav_status = self.create_subscription(
+            String, 
+            '/robot_status', 
+            self.nav_status_callback, 
+            10, 
+            callback_group=self.cb_group
+        )
+
+
         # 2. Service Client
         self.cli = self.create_client(
             SetArea, 
@@ -82,6 +91,7 @@ class SafetyLogicNode(Node):
         # 내부 상태 변수
         self.latest_plc_data = None
         self.latest_collision_msg = None
+        self.latest_nav_status = None
         
         # 상태 머신 제어 변수
         self.current_phase = 0 
@@ -109,6 +119,10 @@ class SafetyLogicNode(Node):
         # CollisionDetectorState 메시지를 저장
         self.latest_collision_msg = msg
 
+    def nav_status_callback(self, msg):
+        self.get_logger().info(f'Received Nav Status: {msg.data}')
+        self.latest_nav_status = msg.data
+
     # =========================================
     # 2. Main Control Loop (핵심 로직)
     # =========================================
@@ -120,6 +134,20 @@ class SafetyLogicNode(Node):
                 self.service_future = None
             else:
                 return # 응답 대기 중
+
+
+        # 네비게이션 상태에 따른 로직 분기
+        if self.latest_nav_status is not None:
+            if self.latest_nav_status in ['IDLE', 'SUCCEEDED', 'FAILED', 'CANCELED']:
+                # 네비게이션이 비활성 상태일 때는 PLC 모니터링만 수행
+                self.get_logger().info(f'Nav Status: {self.latest_nav_status}. Only monitoring PLC.')
+                self.current_phase = 0 # PLC 모니터링 단계로 리셋
+                self.state_start_time = None # 타이머 초기화
+                return
+        elif self.latest_nav_status is None:
+            # 네비게이션 상태 정보가 없으면 로직 진행하지 않음
+            self.get_logger().warn('Nav Status unknown. Waiting for status...')
+            # return
 
         # -------------------------------------------------
         # Phase 0: PLC False 감지 (N초 유지)
