@@ -1,0 +1,10 @@
+nav_safety_manager_node:
+  ros__parameters:
+    # PLC False 상태 유지 시간 (초)
+    plc_false_duration_sec: 30.0
+    
+    # 충돌 해제(Clear) 상태 유지 시간 (초)
+    collision_clear_duration_sec: 3.0
+    
+    # 감시할 폴리곤 영역 이름
+    target_polygon_name: 'PolygonSafety'
