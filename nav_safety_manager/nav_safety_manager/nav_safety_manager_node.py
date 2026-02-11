@@ -120,7 +120,7 @@ class NavSafetyManagerNode(Node):
         self.latest_collision_msg = msg
 
     def nav_status_callback(self, msg):
-        self.get_logger().info(f'Received Nav Status: {msg.data}')
+        self.get_logger().info(f'Received Nav Status: {msg.data}', throttle_duration_sec=2.0)
         self.latest_nav_status = msg.data
 
     # =========================================
@@ -140,7 +140,7 @@ class NavSafetyManagerNode(Node):
         if self.latest_nav_status is not None:
             if self.latest_nav_status in ['IDLE', 'SUCCEEDED', 'FAILED', 'CANCELED']:
                 # 네비게이션이 비활성 상태일 때는 PLC 모니터링만 수행
-                self.get_logger().info(f'Nav Status: {self.latest_nav_status}. Only monitoring PLC.')
+                self.get_logger().info(f'Nav Status: {self.latest_nav_status}. Only monitoring PLC.', throttle_duration_sec=2.0)
                 self.current_phase = 0 # PLC 모니터링 단계로 리셋
                 self.state_start_time = None # 타이머 초기화
                 return
