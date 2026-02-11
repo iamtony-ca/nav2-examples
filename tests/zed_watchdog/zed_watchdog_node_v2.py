@@ -172,46 +172,52 @@ class ZedWatchdog(Node):
                 return False, topic
         return True, None
 
-    def force_kill_zed_processes(self):
+def force_kill_zed_processes(self):
         """
-        [핵심 요구사항] psutil을 사용하여 ZED 관련 모든 프로세스를 PID 기반으로 종료
+        ZED 관련 '내부' 프로세스(ROS 노드, wrapper 등)만 골라서 종료.
+        터미널 창(gnome-terminal)은 건드리지 않음 (cleanup_and_close_window에서 처리).
         """
-        target_names = ["zed_wrapper_node", "zed_multi_camera", "component_container"]
+        # 죽여야 할 핵심 프로세스 이름 키워드
+        target_names = ["zed_wrapper_node", "zed_multi_camera", "component_container", "zed_rear_main"]
         killed_count = 0
         
-        # 모든 실행 중인 프로세스 순회
         for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
             try:
-                # 1. 프로세스 이름 확인
                 proc_name = proc.info['name']
                 cmdline = proc.info['cmdline'] or []
-                
-                is_target = False
-                
-                # 실행 파일 이름 매칭
-                if any(target in proc_name for target in target_names):
-                    is_target = True
-                
-                # 커맨드라인 매칭 (launch.py 등 파이썬 프로세스 잡기 위함)
-                if not is_target:
-                    cmd_str = " ".join(cmdline)
-                    if "zed_multi_camera" in cmd_str and "launch.py" in cmd_str:
-                        is_target = True
+                cmd_str = " ".join(cmdline)
 
-                # [주의] watchdog 자신은 죽이면 안 됨
+                # [중요 수정] 터미널 프로세스는 psutil로 죽이지 않고 스킵 (오동작 방지)
+                if "gnome-terminal" in proc_name:
+                    continue
+
+                # [중요] Watchdog 자기 자신은 절대 죽이면 안 됨
                 if proc.pid == 0 or proc.pid == self.process_id(): 
                     continue
 
+                is_target = False
+                
+                # 1. 프로세스 이름으로 검사 (확실한 타겟)
+                if any(target in proc_name for target in target_names):
+                    is_target = True
+                
+                # 2. 실행 명령어로 검사 (python launch 프로세스 잡기 위함)
+                # 단, 편집기(vim, code)나 grep 같은 건 제외
+                if not is_target:
+                    if "zed_multi_camera" in cmd_str and "launch.py" in cmd_str:
+                        # 예외 프로세스 필터링
+                        if not any(safe in cmd_str for safe in ["vim", "nano", "code", "grep"]):
+                            is_target = True
+
                 if is_target:
-                    self.get_logger().warn(f"🔪 Killing orphan process: {proc_name} (PID: {proc.info['pid']})")
-                    proc.kill() # 강제 종료
+                    self.get_logger().warn(f"🔪 Killing process: {proc_name} (PID: {proc.info['pid']})")
+                    proc.kill()
                     killed_count += 1
             
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 pass
         
         if killed_count > 0:
-            # 프로세스가 완전히 죽을 때까지 잠시 대기
             time.sleep(1.0)
 
     def cleanup_and_close_window(self):
