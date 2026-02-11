@@ -22,7 +22,6 @@ class RobustMonitor(Node):
         self.time_offset = 0.0
 
 
-
         # 2. 데이터 저장을 위한 큐 (최근 60초 데이터 보관 -> Avg/Max 계산용)
         # deque를 쓰면 maxlen 넘어가면 알아서 오래된 것 버림 (메모리 안전)
         self.history_len = 60
@@ -46,8 +45,7 @@ class RobustMonitor(Node):
         # 5. Timer 및 Publisher
         self.pub = self.create_publisher(String, 'system_status', 10)
         self.timer = self.create_timer(self.interval, self.update_stats)
-        self.network_timer = self.create_timer(self.interval_network, self.update_netwok_stats)
-
+        self.network_timer = self.create_timer(self.interval_network, self.update_network_stats)
 
         self.get_logger().info("Robust System Monitor Started.")
 
@@ -113,10 +111,11 @@ class RobustMonitor(Node):
 
         return ping_ms, sync_offset_ms
 
-    def update_network_stats(self) :
+    def update_network_stats(self):
         # 3. Network & Sync
         self.net_metrics = self._get_network_metrics()
         self.ping, self.time_offset = self._get_latency_and_sync()
+
 
 
     def update_stats(self):
@@ -148,13 +147,13 @@ class RobustMonitor(Node):
                 fan_rpm = self.jetson.stats['Fan pwmfan0']
 
                 # 전력
-                power_w = self.jetson.stats['Power T0T'] / 1000 # Watt
+                power_w = self.jetson.stats['Power TOT'] / 1000 # Watt
             except KeyError:
                 pass # 특정 필드가 없어도 죽지 않음
 
         # # 3. Network & Sync
-        # net_metrics = self._get_network_metrics()
-        # ping, time_offset = self._get_latency_and_sync()
+        # self.net_metrics = self._get_network_metrics()
+        # self.ping, self.time_offset = self._get_latency_and_sync()
 
         # 4. 통계 계산 (Safe division)
         cpu_avg = sum(self.cpu_q) / len(self.cpu_q) if self.cpu_q else 0
@@ -172,7 +171,7 @@ class RobustMonitor(Node):
                 "max_60s": round(cpu_max, 1),
                 "mem_usage_mb": round(mem.used / 1024 / 1024, 1),
                 "mem_percent": mem.percent,
-                "temp cpu": int(cpu_temp)
+                "temp_cpu": int(cpu_temp)
             },
             "gpu": {
                 "usage_percent": int(gpu_cur),
@@ -215,3 +214,4 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
+    
