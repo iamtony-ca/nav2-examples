@@ -1,0 +1,4 @@
+jetson_monitor_node:
+  ros__parameters:
+    # Ping 테스트를 수행할 대상 IP (공유기 게이트웨이 또는 제어 PC)
+    target_ip: '192.168.0.1'
