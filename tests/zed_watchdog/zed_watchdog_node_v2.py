@@ -1,7 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from sensor_msgs.msg import CameraInfo
+from sensor_msgs.msg import CameraInfo, PointCloud2, Image
 
 import subprocess
 import time
@@ -26,16 +26,20 @@ class ZedWatchdog(Node):
         # --- Parameters ---
         self.declare_parameter('launch_cmd', ["ros2", "launch", "zed_multi_camera", "zed_multi_camera.launch.py"])
         self.declare_parameter('check_topics', [
-            "/zed_node_0/left/camera_info",
-            "/zed_node_1/left/camera_info",
-            "/zed_node_2/left/camera_info",
-            "/zed_node_3/left/camera_info"
+            "/zed_multi/zed_front/point_cloud/cloud_registered",
+            "/zed_multi/zed_rear/point_cloud/cloud_registered",
+            # "/zed_node_2/left/camera_info",
+            "/zed_multi/zed_right/left/gray/rect/image"
         ])
+
+
+        self.target_topics_msgs = [PointCloud2, PointCloud2, Image]
+
         self.declare_parameter('boot_timeout', 60.0)
-        self.declare_parameter('stability_duration', 5.0)
-        self.declare_parameter('msg_timeout', 1.0)
+        self.declare_parameter('stability_duration', 7.0)
+        self.declare_parameter('msg_timeout', 7.0)
         self.declare_parameter('cooldown_sec', 10.0)
-        self.declare_parameter('max_attempts', 3)
+        self.declare_parameter('max_attempts', 5)
 
         self.launch_cmd = self.get_parameter('launch_cmd').value
         self.target_topics = self.get_parameter('check_topics').value
@@ -45,6 +49,7 @@ class ZedWatchdog(Node):
         self.cooldown_sec = self.get_parameter('cooldown_sec').value
         self.max_attempts = self.get_parameter('max_attempts').value
 
+        self.log_intervals = 10.0
         # --- Variables ---
         self.process = None  # gnome-terminal 프로세스 핸들
         self.state = State.IDLE
@@ -62,11 +67,13 @@ class ZedWatchdog(Node):
             depth=1
         )
         
+        cnt = 0
         for topic in self.target_topics:
             self.create_subscription(
-                CameraInfo, topic,
+                self.target_topics_msgs[cnt], topic,
                 lambda msg, t=topic: self.topic_callback(msg, t), qos
             )
+            cnt += 1
 
         # --- Timer ---
         self.create_timer(0.1, self.fsm_loop)
@@ -122,7 +129,7 @@ class ZedWatchdog(Node):
                 self.transition_to(State.COOLDOWN)
                 return
             
-            if now - self.last_log_time > 5.0:
+            if now - self.last_log_time > self.log_intervals:
                 self.get_logger().info("🟢 System Healthy (Window Open).")
                 self.last_log_time = now
 
@@ -172,13 +179,13 @@ class ZedWatchdog(Node):
                 return False, topic
         return True, None
 
-def force_kill_zed_processes(self):
+    def force_kill_zed_processes(self):
         """
         ZED 관련 '내부' 프로세스(ROS 노드, wrapper 등)만 골라서 종료.
         터미널 창(gnome-terminal)은 건드리지 않음 (cleanup_and_close_window에서 처리).
         """
         # 죽여야 할 핵심 프로세스 이름 키워드
-        target_names = ["zed_wrapper_node", "zed_multi_camera", "component_container", "zed_rear_main"]
+        target_names = ["zed_left_main", "zed_right_main", "zed_rear_main", "zed_front_main"]
         killed_count = 0
         
         for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
@@ -219,6 +226,7 @@ def force_kill_zed_processes(self):
         
         if killed_count > 0:
             time.sleep(1.0)
+
 
     def cleanup_and_close_window(self):
         """터미널 창과 내부 프로세스를 모두 정리"""
