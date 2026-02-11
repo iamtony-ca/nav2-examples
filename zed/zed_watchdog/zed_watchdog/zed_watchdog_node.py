@@ -1,13 +1,12 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from sensor_msgs.msg import CameraInfo
+from sensor_msgs.msg import CameraInfo, PointCloud2, Image
 
 import subprocess
 import time
 import sys
-import os
-import psutil
+import psutil  # [NEW] 프로세스 정밀 제어용
 from enum import Enum
 
 # ================= State Definition =================
@@ -24,21 +23,24 @@ class ZedWatchdog(Node):
     def __init__(self):
         super().__init__('zed_watchdog')
 
-        # --- Parameters Setting ---
+        # --- Parameters ---
         self.declare_parameter('launch_cmd', ["ros2", "launch", "zed_multi_camera", "zed_multi_camera.launch.py"])
         self.declare_parameter('check_topics', [
-            "/zed_node_0/left/camera_info",
-            "/zed_node_1/left/camera_info",
-            "/zed_node_2/left/camera_info",
-            "/zed_node_3/left/camera_info"
+            "/zed_multi/zed_front/point_cloud/cloud_registered",
+            "/zed_multi/zed_rear/point_cloud/cloud_registered",
+            # "/zed_node_2/left/camera_info",
+            "/zed_multi/zed_right/left/gray/rect/image"
         ])
-        self.declare_parameter('boot_timeout', 60.0)    # 부팅 허용 시간
-        self.declare_parameter('stability_duration', 5.0) # 안정화 검사 시간
-        self.declare_parameter('msg_timeout', 1.0)      # 데이터 끊김 허용 시간
-        self.declare_parameter('cooldown_sec', 10.0)    # 재시작 대기 시간
-        self.declare_parameter('max_attempts', 5)       # 최대 시도 횟수
 
-        # 파라미터 로드
+
+        self.target_topics_msgs = [PointCloud2, PointCloud2, Image]
+
+        self.declare_parameter('boot_timeout', 60.0)
+        self.declare_parameter('stability_duration', 7.0)
+        self.declare_parameter('msg_timeout', 3.0)
+        self.declare_parameter('cooldown_sec', 10.0)
+        self.declare_parameter('max_attempts', 5)
+
         self.launch_cmd = self.get_parameter('launch_cmd').value
         self.target_topics = self.get_parameter('check_topics').value
         self.boot_timeout = self.get_parameter('boot_timeout').value
@@ -47,129 +49,117 @@ class ZedWatchdog(Node):
         self.cooldown_sec = self.get_parameter('cooldown_sec').value
         self.max_attempts = self.get_parameter('max_attempts').value
 
-        # --- Internal Variables ---
-        self.process = None  # gnome-terminal subprocess 핸들
+
+        self.log_intervals = 10.0
+        # --- Variables ---
+        self.process = None  # gnome-terminal 프로세스 핸들
         self.state = State.IDLE
         self.attempt_count = 0
         self.state_start_time = 0.0
         self.last_log_time = 0.0
-        self.my_pid = os.getpid()
         
-        # 토픽별 마지막 수신 시간 저장용
         self.topic_last_seen = {topic: 0.0 for topic in self.target_topics}
         self.subs = []
 
-        # --- Subscribers Setup ---
+        # --- Subscribers ---
         qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
         
+        cnt = 0
         for topic in self.target_topics:
             self.create_subscription(
-                CameraInfo, topic,
+                self.target_topics_msgs[cnt], topic,
                 lambda msg, t=topic: self.topic_callback(msg, t), qos
             )
+            cnt += 1
 
-        # --- Timer Loop (10Hz) ---
+        # --- Timer ---
         self.create_timer(0.1, self.fsm_loop)
         
-        # [초기화] 시작 전 혹시 모를 좀비 프로세스 정리 후 쿨다운 진입
+        # 시작 전 혹시 모를 잔여 프로세스 정리 및 쿨다운 진입
         self.force_kill_zed_processes() 
         self.transition_to(State.COOLDOWN)
-        
-        # 첫 실행은 쿨다운 없이 1초 뒤 바로 시작하도록 시간 조작
         self.state_start_time = time.time() - self.cooldown_sec + 1.0
 
-        self.get_logger().info(f"🐶 ZED Watchdog Node Started! (PID: {self.my_pid})")
+        self.get_logger().info("🐶 ZED Watchdog with psutil Started!")
 
     def topic_callback(self, msg, topic_name):
-        # 유효한 타임스탬프가 있는 경우에만 갱신
         if msg.header.stamp.sec > 0:
             self.topic_last_seen[topic_name] = time.time()
 
     def fsm_loop(self):
         now = time.time()
 
-        # 1. 터미널 창 생존 확인 (사용자가 창을 강제로 닫았을 때 감지)
+        # 1. 프로세스 생존 확인 (사용자가 창을 닫았는지 확인)
         if self.state in [State.LAUNCHING, State.STABILIZING, State.RUNNING]:
             if self.process is None or self.process.poll() is not None:
-                self.get_logger().error("🚨 Monitor Window Closed Unexpectedly!")
+                self.get_logger().error("🚨 Terminal window closed unexpectedly!")
                 self.transition_to(State.COOLDOWN)
                 return
 
         # 2. State Machine Logic
         if self.state == State.LAUNCHING:
-            # 타임아웃 체크
             if now - self.state_start_time > self.boot_timeout:
                 self.get_logger().error(f"❌ Boot Timeout ({self.boot_timeout}s).")
                 self.transition_to(State.COOLDOWN)
                 return
             
-            # 모든 카메라 데이터 수신 확인
             all_started = all(t > 0.0 for t in self.topic_last_seen.values())
             if all_started:
-                self.get_logger().info("⚡ Signals Detected. Starting Stability Check...")
+                self.get_logger().info("⚡ Signals detected. Checking stability...")
                 self.transition_to(State.STABILIZING)
 
         elif self.state == State.STABILIZING:
-            # 데이터 끊김 확인
             is_healthy, bad_topic = self.check_topic_health()
             if not is_healthy:
-                self.get_logger().warn(f"⚠️ Unstable during check: {bad_topic} stalled.")
+                self.get_logger().warn(f"⚠️ Unstable: {bad_topic} stalled.")
                 self.transition_to(State.COOLDOWN)
                 return
             
-            # 안정화 시간 달성
             if now - self.state_start_time >= self.stability_duration:
                 self.get_logger().info(f"✅ System Stable. Entering RUNNING mode.")
                 self.transition_to(State.RUNNING)
 
         elif self.state == State.RUNNING:
-            # 런타임 감시
             is_healthy, bad_topic = self.check_topic_health()
             if not is_healthy:
                 self.get_logger().error(f"🚨 Runtime Failure: {bad_topic} stopped.")
                 self.transition_to(State.COOLDOWN)
                 return
             
-            # 5초마다 생존 로그
-            if now - self.last_log_time > 5.0:
-                self.get_logger().info("🟢 System Healthy (Monitoring active).")
+            if now - self.last_log_time > self.log_intervals:
+                self.get_logger().info("🟢 System Healthy (Window Open).")
                 self.last_log_time = now
 
         elif self.state == State.COOLDOWN:
-            # 대기 시간 후 재시작
             if now - self.state_start_time > self.cooldown_sec:
                 self.start_launch_sequence()
 
         elif self.state == State.FATAL_ERROR:
-            pass # 관리자 개입 필요
+            pass
 
     def start_launch_sequence(self):
         if self.attempt_count >= self.max_attempts:
-            self.get_logger().fatal("💥 Max attempts reached. Please check hardware connection.")
+            self.get_logger().fatal("💥 Max attempts reached.")
             self.transition_to(State.FATAL_ERROR)
             return
 
         self.attempt_count += 1
-        self.get_logger().info(f"🚀 [Attempt {self.attempt_count}/{self.max_attempts}] Launching ZED Nodes...")
+        self.get_logger().info(f"🚀 [Attempt {self.attempt_count}] Cleaning up & Launching...")
         
-        # [Safety] 실행 전 좀비 프로세스 확실하게 정리
+        # [핵심 요구사항] 실행 전 잔여 프로세스 검사 및 종료
         self.force_kill_zed_processes()
 
-        # 상태 초기화
         self.topic_last_seen = {topic: 0.0 for topic in self.target_topics}
         
         try:
-            # gnome-terminal --wait 로 실행 (창이 닫힐 때까지 프로세스 유지)
+            # gnome-terminal --wait 실행
             full_cmd = ["gnome-terminal", "--wait", "--"] + self.launch_cmd
-            
-            # shell=False로 실행해야 PID 추적이 용이함
             self.process = subprocess.Popen(full_cmd)
             self.transition_to(State.LAUNCHING)
-            
         except Exception as e:
             self.get_logger().error(f"Failed to open terminal: {e}")
             self.transition_to(State.COOLDOWN)
@@ -179,11 +169,11 @@ class ZedWatchdog(Node):
         self.state_start_time = time.time()
         
         if new_state == State.COOLDOWN:
+            # 상태 전환 시에도 확실한 정리를 수행
             self.cleanup_and_close_window()
             self.get_logger().info(f"⏳ Cooldown {self.cooldown_sec}s...")
 
     def check_topic_health(self):
-        """MSG_TIMEOUT 이내에 데이터가 갱신되었는지 확인"""
         now = time.time()
         for topic, last_seen in self.topic_last_seen.items():
             if now - last_seen > self.msg_timeout:
@@ -192,49 +182,43 @@ class ZedWatchdog(Node):
 
     def force_kill_zed_processes(self):
         """
-        [안전 강화] ZED 관련 내부 프로세스만 골라서 종료.
-        gnome-terminal 자체는 건드리지 않음 (다른 터미널 보호).
+        ZED 관련 '내부' 프로세스(ROS 노드, wrapper 등)만 골라서 종료.
+        터미널 창(gnome-terminal)은 건드리지 않음 (cleanup_and_close_window에서 처리).
         """
         # 죽여야 할 핵심 프로세스 이름 키워드
-        # component_container: ROS2 composable node container
-        # robot_state_publisher: URDF 관련
-        target_names = ["zed_wrapper_node", "zed_multi_camera", "component_container", "robot_state_publisher"]
+        target_names = ["zed_left_main", "zed_right_main", "zed_rear_main", "zed_front_main"]
         killed_count = 0
         
         for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
             try:
-                # 이미 종료된 프로세스 접근 시 에러 방지
-                if not proc.is_running():
-                    continue
-
                 proc_name = proc.info['name']
                 cmdline = proc.info['cmdline'] or []
                 cmd_str = " ".join(cmdline)
 
-                # 1. 자기 자신 보호
-                if proc.pid == self.my_pid or proc.pid == 0:
+                # [중요 수정] 터미널 프로세스는 psutil로 죽이지 않고 스킵 (오동작 방지)
+                if "gnome-terminal" in proc_name:
                     continue
 
-                # 2. 터미널 창 보호 (gnome-terminal 프로세스는 직접 죽이지 않음)
-                # 터미널은 self.process.terminate()로 관리함
-                if "gnome-terminal" in proc_name:
+                # [중요] Watchdog 자기 자신은 절대 죽이면 안 됨
+                if proc.pid == 0 or proc.pid == self.process_id(): 
                     continue
 
                 is_target = False
                 
-                # A. 이름으로 매칭
+                # 1. 프로세스 이름으로 검사 (확실한 타겟)
                 if any(target in proc_name for target in target_names):
                     is_target = True
                 
-                # B. 커맨드라인으로 매칭 (Python Launch 스크립트 등)
+                # 2. 실행 명령어로 검사 (python launch 프로세스 잡기 위함)
+                # 단, 편집기(vim, code)나 grep 같은 건 제외
                 if not is_target:
                     if "zed_multi_camera" in cmd_str and "launch.py" in cmd_str:
-                        # 안전장치: 편집기(vim, code)나 grep 명령어는 제외
+                        # 예외 프로세스 필터링
                         if not any(safe in cmd_str for safe in ["vim", "nano", "code", "grep"]):
                             is_target = True
 
                 if is_target:
-                    self.get_logger().warn(f"🔪 Killing orphan process: {proc_name} (PID: {proc.pid})")
+                    self.get_logger().warn(f"🔪 Killing process: {proc_name} (PID: {proc.info['pid']})")
                     proc.kill()
                     killed_count += 1
             
@@ -242,26 +226,31 @@ class ZedWatchdog(Node):
                 pass
         
         if killed_count > 0:
-            time.sleep(1.0) # 프로세스 정리 대기
+            time.sleep(1.0)
+
 
     def cleanup_and_close_window(self):
-        """터미널 창과 내부 프로세스를 모두 안전하게 정리"""
-        self.get_logger().info("🧹 Cleaning up processes...")
+        """터미널 창과 내부 프로세스를 모두 정리"""
+        self.get_logger().info("🧹 Cleaning up processes and closing window...")
 
-        # 1. 내용물(ZED 노드들) 먼저 정리
+        # 1. 내부 ZED 노드들 먼저 psutil로 사살 (가장 중요)
         self.force_kill_zed_processes()
 
-        # 2. 껍데기(터미널 창) 닫기
-        # 우리가 만든 그 subprocess 터미널만 정확히 닫음
+        # 2. 터미널 창(gnome-terminal) 핸들 종료
         if self.process:
             if self.process.poll() is None:
-                self.get_logger().info("🛑 Closing ZED Terminal Window...")
-                self.process.terminate() # SIGTERM 전송 -> 창 닫힘
+                self.get_logger().info("🛑 Terminating gnome-terminal window...")
+                self.process.terminate()
                 try:
                     self.process.wait(timeout=2.0)
                 except subprocess.TimeoutExpired:
-                    self.process.kill() # 응답 없으면 강제 종료
+                    self.process.kill()
             self.process = None
+
+    def process_id(self):
+        """현재 Watchdog 노드의 PID 반환"""
+        import os
+        return os.getpid()
 
     def destroy_node(self):
         self.cleanup_and_close_window()
@@ -273,7 +262,7 @@ def main(args=None):
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info("🛑 Watchdog stopped by user.")
+        node.get_logger().info("🛑 Stopped by user.")
     finally:
         node.destroy_node()
         rclpy.shutdown()
