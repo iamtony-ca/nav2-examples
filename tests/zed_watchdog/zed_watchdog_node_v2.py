@@ -37,7 +37,7 @@ class ZedWatchdog(Node):
 
         self.declare_parameter('boot_timeout', 60.0)
         self.declare_parameter('stability_duration', 7.0)
-        self.declare_parameter('msg_timeout', 7.0)
+        self.declare_parameter('msg_timeout', 3.0)
         self.declare_parameter('cooldown_sec', 10.0)
         self.declare_parameter('max_attempts', 5)
 
@@ -48,6 +48,7 @@ class ZedWatchdog(Node):
         self.msg_timeout = self.get_parameter('msg_timeout').value
         self.cooldown_sec = self.get_parameter('cooldown_sec').value
         self.max_attempts = self.get_parameter('max_attempts').value
+
 
         self.log_intervals = 10.0
         # --- Variables ---
