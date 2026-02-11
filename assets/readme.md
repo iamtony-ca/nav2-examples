@@ -1,0 +1,1 @@
+export CYCLONEDDS_URI=file:///path/to/your/cyclonedds.xml
