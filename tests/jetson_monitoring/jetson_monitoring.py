@@ -15,8 +15,14 @@ class RobustMonitor(Node):
         # 1. 설정
         self.declare_parameter('target_ip', '192.168.0.1') # IPC 혹은 공유기 IP
         self.target_ip = self.get_parameter('target_ip').value
-        self.interval = 1.0 # 1초 주기
-        
+        self.interval = 0.1 # 1초 주기
+        self.interval_network = 0.1
+        self.net_metrics = 0.0
+        self.ping = 0.0
+        self.time_offset = 0.0
+
+
+
         # 2. 데이터 저장을 위한 큐 (최근 60초 데이터 보관 -> Avg/Max 계산용)
         # deque를 쓰면 maxlen 넘어가면 알아서 오래된 것 버림 (메모리 안전)
         self.history_len = 60
@@ -40,6 +46,8 @@ class RobustMonitor(Node):
         # 5. Timer 및 Publisher
         self.pub = self.create_publisher(String, 'system_status', 10)
         self.timer = self.create_timer(self.interval, self.update_stats)
+        self.network_timer = self.create_timer(self.interval_network, self.update_netwok_stats)
+
 
         self.get_logger().info("Robust System Monitor Started.")
 
@@ -77,7 +85,7 @@ class RobustMonitor(Node):
         try:
             # 타임아웃 0.5초로 매우 짧게 설정하여 ROS 루프 지연 방지
             cmd = ['ping', '-c', '1', '-W', '1', self.target_ip]
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=1.1)
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=0.5)
             if res.returncode == 0:
                 # time=12.3 ms 파싱
                 start = res.stdout.find('time=')
@@ -105,6 +113,12 @@ class RobustMonitor(Node):
 
         return ping_ms, sync_offset_ms
 
+    def update_network_stats(self) :
+        # 3. Network & Sync
+        self.net_metrics = self._get_network_metrics()
+        self.ping, self.time_offset = self._get_latency_and_sync()
+
+
     def update_stats(self):
         # 1. CPU & RAM (psutil 사용 - 매우 안정적)
         cpu_cur = psutil.cpu_percent(interval=None) # interval=None은 non-blocking
@@ -125,18 +139,22 @@ class RobustMonitor(Node):
                 self.gpu_q.append(gpu_cur)
                 
                 # 온도 및 메모리
-                gpu_temp = self.jetson.stats['Temp'].get('GPU', 0)
+                gpu_temp = self.jetson.stats['Temp gpu']
+                cpu_temp = self.jetson.stats['Temp cpu']
                 # jtop의 RAM['shared']가 GPU 사용량과 유사 (Unified Memory)
-                gpu_mem = self.jetson.stats['RAM'].get('shared', 0) / 1024 # MB
+                gpu_mem = self.jetson.stats['RAM'] / 1024 # MB
                 
+                # fan
+                fan_rpm = self.jetson.stats['Fan pwmfan0']
+
                 # 전력
-                power_w = self.jetson.stats['Power'].get('avg', 0) / 1000 # Watt
+                power_w = self.jetson.stats['Power T0T'] / 1000 # Watt
             except KeyError:
                 pass # 특정 필드가 없어도 죽지 않음
 
-        # 3. Network & Sync
-        net_metrics = self._get_network_metrics()
-        ping, time_offset = self._get_latency_and_sync()
+        # # 3. Network & Sync
+        # net_metrics = self._get_network_metrics()
+        # ping, time_offset = self._get_latency_and_sync()
 
         # 4. 통계 계산 (Safe division)
         cpu_avg = sum(self.cpu_q) / len(self.cpu_q) if self.cpu_q else 0
@@ -153,21 +171,23 @@ class RobustMonitor(Node):
                 "avg_60s": round(cpu_avg, 1),
                 "max_60s": round(cpu_max, 1),
                 "mem_usage_mb": round(mem.used / 1024 / 1024, 1),
-                "mem_percent": mem.percent
+                "mem_percent": mem.percent,
+                "temp cpu": int(cpu_temp)
             },
             "gpu": {
                 "usage_percent": int(gpu_cur),
                 "avg_60s": round(gpu_avg, 1),
                 "max_60s": int(gpu_max),
-                "temp_c": int(gpu_temp),
+                "temp_gpu": int(gpu_temp),
                 "mem_usage_mb": int(gpu_mem)
             },
             "network": {
-                "io": net_metrics,
-                "latency_ping_ms": ping,
+                "io": self.net_metrics,
+                "latency_ping_ms": self.ping,
             },
             "system": {
-                "time_offset_ms": round(time_offset, 4),
+                "pwmfan0": round(fan_rpm, 1),
+                "time_offset_ms": round(self.time_offset, 4),
                 "power_w": round(power_w, 2)
             }
         }
