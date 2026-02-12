@@ -1,0 +1,14 @@
+/**
+ * @file config/params.yaml
+ * @brief Configuration for Dummy Agent Publisher
+ */
+dummy_agent_publisher_node:
+  ros__parameters:
+    publish_rate: 10.0       # Hz
+    frame_id: "map"
+    
+    # 시뮬레이션 설정
+    agent_count: 3           # 생성할 더미 에이전트 수
+    base_radius: 2.0         # 첫 번째 에이전트 회전 반경 (m)
+    radius_increment: 1.5    # 에이전트 간 반경 차이 (m)
+    base_speed: 0.5          # 기준 회전 속도
