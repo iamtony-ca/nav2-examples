@@ -1,0 +1,1 @@
+remove NaN in void Optimizer::updateControlSequence() in optimizer.cpp
