@@ -59,8 +59,6 @@ PathValidatorNode::PathValidatorNode()
   this->declare_parameter<std::string>("global_frame", "map");
   this->declare_parameter<std::string>("base_frame", "base_link");
 
-  this->declare_parameter("self_machine_id", 0);
-
   this->declare_parameter("cooldown_sec", 1.0);
   this->declare_parameter("consecutive_threshold", 2);  //3
   this->declare_parameter("obstacle_persistence_sec", 1.0);  // 0.5
@@ -115,9 +113,6 @@ PathValidatorNode::PathValidatorNode()
   // ---- load parameters ----
   global_frame_               = this->get_parameter("global_frame").as_string();
   base_frame_                 = this->get_parameter("base_frame").as_string();
-
-  self_machine_id_ = static_cast<uint16_t>(this->get_parameter("self_machine_id").as_int());
-
   cooldown_sec_               = this->get_parameter("cooldown_sec").as_double();
   consecutive_threshold_      = static_cast<size_t>(this->get_parameter("consecutive_threshold").as_int());
   obstacle_persistence_sec_   = this->get_parameter("obstacle_persistence_sec").as_double();
@@ -1090,11 +1085,6 @@ std::vector<PathValidatorNode::AgentHit> PathValidatorNode::whoCoversPoint(doubl
   }
 
   for (const auto & a : last_agents_->agents) {
-    // [add] 대상이 나 자신이면 연산에서 완전히 제외하고 건너뜀
-    if (a.machine_id == self_machine_id_) {
-      continue;
-    }
-
     const auto fp = getFootprintForAgent(a);
     if (fp.size() < 3) continue;
 

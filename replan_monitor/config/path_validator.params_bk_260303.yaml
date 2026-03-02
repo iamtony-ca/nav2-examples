@@ -1,7 +1,5 @@
 path_validator_node:
   ros__parameters:
-    self_machine_id: 1
-    
     # Frames
     global_frame: "map"
     base_frame: "base_link"

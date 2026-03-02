@@ -196,9 +196,6 @@ private:
   std::string global_frame_;
   std::string base_frame_;
 
-// [add] 본인 식별용 ID 변수
-  uint16_t self_machine_id_{0};
-
   double cooldown_sec_;
   size_t consecutive_threshold_;
   double obstacle_persistence_sec_;
