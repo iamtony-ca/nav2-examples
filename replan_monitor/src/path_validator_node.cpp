@@ -112,6 +112,8 @@ PathValidatorNode::PathValidatorNode()
   this->declare_parameter("agent_path_hit_dilate_m", 0.05);
   this->declare_parameter("agent_path_hit_max_poses", 1000);
 
+  this->declare_parameter("respect_higher_priority_path", false);
+
   // ---- load parameters ----
   global_frame_               = this->get_parameter("global_frame").as_string();
   base_frame_                 = this->get_parameter("base_frame").as_string();
@@ -182,7 +184,7 @@ PathValidatorNode::PathValidatorNode()
   agent_path_hit_dilate_m_    = this->get_parameter("agent_path_hit_dilate_m").as_double();
   agent_path_hit_max_poses_   = this->get_parameter("agent_path_hit_max_poses").as_int();
 
-
+  respect_higher_priority_path_ = this->get_parameter("respect_higher_priority_path").as_bool();
 
   // [NEW] Add declaration for the robot list
   this->declare_parameter<std::vector<std::string>>("robot_ids", std::vector<std::string>({}));
@@ -1150,7 +1152,17 @@ std::vector<PathValidatorNode::AgentHit> PathValidatorNode::whoCoversPoint(doubl
     }
 
     // 2) (NEW) truncated_path 튜브 커버?
-    if (agent_path_hit_enable_) {
+    // if (agent_path_hit_enable_) {
+    // if (agent_path_hit_enable_ && (a.machine_id > self_machine_id_)) {
+    // [수정] 파라미터에 따라 검사 조건 분기
+    bool check_path_tube = agent_path_hit_enable_;
+    
+    // respect_higher_priority_path_가 false이고 대상이 나보다 ID가 작으면 검사하지 않음
+    if (!respect_higher_priority_path_ && (a.machine_id < self_machine_id_)) {
+      check_path_tube = false;
+    }
+
+    if (check_path_tube) {    
       const bool covered = pathTubeCoversPoint(
           a, wx, wy,
           agent_path_hit_stride_m_,

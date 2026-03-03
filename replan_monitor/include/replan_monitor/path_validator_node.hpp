@@ -254,6 +254,9 @@ private:
   double agent_path_hit_stride_m_{0.35};
   double agent_path_hit_dilate_m_{0.02};
   int    agent_path_hit_max_poses_{200};
+
+  // [NEW] 우선순위에 따른 경로 검사 옵션
+  bool respect_higher_priority_path_{false};  
 };
 
 }  // namespace replan_monitor
