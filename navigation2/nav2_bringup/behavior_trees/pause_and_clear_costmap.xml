@@ -1,0 +1,34 @@
+        <SequenceWithMemory>
+          <CancelControl/>
+
+          <Fallback name="WaitUntilUnpausedAndClear">
+            
+            <Repeat num_cycles="-1">
+              <Sequence>
+                <Fallback>
+                  <CheckPauseResetCondition
+                      flag_topic="/controller_pause_flag"
+                      node="{node}"
+                      latch="true"
+                      transient_local="true"
+                      reset="{controller_pause_reset_seq}" />
+
+                  <CheckSafetyPlcCondition name="SafetyPlcFlag"
+                      flag_topic="/ros2_safety_plc_status_data"
+                      node="{node}"
+                      latch="true"
+                      transient_local="0"
+                      reset="false" />
+                </Fallback>
+                <Wait wait_duration="0.1" />
+              </Sequence>
+            </Repeat>
+
+            <Sequence name="UnpauseCleanupSequence">
+              <LogTextAction message="[UNPAUSED] Pause released. Clearing costmaps before resuming FollowPath..." interval_s="1.0"/>
+              <SubTree name="ClearPair_Unpause" ID="ClearCostmapsPairSubtree" _autoremap="true" />
+              <AlwaysFailure name="ForceFailureToExitPauseBranch" />
+            </Sequence>
+            
+          </Fallback>
+        </SequenceWithMemory>
