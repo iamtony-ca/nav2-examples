@@ -124,7 +124,8 @@ class ZedObjectToLaserNode(Node):
                 if surface_dist < scan_ranges[idx]:
                     scan_ranges[idx] = surface_dist
 
-        scan_msg.ranges = scan_ranges
+        # scan_msg.ranges = scan_ranges
+        scan_msg.ranges = [float(r) for r in scan_ranges]
         self.scan_pub.publish(scan_msg)
 
 
