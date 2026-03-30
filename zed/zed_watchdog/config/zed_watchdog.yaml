@@ -2,7 +2,12 @@ zed_watchdog:
   ros__parameters:
     # 실행할 런치 커맨드 (리스트 형식)
     launch_cmd: ["ros2", "launch", "zed_multi_camera", "zed_multi_camera.launch.py"]
-    
+
+    cam_serials: "[1234,2345,3456]"
+
+    # [NEW] /tf 대기 타임아웃 (분 단위 설정)
+    tf_timeout_mins: 5.0
+
     # 감시할 토픽 목록
     check_topics:
       - "/zed_node_0/left/camera_info"
