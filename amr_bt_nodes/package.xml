@@ -27,6 +27,8 @@
   <depend>nav2_costmap_2d</depend>
 
   <depend>ros2launch</depend>
+  <depend>tf2</depend>
+  <depend>tf2_geometry_msgs</depend>  
 
   <!-- <exec_depend>pluginlib</exec_depend> -->
 
