@@ -261,3 +261,13 @@
     </description>
   </class>
 </library>
+
+<library path="check_and_extract_spin_action">
+  <class name="amr_bt_nodes::CheckAndExtractSpinAction"
+         type="amr_bt_nodes::CheckAndExtractSpinAction"
+         base_class_type="BT::SyncActionNode">
+    <description>
+      check_and_extract_spin_action bt node.
+    </description>
+  </class>
+</library>
