@@ -1,0 +1,17 @@
+behavior_server:
+  ros__parameters:
+    # 1. 사용할 플러그인 리스트에 "spin"을 선언합니다 (이 이름이 액션 서버의 이름이 됨)
+    behavior_plugins: ["spin", "graceful_spin", "backup", "drive_on_heading", "wait"] 
+    
+    # 2. "spin" 액션에 대한 상세 설정
+    graceful_spin:
+      # ★ 여기에 새로 만든 GracefulSpin 플러그인을 지정합니다!
+      plugin: "ammr_behaviors::GracefulSpin" 
+      
+      # 파라미터들
+      simulate_ahead_time: 2.0
+      in_place_collision_resolution: 0.1 
+      max_rotational_vel: 1.0
+      min_rotational_vel: 0.4
+      rotational_acc_lim: 3.2
+
