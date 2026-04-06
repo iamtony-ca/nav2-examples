@@ -23,6 +23,8 @@ find_package(nav2_util REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
 
+find_package(tf2 REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
 # find_package(tf2 REQUIRED)
 
 # find_package(robot_interfaces REQUIRED)
@@ -408,7 +410,18 @@ target_include_directories(is_goals_occupied_agent_condition PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)  
 
+# ───── Build check_and_extract_spin_action ─────
+add_library(check_and_extract_spin_action SHARED
+  src/check_and_extract_spin_action.cpp)
 
+ament_target_dependencies(check_and_extract_spin_action
+  rclcpp geometry_msgs tf2 tf2_geometry_msgs behaviortree_cpp pluginlib)
+
+target_include_directories(check_and_extract_spin_action PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
+  
 
 
 
@@ -445,6 +458,7 @@ install(TARGETS
   check_pause_reset_condition
   check_final_goal_yaw_action
   is_goals_occupied_agent_condition
+  check_and_extract_spin_action
 
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
