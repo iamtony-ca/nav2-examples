@@ -1,0 +1,21 @@
+dynamic_obstacle_detector:
+  ros__parameters:
+    use_sim_time: false
+    
+    roi:
+      min_dist: 0.3      # 감지 시작 거리 (m)
+      max_dist: 1.1      # 감지 끝 거리 (m)
+      max_angle: 0.2     # 로봇 정면 기준 좌우 각도 (라디안, 0.2는 약 11.5도)
+      
+    map:
+      occupancy_threshold: 50  # 0~100 중 이 값보다 작으면 빈 공간(Free)으로 간주
+      
+    frames:
+      global: "map"
+      base: "base_link"
+      
+    topics:
+      map: "/map"
+      scan: "/scan"
+      scan_cam: "/scan_cam"
+      alert: "/dynamic_obstacle_alert"
