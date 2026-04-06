@@ -1,0 +1,19 @@
+        <RunNTimesDecorator num_ticks="1" name="InitialSpinOnce">
+          <Fallback name="CheckAndHandlePureRotation">
+            
+            <Sequence name="HandleSpin">
+              <CheckAndExtractSpin goals="{goals}" 
+                                   distance_tolerance="0.05" 
+                                   spin_angle="{spin_angle}"/>
+                                   
+              <Spin spin_dist="{spin_angle}" server_name="graceful_spin" server_timeout="10.0"/>
+              
+              <RemoveFirstGoalAction input_goals="{goals}" remaining_goals="{goals}" />
+              
+              <LogTextAction message="초기 제자리 회전(Spin)을 완료하고 가짜 Waypoint를 제거했습니다." interval_s="0.0" />
+            </Sequence>
+            
+            <AlwaysSuccess name="SkipSpin"/>
+            
+          </Fallback>
+        </RunNTimesDecorator>
