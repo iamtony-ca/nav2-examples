@@ -1,3 +1,9 @@
+        <RunNTimesDecorator num_ticks="1" name="Initilizing...">
+          <Sequence>
+            ...
+          </Sequence>  
+        </RunNTimesDecorator>
+
         <RunNTimesDecorator num_ticks="1" name="InitialSpinOnce">
           <Fallback name="CheckAndHandlePureRotation">
             
@@ -17,3 +23,5 @@
             
           </Fallback>
         </RunNTimesDecorator>
+
+        <SubTree name="SelectPlugins"
