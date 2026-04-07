@@ -297,7 +297,7 @@ class FleetDecisionNode(Node):
         self.get_logger().warn(f"External replan_flag -> STOP and Wait {self.replan_flag_wait_sec}s")
         
         # 1. 즉시 STOP 퍼블리시
-        if self.replan_flag_wait_sec != 0.0
+        if self.replan_flag_wait_sec != 0.0:
             self._publish_stop()
             self._publish_state(f"REPLAN_FLAG -> WAIT({self.replan_flag_wait_sec}s)")
 
