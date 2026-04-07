@@ -293,11 +293,10 @@ class FleetDecisionNode(Node):
         if self._replan_flag_timer is not None:
             self.get_logger().warn("External replan_flag ignored: Already waiting to replan.")
             return
-
-        self.get_logger().warn(f"External replan_flag -> STOP and Wait {self.replan_flag_wait_sec}s")
         
         # 1. 즉시 STOP 퍼블리시
         if self.replan_flag_wait_sec != 0.0:
+            self.get_logger().warn(f"External replan_flag -> STOP and Wait {self.replan_flag_wait_sec}s")            
             self._publish_stop()
             self._publish_state(f"REPLAN_FLAG -> WAIT({self.replan_flag_wait_sec}s)")
 
@@ -305,6 +304,7 @@ class FleetDecisionNode(Node):
             self._replan_flag_timer = self.create_timer(self.replan_flag_wait_sec, self._replan_flag_timer_callback)
         elif self.replan_flag_wait_sec == 0.0:
                     # 3. REPLAN 퍼블리시
+            self.get_logger().warn(f"External replan_flag -> REPLAN. Wait: {self.replan_flag_wait_sec}s")            
             self._publish_replan()
             self._publish_state("REPLAN_FLAG -> RESUME")
 
