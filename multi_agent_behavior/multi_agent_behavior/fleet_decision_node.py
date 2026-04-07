@@ -138,6 +138,13 @@ class FleetDecisionNode(Node):
         # [수정] Reroute 쿨다운 값 가져오기
         self.reroute_cooldown_sec = self.get_parameter("reroute_cooldown_sec").value
 
+# ---------------------------------------------------------
+        # [수정 1] Replan Flag 수신 시 대기할 시간(N sec) 및 타이머 변수 추가
+        # ---------------------------------------------------------
+        self.declare_parameter("replan_flag_wait_sec", 2.0)
+        self.replan_flag_wait_sec = self.get_parameter("replan_flag_wait_sec").value
+        self._replan_flag_timer = None
+        
         # Internal State
         self._is_reroute_status = RerouteStatus.NONE
         self._pre_moving_stop_type = MovingStopType.TYPE_NONE
@@ -215,6 +222,8 @@ class FleetDecisionNode(Node):
         self.get_logger().info(f" - service_reroute         : {self.get_parameter('service_reroute').value}")        
         self.get_logger().info(f" - topic_cmd_resume        : {self.get_parameter('topic_cmd_resume').value}")
         self.get_logger().info(f" - topic_cmd_stop          : {self.get_parameter('topic_cmd_stop').value}")
+        self.get_logger().info(f" - replan_flag_wait_sec          : {self.get_parameter('replan_flag_wait_sec').value}")
+
         self.get_logger().info("====================================================")
 
     # ------------------------------------------------------------------
@@ -258,6 +267,20 @@ class FleetDecisionNode(Node):
             else:
                 self._is_reroute_status = RerouteStatus.NONE
 
+    # def on_replan_flag(self, msg: Bool):
+    #     if not msg.data: return
+    #     now = self.get_clock().now()
+    #     if self._last_agent_event_time is not None:
+    #         dt = (now - self._last_agent_event_time).nanoseconds * 1e-9
+    #         if dt < self.replan_ignore_sec:
+    #             return
+    #     self.get_logger().warn("External replan_flag -> REPLAN")
+    #     self._publish_replan()
+    #     self._publish_state("REPLAN (Flag)")
+    
+# ------------------------------------------------------------------
+    # [수정 2] on_replan_flag 콜백 변경 및 Timer 콜백 함수 추가
+    # ------------------------------------------------------------------
     def on_replan_flag(self, msg: Bool):
         if not msg.data: return
         now = self.get_clock().now()
@@ -265,10 +288,42 @@ class FleetDecisionNode(Node):
             dt = (now - self._last_agent_event_time).nanoseconds * 1e-9
             if dt < self.replan_ignore_sec:
                 return
-        self.get_logger().warn("External replan_flag -> REPLAN")
-        self._publish_replan()
-        self._publish_state("REPLAN (Flag)")
+        
+        # 이미 대기 중인 타이머가 있다면 중복 실행 방지
+        if self._replan_flag_timer is not None:
+            self.get_logger().warn("External replan_flag ignored: Already waiting to replan.")
+            return
 
+        self.get_logger().warn(f"External replan_flag -> STOP and Wait {self.replan_flag_wait_sec}s")
+        
+        # 1. 즉시 STOP 퍼블리시
+        if self.replan_flag_wait_sec != 0.0
+            self._publish_stop()
+            self._publish_state(f"REPLAN_FLAG -> WAIT({self.replan_flag_wait_sec}s)")
+
+        # 2. N초 후 REPLAN & RESUME을 실행할 1회용 비동기 타이머 생성
+        self._replan_flag_timer = self.create_timer(self.replan_flag_wait_sec, self._replan_flag_timer_callback)
+
+    def _replan_flag_timer_callback(self):
+        """ N초 대기 후 Replan과 Resume을 실행하는 콜백 """
+        
+        # 타이머 파괴 (1회용 실행 보장 및 메모리 해제)
+        if self._replan_flag_timer is not None:
+            self._replan_flag_timer.cancel()
+            self.destroy_timer(self._replan_flag_timer)
+            self._replan_flag_timer = None
+
+        self.get_logger().warn("External replan_flag -> REPLAN & RESUME Executed")
+        
+        # 3. REPLAN 퍼블리시
+        self._publish_replan()
+        
+        # 4. RESUME 퍼블리시 (Pause 해제)
+        self.pub_cmd_resume.publish(Bool(data=False))
+        self._publish_state("REPLAN_FLAG -> RESUME")
+
+
+    
     def on_collision(self, msg: PathAgentCollisionInfo):
         """ 메인 의사결정 루프 """
         
