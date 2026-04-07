@@ -301,9 +301,14 @@ class FleetDecisionNode(Node):
             self._publish_stop()
             self._publish_state(f"REPLAN_FLAG -> WAIT({self.replan_flag_wait_sec}s)")
 
-        # 2. N초 후 REPLAN & RESUME을 실행할 1회용 비동기 타이머 생성
-        self._replan_flag_timer = self.create_timer(self.replan_flag_wait_sec, self._replan_flag_timer_callback)
+            # 2. N초 후 REPLAN & RESUME을 실행할 1회용 비동기 타이머 생성
+            self._replan_flag_timer = self.create_timer(self.replan_flag_wait_sec, self._replan_flag_timer_callback)
+        elif self.replan_flag_wait_sec == 0.0:
+                    # 3. REPLAN 퍼블리시
+            self._publish_replan()
+            self._publish_state("REPLAN_FLAG -> RESUME")
 
+    
     def _replan_flag_timer_callback(self):
         """ N초 대기 후 Replan과 Resume을 실행하는 콜백 """
         
