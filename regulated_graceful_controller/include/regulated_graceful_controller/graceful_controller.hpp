@@ -21,6 +21,7 @@
 #include <memory>
 #include <algorithm>
 #include <mutex>
+#include <cmath>
 
 #include "nav2_core/controller.hpp"
 #include "nav2_costmap_2d/footprint_collision_checker.hpp"
@@ -118,12 +119,23 @@ protected:
    * @param backward Flag to indicate if the robot is moving backward
    * @return true if the trajectory is collision free, false otherwise
    */
+//   bool simulateTrajectory(
+//     const geometry_msgs::msg::PoseStamped & motion_target,
+//     const geometry_msgs::msg::TransformStamped & costmap_transform,
+//     nav_msgs::msg::Path & trajectory,
+//     geometry_msgs::msg::TwistStamped & cmd_vel,
+//     bool backward);
+// [추가] 시뮬레이션 시 현재 속도를 알아야 가감속을 반영할 수 있으므로 매개변수 추가
   bool simulateTrajectory(
     const geometry_msgs::msg::PoseStamped & motion_target,
     const geometry_msgs::msg::TransformStamped & costmap_transform,
     nav_msgs::msg::Path & trajectory,
     geometry_msgs::msg::TwistStamped & cmd_vel,
+    const geometry_msgs::msg::Twist & current_velocity, // <-- 추가된 부분
+    double dt_control,                                  // <-- 추가된 부분
     bool backward);
+
+
 
   /**
    * @brief Rotate the robot to face the motion target with maximum angular velocity.
@@ -156,6 +168,17 @@ protected:
    * @param path Path to add orientations into, if required
    */
   void validateOrientations(std::vector<geometry_msgs::msg::PoseStamped> & path);
+
+// [추가] 1D 가감속 제한 도우미 함수
+  double applyKinematicLimits(
+    double v_current, double v_target, 
+    double max_acc, double max_decel, double dt);
+
+  // [추가] dt 계산용 타이머
+  rclcpp::Clock::SharedPtr clock_;
+  rclcpp::Time last_control_time_;
+
+
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::string plugin_name_;
