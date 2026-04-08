@@ -39,43 +39,40 @@
 
 
 
+// =================================================================================
+  // ★ [Post-Processing] 독립적 가감속(Kinematic Limits) 및 하드 클램핑(안전장치) ★
+  // =================================================================================
+  geometry_msgs::msg::TwistStamped final_cmd = target_cmd;
+  
+  // 1. 선속도 Y 원천 차단 (슬립 노이즈 방지)
+  final_cmd.twist.linear.y = 0.0; 
 
-// B. 선속도(X)에만 가감속 한계 적용
-      double limited_v = applyKinematicLimits(
-          last_cmd_vel_.linear.x, target_v, 2.5, -3.2, dt_control);
+  // 2. 컨트롤러가 계산한 순수 목표 속도
+  double target_v = target_cmd.twist.linear.x;
+  double target_w = target_cmd.twist.angular.z;
+
+  // 3. [버그 픽스] 목표값 자체가 파라미터 최대치를 넘지 않도록 1차 하드 클램핑 (1.0으로 튀는 현상 원천 차단)
+  target_v = std::clamp(target_v, -params_->v_linear_max, params_->v_linear_max);
+  target_w = std::clamp(target_w, -params_->v_angular_max, params_->v_angular_max);
+
+  // 4. 선속도 / 각속도 독립적 가감속 적용 (last_cmd_vel_ 기반의 부드러운 램프 곡선)
+  // *참고: 2.5(가속), -3.2(감속) 값은 로봇 스펙에 맞게 추후 튜닝하세요.
+  double limited_v = applyKinematicLimits(
+      last_cmd_vel_.linear.x, target_v, 2.5, -3.2, dt_control);
       
-      // C. 제한된 선속도에 곡률을 곱해 각속도(Z)를 다시 계산
-      double limited_w = limited_v * kappa;
+  double limited_w = applyKinematicLimits(
+      last_cmd_vel_.angular.z, target_w, 2.5, -3.2, dt_control);
 
-      // D. (안전장치) 다시 계산된 각속도가 물리적 한계를 초과하면, 각속도 기준으로 다시 맞춤
-      double max_w_limit = applyKinematicLimits(
-          last_cmd_vel_.angular.z, target_w, 2.5, -3.2, dt_control);
-      
-      if (std::abs(limited_w) > std::abs(max_w_limit)) {
-          limited_w = max_w_limit;
-          
-          // ==========================================================
-          // [추가/수정된 부분] 적응형 곡률 제어 (Adaptive Curvature Preservation)
-          // ==========================================================
-          
-          // 곡률 반경(Turning Radius) 계산
-          double turning_radius = 100.0; // 기본값 (직선)
-          if (std::abs(kappa) > 0.001) {
-              turning_radius = 1.0 / std::abs(kappa);
-          }
+  // 5. [안전장치] 가감속 연산 후에도 절대 한계를 넘지 않도록 2차 하드 클램핑
+  limited_v = std::clamp(limited_v, -params_->v_linear_max, params_->v_linear_max);
+  limited_w = std::clamp(limited_w, -params_->v_angular_max, params_->v_angular_max);
 
-          // 회전 반경이 1.2m 이내인 급커브(U턴, 90도 턴)에서는 궤적 이탈 방지를 위해 선속도를 깎음
-          if (turning_radius < 1.2) { 
-              limited_v = limited_w / kappa; 
-          }
-          // 회전 반경이 1.2m 이상인 완만한 커브(160도 등)에서는 
-          // limited_v 를 깎지 않고そのまま 살려둡니다! (부드러운 고속 통과)
-          // ==========================================================
-      }
+  // 6. 모터 웅웅거림(떨림) 방지를 위해 매우 작은 속도는 완전 정지 처리
+  if (std::abs(limited_v) < 0.001) limited_v = 0.0;
+  if (std::abs(limited_w) < 0.001) limited_w = 0.0;
 
-      final_cmd.twist.linear.x = limited_v;
-      final_cmd.twist.angular.z = limited_w;
-  }
+  final_cmd.twist.linear.x = limited_v;
+  final_cmd.twist.angular.z = limited_w;
 
   // 최종 명령 업데이트 및 리턴
   last_cmd_vel_ = final_cmd.twist;
