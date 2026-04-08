@@ -104,6 +104,9 @@ void GracefulController::activate()
 // [추가] 활성화 시점의 시간을 저장
   last_control_time_ = clock_->now();  
 }
+// [추가] 활성화 시점의 시간을 저장 및 초기화
+  last_control_time_ = clock_->now();  
+  last_cmd_vel_ = geometry_msgs::msg::Twist(); // 0으로 초기화
 
 void GracefulController::deactivate()
 {
@@ -254,6 +257,7 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
     if (std::abs(angle_to_goal) < 0.01) {
         cmd_vel.twist.linear.x = 0.0;
         cmd_vel.twist.angular.z = 0.0;
+        last_cmd_vel_ = cmd_vel.twist; // [추가] 리턴 전 저장      
         return cmd_vel; 
     }
 
@@ -309,11 +313,11 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
   
     if (collision_free) {
       cmd_vel.twist.linear.x = 0.0;
-      // [수정] 회전 시 각가속도/감속도 적용
+// [수정] velocity.angular.z (실제 속도) 대신 last_cmd_vel_.angular.z (이전 명령) 사용
       cmd_vel.twist.angular.z = applyKinematicLimits(
-        velocity.angular.z, target_vel, 
-        // params_->max_accel_theta, params_->max_decel_theta, dt_control);
-        0.34, -3.2 , dt_control);
+        last_cmd_vel_.angular.z, target_vel, 0.34, -3.2, dt_control);
+      
+      last_cmd_vel_ = cmd_vel.twist; // [추가] 리턴 전 저장
       return cmd_vel; 
     }
 
@@ -333,6 +337,7 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
     if (euclidean_dist < 0.007) {
         cmd_vel.twist.linear.x = 0.0;
         cmd_vel.twist.angular.z = 0.0;
+        last_cmd_vel_ = cmd_vel.twist; // [추가] 리턴 전 저장
         return cmd_vel; 
     }
 
@@ -395,6 +400,7 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
       slowdown_pub_->publish(slowdown_marker);
       local_plan.header = transformed_plan.header;
       local_plan_pub_->publish(local_plan);
+      last_cmd_vel_ = cmd_vel.twist; // [추가] 최종 명령 내리기 전 상태 업데이트
       return cmd_vel;
     }
   }
