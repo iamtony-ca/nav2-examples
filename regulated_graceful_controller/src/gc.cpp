@@ -1,6 +1,6 @@
 geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
   const geometry_msgs::msg::PoseStamped & pose,
-  const geometry_msgs::msg::Twist & velocity, // <-- velocity는 여기서 동기화용으로만 씁니다!
+  const geometry_msgs::msg::Twist & velocity, // <-- Odom
   nav2_core::GoalChecker * goal_checker)
 {
   std::lock_guard<std::mutex> param_lock(param_handler_->getMutex());
@@ -12,28 +12,27 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
   if (dt_control <= 0.0 || dt_control > 0.5) { dt_control = 0.05; }
 
   // =================================================================================
-  // [★ 신규 추가 ★] Safety Lidar 외부 개입 감지 및 상태 동기화 (State Reset)
+  // ★ [핵심 해결책] 가상 목줄 (Virtual Leash) 동기화 로직
   // =================================================================================
-  // 컨트롤러가 명령한 속도와 실제 로봇의 속도 차이를 계산
-  double linear_vel_error = last_cmd_vel_.linear.x - velocity.linear.x;
-  
-  // 허용 오차 (로봇의 가속 지연에 따라 0.1 ~ 0.15 정도로 튜닝)
-  // - 정상적인 가속 지연은 이 값을 넘지 않습니다.
-  // - 이 값을 넘었다는 것은 Safety Lidar 등이 강제로 브레이크를 잡았다는 뜻입니다.
-  double sync_threshold = 0.15; 
-
-  if (std::abs(linear_vel_error) > sync_threshold) {
-      // 현실(odom)과 내부 상태(last_cmd)가 너무 크게 벌어지면, 현실에 맞춰 강제 리셋!
-      last_cmd_vel_.linear.x = velocity.linear.x;
-      last_cmd_vel_.angular.z = velocity.angular.z;
+  // Odom이 비정상적인 노이즈(예: 1.4 초과)로 튈 때는 동기화를 무시하여 내부 상태 보호
+  if (std::abs(velocity.linear.x) <= params_->v_linear_max + 0.5) {
       
-      // 디버깅용: 1초에 한 번만 경고 출력 (정상 작동 확인 후 주석 처리하셔도 됩니다)
-      RCLCPP_WARN_THROTTLE(logger_, *clock_, 1000, 
-        "External override detected (Error: %.2f)! Resetting internal state to match odom.", linear_vel_error);
+      // 로봇의 정상적인 물리적 가속 지연(Lag) 허용치 (튜닝 포인트)
+      // 이 값보다 명령이 더 앞서나가려고 하면 Odom 근처로 강제 고정됩니다.
+      double max_lag_x = 0.3; // 선속도 허용 격차 
+      double max_lag_w = 0.4; // 각속도 허용 격차
+      
+      // last_cmd_vel_ 을 [odom - max_lag, odom + max_lag] 범위 내로 가둠 (Clamping)
+      last_cmd_vel_.linear.x = std::clamp(last_cmd_vel_.linear.x, 
+                                          velocity.linear.x - max_lag_x, 
+                                          velocity.linear.x + max_lag_x);
+                                          
+      last_cmd_vel_.angular.z = std::clamp(last_cmd_vel_.angular.z, 
+                                           velocity.angular.z - max_lag_w, 
+                                           velocity.angular.z + max_lag_w);
   }
   // =================================================================================
 
-  // 목표 명령을 임시로 담을 변수
   geometry_msgs::msg::TwistStamped target_cmd;
-  
-  // ... (이하 기존 코드 동일: Phase 1, 2, 3 로직 및 Post-Processing 로직 유지) ...
+  target_cmd.header = pose.header;
+  // ... (이하 기존 last_cmd_vel_ 기반 로직 동일하게 유지) ...
