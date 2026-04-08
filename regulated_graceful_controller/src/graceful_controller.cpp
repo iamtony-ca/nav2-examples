@@ -37,6 +37,9 @@ void GracefulController::configure(
     throw nav2_core::ControllerException("Unable to lock node!");
   }
 
+// [추가] 시간 측정을 위해 clock 저장
+  clock_ = node->get_clock();
+
   costmap_ros_ = costmap_ros;
   tf_buffer_ = tf;
   plugin_name_ = name;
@@ -97,6 +100,9 @@ void GracefulController::activate()
   local_plan_pub_->on_activate();
   motion_target_pub_->on_activate();
   slowdown_pub_->on_activate();
+
+// [추가] 활성화 시점의 시간을 저장
+  last_control_time_ = clock_->now();  
 }
 
 void GracefulController::deactivate()
@@ -112,15 +118,43 @@ void GracefulController::deactivate()
 }
 
 
-
+// [추가] 가감속 제한 로직 구현
+double GracefulController::applyKinematicLimits(
+  double v_current, double v_target, double max_acc, double max_decel, double dt)
+{
+  double dv = v_target - v_current;
+  
+  // 가속 중인지 감속 중인지 판단 (방향이 같고, 크기가 커지거나 출발할 때)
+  bool is_accelerating = (v_target * v_current > 0.0 && std::abs(v_target) > std::abs(v_current)) || v_current == 0.0;
+  
+// [수정 핵심] max_decel이 음수로 들어올 수 있으므로 반드시 std::abs() 적용
+  double active_limit = is_accelerating ? std::abs(max_acc) : std::abs(max_decel);
+  double limit_dv = active_limit * dt;
+  
+  // 허용 변화량을 초과하면 Clamping
+  if (std::abs(dv) > limit_dv) {
+    return v_current + std::copysign(limit_dv, dv);
+  }
+  return v_target;
+}
 
 
 geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
   const geometry_msgs::msg::PoseStamped & pose,
-  const geometry_msgs::msg::Twist & /*velocity*/,
+  const geometry_msgs::msg::Twist & velocity,
   nav2_core::GoalChecker * goal_checker)
 {
   std::lock_guard<std::mutex> param_lock(param_handler_->getMutex());
+
+// [추가] dt 계산 (루프 주기)
+  auto now = clock_->now();
+  double dt_control = (now - last_control_time_).seconds();
+  last_control_time_ = now;
+  
+  // 초기 실행이거나 너무 지연된 경우 기본값(예: 20Hz -> 0.05s) 적용
+  if (dt_control <= 0.0 || dt_control > 0.5) {
+    dt_control = 0.05; 
+  }
 
   geometry_msgs::msg::TwistStamped cmd_vel;
   cmd_vel.header = pose.header;
@@ -266,12 +300,23 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
       }
     }
 
-    if (collision_free) {
-      cmd_vel.twist.linear.x = 0.0; // 선속도 확실히 0
-      cmd_vel.twist.angular.z = target_vel;
-      return cmd_vel; // 회전 명령 리턴
-    }
+    // if (collision_free) {
+    //   cmd_vel.twist.linear.x = 0.0; // 선속도 확실히 0
+    //   cmd_vel.twist.angular.z = target_vel;
+    //   return cmd_vel; // 회전 명령 리턴
+    // }
     // 충돌 감지 시 아래 로직으로 떨어져서 회피 시도 (혹은 예외 발생)
+  
+    if (collision_free) {
+      cmd_vel.twist.linear.x = 0.0;
+      // [수정] 회전 시 각가속도/감속도 적용
+      cmd_vel.twist.angular.z = applyKinematicLimits(
+        velocity.angular.z, target_vel, 
+        // params_->max_accel_theta, params_->max_decel_theta, dt_control);
+        0.34, -3.2 , dt_control);
+      return cmd_vel; 
+    }
+
   }
 
   // =================================================================================
@@ -339,8 +384,11 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
     }
 
     // Simulate trajectory (Note: This uses the control_law which might have modified speed limits)
+    // nav_msgs::msg::Path local_plan;
+    // if (simulateTrajectory(target_pose, costmap_transform, local_plan, cmd_vel, reversing)) {
+// [수정] simulateTrajectory 호출 시 현재 속도와 dt 전달
     nav_msgs::msg::Path local_plan;
-    if (simulateTrajectory(target_pose, costmap_transform, local_plan, cmd_vel, reversing)) {
+    if (simulateTrajectory(target_pose, costmap_transform, local_plan, cmd_vel, velocity, dt_control, reversing)) {
       motion_target_pub_->publish(target_pose);
       auto slowdown_marker = regulated_graceful_controller::createSlowdownMarker(
         target_pose, params_->slowdown_radius);
@@ -395,6 +443,8 @@ bool GracefulController::simulateTrajectory(
   const geometry_msgs::msg::TransformStamped & costmap_transform,
   nav_msgs::msg::Path & trajectory,
   geometry_msgs::msg::TwistStamped & cmd_vel,
+  const geometry_msgs::msg::Twist & current_velocity, // <-- 추가됨
+  double dt_control,                                  // <-- 추가됨  
   bool backward)
 {
   trajectory.poses.clear();
@@ -429,7 +479,15 @@ bool GracefulController::simulateTrajectory(
       auto cmd = rotateToTarget(angle_to_target - next_pose_yaw);
 
       // If this is first iteration, this is our current target velocity
-      if (trajectory.poses.empty()) {cmd_vel.twist = cmd;}
+    //   if (trajectory.poses.empty()) {cmd_vel.twist = cmd;}
+      if (trajectory.poses.empty()) {
+        // [수정] 제자리 회전 시에도 초기 각가속도 적용
+        cmd.angular.z = applyKinematicLimits(
+          current_velocity.angular.z, cmd.angular.z, 
+        //   params_->max_accel_theta, params_->max_decel_theta, dt_control);
+          0.34, -3.2, dt_control);
+        cmd_vel.twist = cmd;
+      }
 
       // Are we done simulating initial rotation?
       if (fabs(angle_to_target - next_pose_yaw) < params_->initial_rotation_tolerance) {
@@ -441,10 +499,33 @@ bool GracefulController::simulateTrajectory(
       next_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(next_pose_yaw);
     } else {
       // If this is first iteration, this is our current target velocity
+    //   if (trajectory.poses.empty()) {
+    //     cmd_vel.twist = control_law_->calculateRegularVelocity(
+    //       motion_target.pose, next_pose.pose, backward);
+    //   }
       if (trajectory.poses.empty()) {
-        cmd_vel.twist = control_law_->calculateRegularVelocity(
+        auto raw_cmd = control_law_->calculateRegularVelocity(
           motion_target.pose, next_pose.pose, backward);
+        
+        // [수정] 제어 법칙이 계산한 이상적 속도에 현재 속도 기반의 물리적 가감속 한계 적용
+        raw_cmd.linear.x = applyKinematicLimits(
+          current_velocity.linear.x, raw_cmd.linear.x, 
+        //   params_->max_accel_x, params_->max_decel_x, dt_control);
+           0.07, -2.0, dt_control);
+        
+        raw_cmd.linear.y = applyKinematicLimits(
+          current_velocity.linear.y, raw_cmd.linear.y, 
+        //   params_->max_accel_y, params_->max_decel_y, dt_control);
+          0.0, 0.0, dt_control);
+
+        raw_cmd.angular.z = applyKinematicLimits(
+          current_velocity.angular.z, raw_cmd.angular.z, 
+        //   params_->max_accel_theta, params_->max_decel_theta, dt_control);
+          0.34, -3.2, dt_control);
+
+        cmd_vel.twist = raw_cmd;
       }
+
 
       // Apply velocities to calculate next pose
       next_pose.pose = control_law_->calculateNextPose(
