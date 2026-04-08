@@ -305,7 +305,7 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
   // [Phase 1 & 2 Common] 경로 추종 주행 (Path Following Logic)
   // =================================================================================
   
-  if (!cmd_found) {
+  
     std::vector<double> target_distances;
     computeDistanceAlongPath(transformed_plan.poses, target_distances);
 
@@ -351,10 +351,53 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
     }
   }
 
-  if (!cmd_found) {
+  
     throw nav2_core::NoValidControl("Collision detected in trajectory");
-}
+  }
+// =================================================================================
+  // ★ [Post-Processing] Kinematic Limits & Curvature Preservation (핵심 해결책) ★
+  // =================================================================================
+  geometry_msgs::msg::TwistStamped final_cmd = target_cmd;
+  
+  // 1. 선속도 Y 원천 차단 (linear_y 발생 문제 해결)
+  final_cmd.twist.linear.y = 0.0; 
 
+  if (std::abs(target_cmd.twist.linear.x) < 0.001) {
+      // [제자리 회전 모드] 선속도가 0이므로 각속도만 단독으로 가감속 적용
+      final_cmd.twist.angular.z = applyKinematicLimits(
+          last_cmd_vel_.angular.z, target_cmd.twist.angular.z, 2.5, -3.2, dt_control);
+  } else {
+      // [경로 추종 모드] 궤적 이탈(Wobbling) 방지를 위한 곡률(Curvature) 비율 유지 로직
+      double target_v = target_cmd.twist.linear.x;
+      double target_w = target_cmd.twist.angular.z;
+      
+      // A. 목표 궤적의 곡률 계산 (k = w / v)
+      double kappa = target_w / target_v; 
+
+      // B. 선속도(X)에만 가감속 한계 적용
+      double limited_v = applyKinematicLimits(
+          last_cmd_vel_.linear.x, target_v, 2.5, -3.2, dt_control);
+      
+      // C. 제한된 선속도에 곡률을 곱해 각속도(Z)를 다시 계산 (조향 비율 완벽 유지!)
+      double limited_w = limited_v * kappa;
+
+      // D. (안전장치) 다시 계산된 각속도가 물리적 한계를 초과하면, 각속도 기준으로 다시 맞춤
+      double max_w_limit = applyKinematicLimits(
+          last_cmd_vel_.angular.z, target_w, 2.5, -3.2, dt_control);
+      
+      if (std::abs(limited_w) > std::abs(max_w_limit)) {
+          limited_w = max_w_limit;
+          limited_v = limited_w / kappa; // 비율 유지하며 선속도 추가 감속
+      }
+
+      final_cmd.twist.linear.x = limited_v;
+      final_cmd.twist.angular.z = limited_w;
+  }
+
+  // 최종 명령 업데이트 및 리턴
+  last_cmd_vel_ = final_cmd.twist;
+  return final_cmd;
+}
 
 
 
