@@ -143,7 +143,7 @@ double GracefulController::applyKinematicLimits(
 
 geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
   const geometry_msgs::msg::PoseStamped & pose,
-  const geometry_msgs::msg::Twist & velocity,
+  const geometry_msgs::msg::Twist & /*velocity*/,
   nav2_core::GoalChecker * goal_checker)
 {
   std::lock_guard<std::mutex> param_lock(param_handler_->getMutex());
@@ -159,10 +159,10 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
   }
 
   geometry_msgs::msg::TwistStamped target_cmd;
-  cmd_vel.header = pose.header;
-  cmd_vel.twist.linear.x = 0.0;
-  cmd_vel.twist.linear.y = 0.0;
-  cmd_vel.twist.angular.z = 0.0;
+  target_cmd.header = pose.header;
+  target_cmd.twist.linear.x = 0.0;
+  target_cmd.twist.linear.y = 0.0;
+  target_cmd.twist.angular.z = 0.0;
   bool cmd_found = false; // 명령을 찾았는지 여부  
 
   // -----------------------------------------------------------------------
