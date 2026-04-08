@@ -32,3 +32,52 @@
   geometry_msgs::msg::TwistStamped target_cmd;
   target_cmd.header = pose.header;
   // ... (이하 기존 로직 동일하게 유지) ...
+
+
+
+
+
+
+
+
+// B. 선속도(X)에만 가감속 한계 적용
+      double limited_v = applyKinematicLimits(
+          last_cmd_vel_.linear.x, target_v, 2.5, -3.2, dt_control);
+      
+      // C. 제한된 선속도에 곡률을 곱해 각속도(Z)를 다시 계산
+      double limited_w = limited_v * kappa;
+
+      // D. (안전장치) 다시 계산된 각속도가 물리적 한계를 초과하면, 각속도 기준으로 다시 맞춤
+      double max_w_limit = applyKinematicLimits(
+          last_cmd_vel_.angular.z, target_w, 2.5, -3.2, dt_control);
+      
+      if (std::abs(limited_w) > std::abs(max_w_limit)) {
+          limited_w = max_w_limit;
+          
+          // ==========================================================
+          // [추가/수정된 부분] 적응형 곡률 제어 (Adaptive Curvature Preservation)
+          // ==========================================================
+          
+          // 곡률 반경(Turning Radius) 계산
+          double turning_radius = 100.0; // 기본값 (직선)
+          if (std::abs(kappa) > 0.001) {
+              turning_radius = 1.0 / std::abs(kappa);
+          }
+
+          // 회전 반경이 1.2m 이내인 급커브(U턴, 90도 턴)에서는 궤적 이탈 방지를 위해 선속도를 깎음
+          if (turning_radius < 1.2) { 
+              limited_v = limited_w / kappa; 
+          }
+          // 회전 반경이 1.2m 이상인 완만한 커브(160도 등)에서는 
+          // limited_v 를 깎지 않고そのまま 살려둡니다! (부드러운 고속 통과)
+          // ==========================================================
+      }
+
+      final_cmd.twist.linear.x = limited_v;
+      final_cmd.twist.angular.z = limited_w;
+  }
+
+  // 최종 명령 업데이트 및 리턴
+  last_cmd_vel_ = final_cmd.twist;
+  return final_cmd;
+}
