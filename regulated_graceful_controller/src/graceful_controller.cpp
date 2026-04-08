@@ -101,12 +101,11 @@ void GracefulController::activate()
   motion_target_pub_->on_activate();
   slowdown_pub_->on_activate();
 
-// [추가] 활성화 시점의 시간을 저장
-  last_control_time_ = clock_->now();  
-}
 // [추가] 활성화 시점의 시간을 저장 및 초기화
   last_control_time_ = clock_->now();  
   last_cmd_vel_ = geometry_msgs::msg::Twist(); // 0으로 초기화
+}
+
 
 void GracefulController::deactivate()
 {
