@@ -119,20 +119,13 @@ protected:
    * @param backward Flag to indicate if the robot is moving backward
    * @return true if the trajectory is collision free, false otherwise
    */
-//   bool simulateTrajectory(
-//     const geometry_msgs::msg::PoseStamped & motion_target,
-//     const geometry_msgs::msg::TransformStamped & costmap_transform,
-//     nav_msgs::msg::Path & trajectory,
-//     geometry_msgs::msg::TwistStamped & cmd_vel,
-//     bool backward);
+
 // [추가] 시뮬레이션 시 현재 속도를 알아야 가감속을 반영할 수 있으므로 매개변수 추가
   bool simulateTrajectory(
     const geometry_msgs::msg::PoseStamped & motion_target,
     const geometry_msgs::msg::TransformStamped & costmap_transform,
     nav_msgs::msg::Path & trajectory,
     geometry_msgs::msg::TwistStamped & cmd_vel,
-    const geometry_msgs::msg::Twist & current_velocity, // <-- 추가된 부분
-    double dt_control,                                  // <-- 추가된 부분
     bool backward);
 
 
