@@ -158,7 +158,7 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
     dt_control = 0.05; 
   }
 
-  geometry_msgs::msg::TwistStamped cmd_vel;
+  geometry_msgs::msg::TwistStamped target_cmd;
   cmd_vel.header = pose.header;
   cmd_vel.twist.linear.x = 0.0;
   cmd_vel.twist.linear.y = 0.0;
