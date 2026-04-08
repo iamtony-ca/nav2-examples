@@ -36,38 +36,81 @@
 
 
 
-
-
-
 // =================================================================================
-  // ★ [Post-Processing] 독립적 가감속(Kinematic Limits) 및 하드 클램핑(안전장치) ★
+  // ★ [Post-Processing] 동적 윈도우(Dynamic Window) 기반 비율 보존 가감속 로직 ★
   // =================================================================================
   geometry_msgs::msg::TwistStamped final_cmd = target_cmd;
-  
-  // 1. 선속도 Y 원천 차단 (슬립 노이즈 방지)
-  final_cmd.twist.linear.y = 0.0; 
+  final_cmd.twist.linear.y = 0.0; // Y속도 원천 차단
 
-  // 2. 컨트롤러가 계산한 순수 목표 속도
   double target_v = target_cmd.twist.linear.x;
   double target_w = target_cmd.twist.angular.z;
 
-  // 3. [버그 픽스] 목표값 자체가 파라미터 최대치를 넘지 않도록 1차 하드 클램핑 (1.0으로 튀는 현상 원천 차단)
+  // 1. [버그 픽스] 절대 목표값 하드 클램핑 (1.0으로 튀는 현상 원천 차단)
   target_v = std::clamp(target_v, -params_->v_linear_max, params_->v_linear_max);
   target_w = std::clamp(target_w, -params_->v_angular_max, params_->v_angular_max);
 
-  // 4. 선속도 / 각속도 독립적 가감속 적용 (last_cmd_vel_ 기반의 부드러운 램프 곡선)
-  // *참고: 2.5(가속), -3.2(감속) 값은 로봇 스펙에 맞게 추후 튜닝하세요.
-  double limited_v = applyKinematicLimits(
-      last_cmd_vel_.linear.x, target_v, 2.5, -3.2, dt_control);
-      
-  double limited_w = applyKinematicLimits(
-      last_cmd_vel_.angular.z, target_w, 2.5, -3.2, dt_control);
+  // 2. 물리적 가감속 한계(Dynamic Window) 윈도우 계산
+  // *현재 속도 기준으로 1틱(dt) 동안 최대로 낼 수 있는 최소/최대 속도 범위
+  double acc_x = 2.5;  double dec_x = 3.2; // 추후 params_->max_accel_x 등으로 교체 가능
+  double acc_w = 2.5;  double dec_w = 3.2;
 
-  // 5. [안전장치] 가감속 연산 후에도 절대 한계를 넘지 않도록 2차 하드 클램핑
+  auto get_bounds = [](double current, double acc, double dec, double dt) {
+      double lower, upper;
+      if (current >= 0.0) {
+          lower = current - (dec * dt);
+          upper = current + (acc * dt);
+      } else {
+          lower = current - (acc * dt); // 후진 가속
+          upper = current + (dec * dt); // 후진 브레이크
+      }
+      return std::make_pair(lower, upper);
+  };
+
+  auto bounds_v = get_bounds(last_cmd_vel_.linear.x, acc_x, dec_x, dt_control);
+  auto bounds_w = get_bounds(last_cmd_vel_.angular.z, acc_w, dec_w, dt_control);
+
+  double v_min = bounds_v.first; double v_max = bounds_v.second;
+  double w_min = bounds_w.first; double w_max = bounds_w.second;
+
+  // 3. 목표 속도를 일차적으로 물리 한계 내로 클램핑
+  double limited_v = std::clamp(target_v, v_min, v_max);
+  double limited_w = std::clamp(target_w, w_min, w_max);
+
+  // 4. 고도화된 곡률(Curvature) 비율 보존 로직
+  if (std::abs(target_v) > 0.001) {
+      double kappa = target_w / target_v;
+      
+      // 선속도를 기준으로 이상적인 각속도 동기화 계산
+      double synchronized_w = limited_v * kappa;
+      
+      if (synchronized_w < w_min || synchronized_w > w_max) {
+          // [Case A] 각속도가 한계를 초과함 (각속도가 병목)
+          limited_w = std::clamp(synchronized_w, w_min, w_max);
+          
+          // 부족한 각속도에 맞춰 선속도도 희생하여 비율 유지
+          limited_v = limited_w / kappa;
+          
+          // [핵심 해결책] 선속도를 희생시켰는데, 그것이 로봇의 최대 감속 능력(급브레이크)을 넘는다면?
+          // (이 부분이 기존 160도 커브에서 발생했던 주행 붕괴 현상의 원인입니다)
+          if (limited_v < v_min || limited_v > v_max) {
+              // 궤적 비율을 살짝 깨더라도 물리법칙을 우선하여 브레이크 한계까지만 감속!
+              limited_v = std::clamp(limited_v, v_min, v_max); 
+              limited_w = std::clamp(limited_v * kappa, w_min, w_max); // 최종 안전 클램핑
+          }
+      } else {
+          // [Case B] 각속도가 한계 이내라면 완벽하게 비율 유지
+          limited_w = synchronized_w;
+      }
+  } else {
+      // 제자리 회전 모드
+      limited_v = 0.0;
+  }
+
+  // 5. 최종 파라미터 최대치 이중 클램핑 (확실한 안전장치)
   limited_v = std::clamp(limited_v, -params_->v_linear_max, params_->v_linear_max);
   limited_w = std::clamp(limited_w, -params_->v_angular_max, params_->v_angular_max);
 
-  // 6. 모터 웅웅거림(떨림) 방지를 위해 매우 작은 속도는 완전 정지 처리
+  // 6. 미세 떨림(모터 웅웅거림) 방지
   if (std::abs(limited_v) < 0.001) limited_v = 0.0;
   if (std::abs(limited_w) < 0.001) limited_w = 0.0;
 
