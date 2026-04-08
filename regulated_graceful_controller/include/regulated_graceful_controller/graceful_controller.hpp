@@ -173,6 +173,8 @@ protected:
   double applyKinematicLimits(
     double v_current, double v_target, 
     double max_acc, double max_decel, double dt);
+// [추가] 이전 주기에 컨트롤러가 발행한 속도 명령값 저장용
+  geometry_msgs::msg::Twist last_cmd_vel_;
 
   // [추가] dt 계산용 타이머
   rclcpp::Clock::SharedPtr clock_;
