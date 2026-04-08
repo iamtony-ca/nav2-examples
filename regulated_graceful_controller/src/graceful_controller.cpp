@@ -163,6 +163,7 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
   cmd_vel.twist.linear.x = 0.0;
   cmd_vel.twist.linear.y = 0.0;
   cmd_vel.twist.angular.z = 0.0;
+  bool cmd_found = false; // 명령을 찾았는지 여부  
 
   // -----------------------------------------------------------------------
   // [1] Custom Checker 확인 (Dynamic Cast)
@@ -245,41 +246,12 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
   // =================================================================================
   if (enter_rotation_mode) {
     goal_reached_ = true;
-
-    // [Inner Tolerance Check] 
-    // Yaw 오차가 Inner Tolerance 이내면 -> 완전 정지 (Checker 시간 대기)
-    // if (std::abs(angle_to_goal) < params_->inner_yaw_tolerance) {
-    //     cmd_vel.twist.linear.x = 0.0;
-    //     cmd_vel.twist.angular.z = 0.0;
-    //     return cmd_vel; 
-    // }
     if (std::abs(angle_to_goal) < 0.01) {
-        cmd_vel.twist.linear.x = 0.0;
-        cmd_vel.twist.angular.z = 0.0;
-        last_cmd_vel_ = cmd_vel.twist; // [추가] 리턴 전 저장      
-        return cmd_vel; 
-    }
-
-
-    // [Stability Speed Calculation]
-    // 1. 원래 로봇 성능(v_angular_max) 기반으로 목표 속도 계산 (Gain 유지)
-    double target_vel = params_->rotation_scaling_factor * angle_to_goal * params_->v_angular_max;
-
-    // 2. Stability Limit으로 Clamping (상한선 자르기)
-    // if (std::abs(target_vel) > params_->stability_angular_max) {
-    //     target_vel = std::copysign(params_->stability_angular_max, target_vel);
-    // }
-    if (std::abs(target_vel) > 0.35) {
-        target_vel = std::copysign(0.35, target_vel);
-    }
-
-    // 3. 최소 속도 보장 (하한선 올리기) - Inner Tolerance 밖이므로 움직여야 함
-    // if (std::abs(target_vel) < params_->stability_angular_min) {
-    //     target_vel = std::copysign(params_->stability_angular_min, target_vel);
-    // }
-    if (std::abs(target_vel) < 0.01) {
-        target_vel = std::copysign(0.01, target_vel);
-    }
+        cmd_found = true; 
+    } else {
+        double target_vel = params_->rotation_scaling_factor * angle_to_goal * params_->v_angular_max;
+        if (std::abs(target_vel) > 0.35) target_vel = std::copysign(0.35, target_vel);
+        if (std::abs(target_vel) < 0.01) target_vel = std::copysign(0.01, target_vel);
 
 
     // [Collision Check]
@@ -310,101 +282,77 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
     // }
     // 충돌 감지 시 아래 로직으로 떨어져서 회피 시도 (혹은 예외 발생)
   
-    if (collision_free) {
-      cmd_vel.twist.linear.x = 0.0;
-// [수정] velocity.angular.z (실제 속도) 대신 last_cmd_vel_.angular.z (이전 명령) 사용
-      cmd_vel.twist.angular.z = applyKinematicLimits(
-        last_cmd_vel_.angular.z, target_vel, 0.34, -3.2, dt_control);
-      
-      last_cmd_vel_ = cmd_vel.twist; // [추가] 리턴 전 저장
-      return cmd_vel; 
-    }
+      if (collision_free) {
+            target_cmd.twist.angular.z = target_vel;
+            cmd_found = true;
+        }
 
   }
 
   // =================================================================================
   // [Phase 2] XY 안정화 모드 (XY Stabilizing Logic)
   // =================================================================================
-  if (is_xy_stabilizing_phase) {
-    // [Inner Tolerance Check]
-    // 목표 위치와 거의 겹쳤으면(Inner Tolerance) -> 완전 정지 (Checker 시간 대기)
-    // if (euclidean_dist < params_->inner_xy_tolerance) {
-    //     cmd_vel.twist.linear.x = 0.0;
-    //     cmd_vel.twist.angular.z = 0.0;
-    //     return cmd_vel; 
-    // }
+  else if (is_xy_stabilizing_phase) {
     if (euclidean_dist < 0.007) {
-        cmd_vel.twist.linear.x = 0.0;
-        cmd_vel.twist.angular.z = 0.0;
-        last_cmd_vel_ = cmd_vel.twist; // [추가] 리턴 전 저장
-        return cmd_vel; 
+        cmd_found = true;
+    } else {
+        control_law_->setSpeedLimit(0.01, 0.3, 0.35);     
     }
-
-
-
-    // [Speed Limit Override]
-    // 주행은 계속 하되, Stability 전용 저속 파라미터 적용
-    // 이 설정은 아래 Path Following 로직(calculateRegularVelocity)에 영향을 줌
-    // control_law_->setSpeedLimit(
-    //     params_->stability_linear_min, 
-    //     params_->stability_linear_max, 
-    //     params_->stability_angular_max); 
-    control_law_->setSpeedLimit(
-        0.01, 
-        0.3, 
-        0.35);     
   }
+
 
   // =================================================================================
   // [Phase 1 & 2 Common] 경로 추종 주행 (Path Following Logic)
   // =================================================================================
   
-  // Precompute distance to candidate poses
-  std::vector<double> target_distances;
-  computeDistanceAlongPath(transformed_plan.poses, target_distances);
+  if (!cmd_found) {
+    std::vector<double> target_distances;
+    computeDistanceAlongPath(transformed_plan.poses, target_distances);
 
-  // Work back from the end of plan to find valid target pose
-  for (int i = transformed_plan.poses.size() - 1; i >= 0; --i) {
-    geometry_msgs::msg::PoseStamped target_pose = transformed_plan.poses[i];
-    double dist_to_target = target_distances[i];
-
-    // Continue if target_pose is too far away from robot
-    if (dist_to_target > params_->max_lookahead) {continue;}
-
-    if (dist_to_goal < params_->max_lookahead) {
-      if (params_->prefer_final_rotation) {
-        double yaw = std::atan2(target_pose.pose.position.y, target_pose.pose.position.x);
-        target_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(yaw);
+    // Work back from the end of plan to find valid target pose
+    for (int i = transformed_plan.poses.size() - 1; i >= 0; --i) {
+      geometry_msgs::msg::PoseStamped target_pose = transformed_plan.poses[i];
+      double dist_to_target = target_distances[i];
+  
+      // Continue if target_pose is too far away from robot
+      if (dist_to_target > params_->max_lookahead) {continue;}
+  
+      if (dist_to_goal < params_->max_lookahead) {
+        if (params_->prefer_final_rotation) {
+          double yaw = std::atan2(target_pose.pose.position.y, target_pose.pose.position.x);
+          target_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(yaw);
+        }
+      } else if (dist_to_target < params_->min_lookahead) {
+        break;
       }
-    } else if (dist_to_target < params_->min_lookahead) {
-      break;
-    }
-
-    bool reversing = false;
-    if (params_->allow_backward && target_pose.pose.position.x < 0.0) {
-      reversing = true;
-      target_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(
-        tf2::getYaw(target_pose.pose.orientation) + M_PI);
-    }
-
-    // Simulate trajectory (Note: This uses the control_law which might have modified speed limits)
-    // nav_msgs::msg::Path local_plan;
-    // if (simulateTrajectory(target_pose, costmap_transform, local_plan, cmd_vel, reversing)) {
-// [수정] simulateTrajectory 호출 시 현재 속도와 dt 전달
-    nav_msgs::msg::Path local_plan;
-    if (simulateTrajectory(target_pose, costmap_transform, local_plan, cmd_vel, velocity, dt_control, reversing)) {
-      motion_target_pub_->publish(target_pose);
-      auto slowdown_marker = regulated_graceful_controller::createSlowdownMarker(
-        target_pose, params_->slowdown_radius);
-      slowdown_pub_->publish(slowdown_marker);
-      local_plan.header = transformed_plan.header;
-      local_plan_pub_->publish(local_plan);
-      last_cmd_vel_ = cmd_vel.twist; // [추가] 최종 명령 내리기 전 상태 업데이트
-      return cmd_vel;
+  
+      bool reversing = false;
+      if (params_->allow_backward && target_pose.pose.position.x < 0.0) {
+        reversing = true;
+        target_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(
+          tf2::getYaw(target_pose.pose.orientation) + M_PI);
+      }
+  
+      // Simulate trajectory (Note: This uses the control_law which might have modified speed limits)
+      // nav_msgs::msg::Path local_plan;
+      // if (simulateTrajectory(target_pose, costmap_transform, local_plan, cmd_vel, reversing)) {
+  // [수정] simulateTrajectory 호출 시 현재 속도와 dt 전달
+      nav_msgs::msg::Path local_plan;
+      if (simulateTrajectory(target_pose, costmap_transform, local_plan, target_cmd, reversing)) {
+        motion_target_pub_->publish(target_pose);
+        auto slowdown_marker = regulated_graceful_controller::createSlowdownMarker(
+          target_pose, params_->slowdown_radius);
+        slowdown_pub_->publish(slowdown_marker);
+        local_plan.header = transformed_plan.header;
+        local_plan_pub_->publish(local_plan);
+        cmd_found = true;
+        break; // 찾았으므로 루프 탈출
+      }
     }
   }
 
-  throw nav2_core::NoValidControl("Collision detected in trajectory");
+  if (!cmd_found) {
+    throw nav2_core::NoValidControl("Collision detected in trajectory");
 }
 
 
@@ -486,12 +434,12 @@ bool GracefulController::simulateTrajectory(
       // If this is first iteration, this is our current target velocity
     //   if (trajectory.poses.empty()) {cmd_vel.twist = cmd;}
       if (trajectory.poses.empty()) {
-        // [수정] 제자리 회전 시에도 초기 각가속도 적용
-        cmd.angular.z = applyKinematicLimits(
-          current_velocity.angular.z, cmd.angular.z, 
-        //   params_->max_accel_theta, params_->max_decel_theta, dt_control);
-          0.34, -3.2, dt_control);
-        cmd_vel.twist = cmd;
+        auto raw_cmd = control_law_->calculateRegularVelocity(
+          motion_target.pose, next_pose.pose, backward);
+        
+        // [수정] 이전에 추가했던 applyKinematicLimits 로직을 여기서 전부 삭제합니다!
+        // 오직 순수한 제어기 출력값만 시뮬레이션에 사용합니다.
+        cmd_vel.twist = raw_cmd;
       }
 
       // Are we done simulating initial rotation?
@@ -512,22 +460,6 @@ bool GracefulController::simulateTrajectory(
         auto raw_cmd = control_law_->calculateRegularVelocity(
           motion_target.pose, next_pose.pose, backward);
         
-        // [수정] 제어 법칙이 계산한 이상적 속도에 현재 속도 기반의 물리적 가감속 한계 적용
-        raw_cmd.linear.x = applyKinematicLimits(
-          current_velocity.linear.x, raw_cmd.linear.x, 
-        //   params_->max_accel_x, params_->max_decel_x, dt_control);
-           0.07, -2.0, dt_control);
-        
-        raw_cmd.linear.y = applyKinematicLimits(
-          current_velocity.linear.y, raw_cmd.linear.y, 
-        //   params_->max_accel_y, params_->max_decel_y, dt_control);
-          0.0, 0.0, dt_control);
-
-        raw_cmd.angular.z = applyKinematicLimits(
-          current_velocity.angular.z, raw_cmd.angular.z, 
-        //   params_->max_accel_theta, params_->max_decel_theta, dt_control);
-          0.34, -3.2, dt_control);
-
         cmd_vel.twist = raw_cmd;
       }
 
