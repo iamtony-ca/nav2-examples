@@ -458,6 +458,7 @@ bool GracefulController::simulateTrajectory(
     std::hypot(motion_target.pose.position.x, motion_target.pose.position.y) / resolution_;
 
   // Generate path
+// Generate path
   do{
     if (sim_initial_rotation) {
       // Compute rotation velocity
@@ -465,14 +466,8 @@ bool GracefulController::simulateTrajectory(
       auto cmd = rotateToTarget(angle_to_target - next_pose_yaw);
 
       // If this is first iteration, this is our current target velocity
-    //   if (trajectory.poses.empty()) {cmd_vel.twist = cmd;}
       if (trajectory.poses.empty()) {
-        auto raw_cmd = control_law_->calculateRegularVelocity(
-          motion_target.pose, next_pose.pose, backward);
-        
-        // [수정] 이전에 추가했던 applyKinematicLimits 로직을 여기서 전부 삭제합니다!
-        // 오직 순수한 제어기 출력값만 시뮬레이션에 사용합니다.
-        cmd_vel.twist = raw_cmd;
+        cmd_vel.twist = cmd; // <--- 원래대로 cmd를 사용하도록 복구!
       }
 
       // Are we done simulating initial rotation?
@@ -485,17 +480,10 @@ bool GracefulController::simulateTrajectory(
       next_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(next_pose_yaw);
     } else {
       // If this is first iteration, this is our current target velocity
-    //   if (trajectory.poses.empty()) {
-    //     cmd_vel.twist = control_law_->calculateRegularVelocity(
-    //       motion_target.pose, next_pose.pose, backward);
-    //   }
       if (trajectory.poses.empty()) {
-        auto raw_cmd = control_law_->calculateRegularVelocity(
+        cmd_vel.twist = control_law_->calculateRegularVelocity(
           motion_target.pose, next_pose.pose, backward);
-        
-        cmd_vel.twist = raw_cmd;
       }
-
 
       // Apply velocities to calculate next pose
       next_pose.pose = control_law_->calculateNextPose(
@@ -517,7 +505,7 @@ bool GracefulController::simulateTrajectory(
 
     // Check if we reach the goal
     distance = nav2_util::geometry_utils::euclidean_distance(motion_target.pose, next_pose.pose);
-  }while(distance > resolution_ && trajectory.poses.size() < max_iter);
+  } while(distance > resolution_ && trajectory.poses.size() < max_iter);
 
   return true;
 }
