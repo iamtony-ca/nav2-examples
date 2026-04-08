@@ -301,11 +301,12 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
   }
 
 
-  // =================================================================================
+// =================================================================================
   // [Phase 1 & 2 Common] 경로 추종 주행 (Path Following Logic)
   // =================================================================================
   
-  
+  // [수정 핵심] 앞선 모드에서 명령을 못 찾았을 때만 궤적 시뮬레이션을 돌려야 합니다.
+  if (!cmd_found) { 
     std::vector<double> target_distances;
     computeDistanceAlongPath(transformed_plan.poses, target_distances);
 
@@ -333,10 +334,7 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
           tf2::getYaw(target_pose.pose.orientation) + M_PI);
       }
   
-      // Simulate trajectory (Note: This uses the control_law which might have modified speed limits)
-      // nav_msgs::msg::Path local_plan;
-      // if (simulateTrajectory(target_pose, costmap_transform, local_plan, cmd_vel, reversing)) {
-  // [수정] simulateTrajectory 호출 시 현재 속도와 dt 전달
+      // [수정 핵심] 인자 5개로 정상 호출
       nav_msgs::msg::Path local_plan;
       if (simulateTrajectory(target_pose, costmap_transform, local_plan, target_cmd, reversing)) {
         motion_target_pub_->publish(target_pose);
@@ -345,16 +343,19 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
         slowdown_pub_->publish(slowdown_marker);
         local_plan.header = transformed_plan.header;
         local_plan_pub_->publish(local_plan);
+        
         cmd_found = true;
         break; // 찾았으므로 루프 탈출
       }
     }
-  }
+  } // <-- if (!cmd_found) 블록 종료
 
-  
+  // [수정 핵심] 루프를 다 돌았는데도 명령을 못 찾으면 충돌 예외 처리
+  if (!cmd_found) {
     throw nav2_core::NoValidControl("Collision detected in trajectory");
   }
-// =================================================================================
+
+  // =================================================================================
   // ★ [Post-Processing] Kinematic Limits & Curvature Preservation (핵심 해결책) ★
   // =================================================================================
   geometry_msgs::msg::TwistStamped final_cmd = target_cmd;
@@ -439,8 +440,6 @@ bool GracefulController::simulateTrajectory(
   const geometry_msgs::msg::TransformStamped & costmap_transform,
   nav_msgs::msg::Path & trajectory,
   geometry_msgs::msg::TwistStamped & cmd_vel,
-  const geometry_msgs::msg::Twist & current_velocity, // <-- 추가됨
-  double dt_control,                                  // <-- 추가됨  
   bool backward)
 {
   trajectory.poses.clear();
