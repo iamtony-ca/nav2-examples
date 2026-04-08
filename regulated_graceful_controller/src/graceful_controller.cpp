@@ -240,54 +240,45 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
         enter_rotation_mode = true;
     }
   }
-
-  // =================================================================================
+// =================================================================================
   // [Phase 3] 제자리 회전 모드 (Rotation Logic)
   // =================================================================================
   if (enter_rotation_mode) {
     goal_reached_ = true;
     if (std::abs(angle_to_goal) < 0.01) {
         cmd_found = true; 
-    } else {
+    } else { // <--- 여기서 열린 else 블록이
         double target_vel = params_->rotation_scaling_factor * angle_to_goal * params_->v_angular_max;
         if (std::abs(target_vel) > 0.35) target_vel = std::copysign(0.35, target_vel);
         if (std::abs(target_vel) < 0.01) target_vel = std::copysign(0.01, target_vel);
 
+        // [Collision Check]
+        size_t num_steps = fabs(angle_to_goal) / params_->in_place_collision_resolution;
+        num_steps = std::max(static_cast<size_t>(1), num_steps);
+        bool collision_free = true;
+        for (size_t i = 1; i <= num_steps; ++i) {
+          double step = static_cast<double>(i) / static_cast<double>(num_steps);
+          double yaw = step * angle_to_goal;
+          geometry_msgs::msg::PoseStamped next_pose;
+          next_pose.header.frame_id = costmap_ros_->getBaseFrameID();
+          next_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(yaw);
+          geometry_msgs::msg::PoseStamped costmap_pose;
+          tf2::doTransform(next_pose, costmap_pose, costmap_transform);
+          if (inCollision(
+              costmap_pose.pose.position.x, costmap_pose.pose.position.y,
+              tf2::getYaw(costmap_pose.pose.orientation)))
+          {
+            collision_free = false;
+            break;
+          }
+        }
 
-    // [Collision Check]
-    size_t num_steps = fabs(angle_to_goal) / params_->in_place_collision_resolution;
-    num_steps = std::max(static_cast<size_t>(1), num_steps);
-    bool collision_free = true;
-    for (size_t i = 1; i <= num_steps; ++i) {
-      double step = static_cast<double>(i) / static_cast<double>(num_steps);
-      double yaw = step * angle_to_goal;
-      geometry_msgs::msg::PoseStamped next_pose;
-      next_pose.header.frame_id = costmap_ros_->getBaseFrameID();
-      next_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(yaw);
-      geometry_msgs::msg::PoseStamped costmap_pose;
-      tf2::doTransform(next_pose, costmap_pose, costmap_transform);
-      if (inCollision(
-          costmap_pose.pose.position.x, costmap_pose.pose.position.y,
-          tf2::getYaw(costmap_pose.pose.orientation)))
-      {
-        collision_free = false;
-        break;
-      }
-    }
-
-    // if (collision_free) {
-    //   cmd_vel.twist.linear.x = 0.0; // 선속도 확실히 0
-    //   cmd_vel.twist.angular.z = target_vel;
-    //   return cmd_vel; // 회전 명령 리턴
-    // }
-    // 충돌 감지 시 아래 로직으로 떨어져서 회피 시도 (혹은 예외 발생)
-  
-      if (collision_free) {
+        if (collision_free) {
             target_cmd.twist.angular.z = target_vel;
             cmd_found = true;
         }
-
-  }
+    } // <--- [핵심 수정] 여기서 닫혀야 합니다! (이 괄호가 빠져 있었습니다)
+  } // <--- if (enter_rotation_mode) 블록 종료
 
   // =================================================================================
   // [Phase 2] XY 안정화 모드 (XY Stabilizing Logic)
