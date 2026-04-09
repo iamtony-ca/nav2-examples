@@ -195,6 +195,7 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
       costmap_ros_->getGlobalFrameID(), costmap_ros_->getBaseFrameID(),
       tf2::TimePointZero);
   } catch (tf2::TransformException & ex) {
+    RCLCPP_ERROR(logger_, "Could not transform %s to %s", costmap_ros_->getBaseFrameID().c_str(), costmap_ros_->getGlobalFrameID().c_str());
     throw ex;
   }
 
