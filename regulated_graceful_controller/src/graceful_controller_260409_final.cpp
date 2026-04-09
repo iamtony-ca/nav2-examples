@@ -208,48 +208,49 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
   // ★ [4] 노이즈 강인형 전방 매크로 곡률 예측 감속 (Predictive Slowdown) ★
   // =========================================================================
   double dynamic_v_max = params_->v_linear_max;
-  double preview_distance = 2.0; // 전방 1.5m 스캔
-  double max_macro_curvature = 0.0;
+  if (actual_speed > 3.0) {
+    double preview_distance = 2.0; // 전방 1.5m 스캔
+    double max_macro_curvature = 0.0;
+  
+    if (transformed_plan.poses.size() > 1) {
+        double start_yaw = tf2::getYaw(transformed_plan.poses[0].pose.orientation);
+  
+        for (size_t i = 1; i < transformed_plan.poses.size(); ++i) {
+            double L = nav2_util::geometry_utils::euclidean_distance(
+                transformed_plan.poses[0].pose, transformed_plan.poses[i].pose);
+            
+            if (L > preview_distance) break;
+            // [핵심] 0.3m 이내의 점들은 그리드 노이즈 방지를 위해 스킵!
+            if (L < 0.3) continue; 
+  
+            double pt_yaw = tf2::getYaw(transformed_plan.poses[i].pose.orientation);
+            double yaw_diff = std::abs(angles::shortest_angular_distance(start_yaw, pt_yaw));
+  
+            double macro_curvature = yaw_diff / L;
+            if (macro_curvature > max_macro_curvature) {
+                max_macro_curvature = macro_curvature;
+            }
+        }
+    }
 
-  if (transformed_plan.poses.size() > 1) {
-      double start_yaw = tf2::getYaw(transformed_plan.poses[0].pose.orientation);
-
-      for (size_t i = 1; i < transformed_plan.poses.size(); ++i) {
-          double L = nav2_util::geometry_utils::euclidean_distance(
-              transformed_plan.poses[0].pose, transformed_plan.poses[i].pose);
-          
-          if (L > preview_distance) break;
-          // [핵심] 0.3m 이내의 점들은 그리드 노이즈 방지를 위해 스킵!
-          if (L < 0.3) continue; 
-
-          double pt_yaw = tf2::getYaw(transformed_plan.poses[i].pose.orientation);
-          double yaw_diff = std::abs(angles::shortest_angular_distance(start_yaw, pt_yaw));
-
-          double macro_curvature = yaw_diff / L;
-          if (macro_curvature > max_macro_curvature) {
-              max_macro_curvature = macro_curvature;
-          }
-      }
+    // 예측된 커브가 심하면 목표 최고 속도 상한을 미리 낮춤
+    double curvature_threshold1 = 1.35; // 약 1.0m 앞 타겟이 25도 이상 틀어져 있을 때 개입
+    double curvature_threshold2 = 0.9; // 약 1.0m 앞 타겟이 25도 이상 틀어져 있을 때 개입
+    double curvature_threshold3 = 0.45; // 약 1.0m 앞 타겟이 25도 이상 틀어져 있을 때 개입
+  
+    if (max_macro_curvature > curvature_threshold1) {
+        double preview_slowdown = (max_macro_curvature - curvature_threshold1) * 0.1; // 0.1는 감속 강도 Gain
+        dynamic_v_max = std::max(params_->v_linear_min, dynamic_v_max - preview_slowdown);
+    }
+    else if (max_macro_curvature > curvature_threshold2) {
+        double preview_slowdown = (max_macro_curvature - curvature_threshold2) * 0.05; // 0.4는 감속 강도 Gain
+        dynamic_v_max = std::max(params_->v_linear_min, dynamic_v_max - preview_slowdown);
+    }
+    else if (max_macro_curvature > curvature_threshold3) {
+        double preview_slowdown = (max_macro_curvature - curvature_threshold3) * 0.02; // 0.4는 감속 강도 Gain
+        dynamic_v_max = std::max(params_->v_linear_min, dynamic_v_max - preview_slowdown);
+    }
   }
-
-  // 예측된 커브가 심하면 목표 최고 속도 상한을 미리 낮춤
-  double curvature_threshold1 = 1.35; // 약 1.0m 앞 타겟이 25도 이상 틀어져 있을 때 개입
-  double curvature_threshold2 = 0.9; // 약 1.0m 앞 타겟이 25도 이상 틀어져 있을 때 개입
-  double curvature_threshold3 = 0.45; // 약 1.0m 앞 타겟이 25도 이상 틀어져 있을 때 개입
-
-  if (max_macro_curvature > curvature_threshold1) {
-      double preview_slowdown = (max_macro_curvature - curvature_threshold1) * 0.1; // 0.1는 감속 강도 Gain
-      dynamic_v_max = std::max(params_->v_linear_min, dynamic_v_max - preview_slowdown);
-  }
-  else if (max_macro_curvature > curvature_threshold2) {
-      double preview_slowdown = (max_macro_curvature - curvature_threshold2) * 0.05; // 0.4는 감속 강도 Gain
-      dynamic_v_max = std::max(params_->v_linear_min, dynamic_v_max - preview_slowdown);
-  }
-  else if (max_macro_curvature > curvature_threshold3) {
-      double preview_slowdown = (max_macro_curvature - curvature_threshold3) * 0.02; // 0.4는 감속 강도 Gain
-      dynamic_v_max = std::max(params_->v_linear_min, dynamic_v_max - preview_slowdown);
-  }
-
   
   // =========================================================================
   // [5] 글로벌 목적지 감속 (Distance Slowdown) 및 컨트롤러 주입
