@@ -110,3 +110,75 @@ if (std::abs(limited_w) > std::abs(max_w_limit)) {
 
       // [수정 핵심 2] 파라미터 최대치 동기화 축소 (비율 유지 클램핑)
       // ... (아래는 지난번 답변의 비율 유지 스케일링 코드 그대로 유지) ...
+
+
+
+
+
+
+
+// -----------------------------------------------------------------------
+  // [2] Goal Tolerance 가져오기
+  // -----------------------------------------------------------------------
+  geometry_msgs::msg::Pose pose_tolerance;
+  geometry_msgs::msg::Twist velocity_tolerance;
+  if (!goal_checker->getTolerances(pose_tolerance, velocity_tolerance)) {
+    RCLCPP_WARN(logger_, "Unable to retrieve goal checker's tolerances!");
+  } else {
+    goal_dist_tolerance_ = pose_tolerance.position.x;
+  }
+
+  // -----------------------------------------------------------------------
+  // [3] 경로 변환 및 거리 계산 (순서를 위로 끌어올림)
+  // -----------------------------------------------------------------------
+  auto transformed_plan = path_handler_->transformGlobalPlan(
+    pose, params_->max_robot_pose_search_dist);
+
+  // Path Integral Distance (경로상 남은 총 거리 - 목적지까지의 진짜 거리!)
+  double dist_to_goal = nav2_util::geometry_utils::calculate_path_length(transformed_plan);
+
+  geometry_msgs::msg::TransformStamped costmap_transform;
+  try {
+    costmap_transform = tf_buffer_->lookupTransform(
+      costmap_ros_->getGlobalFrameID(), costmap_ros_->getBaseFrameID(),
+      tf2::TimePointZero);
+  } catch (tf2::TransformException & ex) {
+    RCLCPP_ERROR(logger_, "Could not transform %s to %s", costmap_ros_->getBaseFrameID().c_str(), costmap_ros_->getGlobalFrameID().c_str());
+    throw ex;
+  }
+
+  // Euclidean Distance & Angle (물리적 직선 거리 및 각도)
+  double dx = pose.pose.position.x - transformed_plan.poses.back().pose.position.x;
+  double dy = pose.pose.position.y - transformed_plan.poses.back().pose.position.y;
+  double euclidean_dist = std::hypot(dx, dy);
+  double angle_to_goal = tf2::getYaw(transformed_plan.poses.back().pose.orientation);
+
+  // =========================================================================
+  // ★ [신규 추가] Steering과 Speed Profile의 분리 (Global Slowdown) ★
+  // =========================================================================
+  double dynamic_v_max = params_->v_linear_max;
+
+  // 목적지까지 남은 거리가 감속 반경(예: 2.0m) 이내로 들어오면 비례 제어 시작
+  if (dist_to_goal < params_->slowdown_radius) {
+      double ratio = dist_to_goal / params_->slowdown_radius; // 1.0 -> 0.0 으로 수렴
+      
+      // 거리에 비례하여 부드럽게 감속 (도착 직전 v_linear_min 보장)
+      dynamic_v_max = params_->v_linear_min + 
+                      (params_->v_linear_max - params_->v_linear_min) * ratio;
+  }
+
+  // Control Law 초기화 및 동적 속도 적용
+  control_law_->setCurvatureConstants(
+    params_->k_phi, params_->k_delta, params_->beta, params_->lambda);
+  
+  // [핵심] 내부 컨트롤러의 지역적 감속 로직은 이중 개입을 막기 위해 0.1m로 무력화!
+  control_law_->setSlowdownRadius(0.1); 
+  
+  // 방금 계산한 '목적지 거리 기반' 최대 속도를 컨트롤러에 주입
+  control_law_->setSpeedLimit(params_->v_linear_min, dynamic_v_max, params_->v_angular_max);
+  // =========================================================================
+
+  // =================================================================================
+  // [핵심 로직] Checker 상태 및 거리에 따른 3단계 모드 결정
+  // =================================================================================
+  // ... (이하 기존 코드 동일하게 유지) ...
