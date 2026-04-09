@@ -415,10 +415,10 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
           // 🎛️ [튜닝 포인트] 좁은 코너에서만 비율 보존 감속 (0.4m 반경 이하)
           double min_radius1 = 0.2;         
           double smoothing_factor1 = 0.25;   
-          double min_radius = 0.3;         
-          double smoothing_factor = 0.1;
-          double min_radius = 0.4;         
-          double smoothing_factor = 0.05;
+          double min_radius2 = 0.3;         
+          double smoothing_factor2 = 0.1;
+          double min_radius3 = 0.4;         
+          double smoothing_factor3 = 0.05;
         
           if (turning_radius < min_radius1) {
               double strict_v = limited_w / kappa;
