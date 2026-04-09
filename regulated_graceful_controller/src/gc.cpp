@@ -182,3 +182,52 @@ if (std::abs(limited_w) > std::abs(max_w_limit)) {
   // [핵심 로직] Checker 상태 및 거리에 따른 3단계 모드 결정
   // =================================================================================
   // ... (이하 기존 코드 동일하게 유지) ...
+
+
+
+
+
+
+
+
+// =========================================================================
+  // ★ [질문자님 아이디어 적용] 전방 곡률 예측형 감속 (Predictive Curvature Slowdown) ★
+  // =========================================================================
+  double preview_distance = 1.5; // 로봇 앞 1.5m까지의 미래 궤적을 미리 스캔
+  double max_curvature_ahead = 0.0;
+  double dist_accumulated = 0.0;
+
+  // 로봇 현재 위치부터 전방으로 Path를 따라가며 꺾임 정도를 검사
+  for (size_t i = 1; i < transformed_plan.poses.size(); ++i) {
+      double d = nav2_util::geometry_utils::euclidean_distance(
+          transformed_plan.poses[i-1].pose, transformed_plan.poses[i].pose);
+      dist_accumulated += d;
+
+      // 설정한 예측 거리(1.5m)까지만 검사하고 빠져나옴
+      if (dist_accumulated > preview_distance) break;
+
+      // 두 경로점 사이의 각도 변화량(Yaw Diff) 계산
+      double yaw1 = tf2::getYaw(transformed_plan.poses[i-1].pose.orientation);
+      double yaw2 = tf2::getYaw(transformed_plan.poses[i].pose.orientation);
+      double yaw_diff = std::abs(angles::shortest_angular_distance(yaw1, yaw2));
+
+      // 단위 거리당 각도 변화량 = 대략적인 곡률(Curvature)
+      if (d > 0.001) {
+          double curvature = yaw_diff / d;
+          if (curvature > max_curvature_ahead) {
+              max_curvature_ahead = curvature; // 전방 1.5m 내에서 가장 심한 커브값 저장
+          }
+      }
+  }
+
+  // 전방에 심한 커브가 기다리고 있다면, 지금부터 미리 목표 최고 속도 자체를 낮춤!
+  double curvature_threshold = 0.5; // 이 값 이상의 커브부터 감속 시작 (직진은 무시)
+  if (max_curvature_ahead > curvature_threshold) {
+      // 커브가 심할수록 속도를 더 많이 깎음 (단, 최소 속도 보장)
+      double preview_slowdown = (max_curvature_ahead - curvature_threshold) * 0.3; // 0.3은 감속 민감도 Gain
+      dynamic_v_max = std::max(params_->v_linear_min, dynamic_v_max - preview_slowdown);
+  }
+  // =========================================================================
+
+  // Control Law 초기화 및 동적 속도 적용 (이하 기존 코드 유지)
+  control_law_->setCurvatureConstants( ... );
