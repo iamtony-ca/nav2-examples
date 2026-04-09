@@ -77,3 +77,36 @@ if (std::abs(limited_w) > std::abs(max_w_limit)) {
   last_cmd_vel_ = final_cmd.twist;
   return final_cmd;
 }
+
+
+
+
+
+
+
+
+if (std::abs(limited_w) > std::abs(max_w_limit)) {
+          limited_w = max_w_limit;
+          
+          // 회전 반경(Turning Radius) 계산 (kappa = 1.0 이면 반경 1m)
+          double turning_radius = 100.0;
+          if (std::abs(kappa) > 0.001) turning_radius = 1.0 / std::abs(kappa);
+          
+          // ==========================================================
+          // 🎛️ [튜닝 포인트] 곡률 기반 감속 완화 (Curvature Smoothing)
+          // ==========================================================
+          double min_radius = 1.0;         // 개입 기준 반경 (1.0m 이하의 급커브에서만 감속)
+          double smoothing_factor = 0.5;   // 감속 강도 (1.0: 확 깎음 / 0.0: 안 깎고 밀림)
+
+          if (turning_radius < min_radius) {
+              // 1. 수학적으로 궤적을 100% 지키기 위해 필요한 (많이 깎인) 선속도
+              double strict_v = limited_w / kappa; 
+              
+              // 2. 확 깎지 않고, 원래 가려던 속도(limited_v)와 혼합하여 부드럽게 타협 (Blending)
+              limited_v = (strict_v * smoothing_factor) + (limited_v * (1.0 - smoothing_factor));
+          }
+          // ==========================================================
+      }
+
+      // [수정 핵심 2] 파라미터 최대치 동기화 축소 (비율 유지 클램핑)
+      // ... (아래는 지난번 답변의 비율 유지 스케일링 코드 그대로 유지) ...
