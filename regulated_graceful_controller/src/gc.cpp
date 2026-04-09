@@ -189,45 +189,43 @@ if (std::abs(limited_w) > std::abs(max_w_limit)) {
 
 
 
-
 // =========================================================================
-  // ★ [질문자님 아이디어 적용] 전방 곡률 예측형 감속 (Predictive Curvature Slowdown) ★
+  // ★ [수정됨] 노이즈에 강인한 매크로(Macro) 전방 곡률 예측 감속 ★
   // =========================================================================
-  double preview_distance = 1.5; // 로봇 앞 1.5m까지의 미래 궤적을 미리 스캔
-  double max_curvature_ahead = 0.0;
-  double dist_accumulated = 0.0;
+  double preview_distance = 1.5; // 로봇 앞 1.5m까지 스캔
+  double max_macro_curvature = 0.0;
+  
+  if (transformed_plan.poses.size() > 1) {
+      // 로봇의 현재(또는 경로 시작점) 방위각
+      double start_yaw = tf2::getYaw(transformed_plan.poses[0].pose.orientation);
 
-  // 로봇 현재 위치부터 전방으로 Path를 따라가며 꺾임 정도를 검사
-  for (size_t i = 1; i < transformed_plan.poses.size(); ++i) {
-      double d = nav2_util::geometry_utils::euclidean_distance(
-          transformed_plan.poses[i-1].pose, transformed_plan.poses[i].pose);
-      dist_accumulated += d;
+      for (size_t i = 1; i < transformed_plan.poses.size(); ++i) {
+          // 시작점으로부터의 직선 거리 (L)
+          double L = nav2_util::geometry_utils::euclidean_distance(
+              transformed_plan.poses[0].pose, transformed_plan.poses[i].pose);
+          
+          if (L > preview_distance) break;
+          
+          // [핵심 해결책] 노이즈 방지를 위해 0.3m 이내의 너무 가까운 점은 곡률 검사에서 제외!
+          if (L < 0.3) continue; 
 
-      // 설정한 예측 거리(1.5m)까지만 검사하고 빠져나옴
-      if (dist_accumulated > preview_distance) break;
+          double pt_yaw = tf2::getYaw(transformed_plan.poses[i].pose.orientation);
+          double yaw_diff = std::abs(angles::shortest_angular_distance(start_yaw, pt_yaw));
 
-      // 두 경로점 사이의 각도 변화량(Yaw Diff) 계산
-      double yaw1 = tf2::getYaw(transformed_plan.poses[i-1].pose.orientation);
-      double yaw2 = tf2::getYaw(transformed_plan.poses[i].pose.orientation);
-      double yaw_diff = std::abs(angles::shortest_angular_distance(yaw1, yaw2));
-
-      // 단위 거리당 각도 변화량 = 대략적인 곡률(Curvature)
-      if (d > 0.001) {
-          double curvature = yaw_diff / d;
-          if (curvature > max_curvature_ahead) {
-              max_curvature_ahead = curvature; // 전방 1.5m 내에서 가장 심한 커브값 저장
+          // 매크로 곡률 = 총 방위각 변화량 / 총 거리
+          double macro_curvature = yaw_diff / L;
+          if (macro_curvature > max_macro_curvature) {
+              max_macro_curvature = macro_curvature;
           }
       }
   }
 
-  // 전방에 심한 커브가 기다리고 있다면, 지금부터 미리 목표 최고 속도 자체를 낮춤!
-  double curvature_threshold = 0.5; // 이 값 이상의 커브부터 감속 시작 (직진은 무시)
-  if (max_curvature_ahead > curvature_threshold) {
-      // 커브가 심할수록 속도를 더 많이 깎음 (단, 최소 속도 보장)
-      double preview_slowdown = (max_curvature_ahead - curvature_threshold) * 0.3; // 0.3은 감속 민감도 Gain
+  // 매크로 곡률 기반 목표 최고 속도 동적 감속
+  // (예: 1.0m 앞의 타겟이 약 25도(0.45 rad) 이상 꺾여있을 때부터 개입 시작)
+  double curvature_threshold = 0.45; 
+  if (max_macro_curvature > curvature_threshold) {
+      // 0.4는 감속 민감도(Gain)입니다. 확 줄어들면 이 값을 0.2~0.3으로 낮추세요.
+      double preview_slowdown = (max_macro_curvature - curvature_threshold) * 0.4; 
       dynamic_v_max = std::max(params_->v_linear_min, dynamic_v_max - preview_slowdown);
   }
   // =========================================================================
-
-  // Control Law 초기화 및 동적 속도 적용 (이하 기존 코드 유지)
-  control_law_->setCurvatureConstants( ... );
