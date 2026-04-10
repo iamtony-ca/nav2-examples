@@ -18,13 +18,13 @@
 #include "angles/angles.h"
 #include "nav2_core/controller_exceptions.hpp"
 #include "nav2_util/geometry_utils.hpp"
-#include "regulated_graceful_controller/graceful_controller.hpp"
+#include "advanced_graceful_controller/graceful_controller.hpp"
 #include "nav2_costmap_2d/costmap_filters/filter_values.hpp"
 #include "nav2_stable_stopped_goal_checker/stable_stopped_goal_checker.hpp"
 
 
 
-namespace regulated_graceful_controller
+namespace advanced_graceful_controller
 {
 
 void GracefulController::configure(
@@ -94,7 +94,7 @@ void GracefulController::activate()
 {
   RCLCPP_INFO(
     logger_,
-    "Activating controller: %s of type regulated_graceful_controller::GracefulController",
+    "Activating controller: %s of type advanced_graceful_controller::GracefulController",
     plugin_name_.c_str());
   transformed_plan_pub_->on_activate();
   local_plan_pub_->on_activate();
@@ -111,7 +111,7 @@ void GracefulController::deactivate()
 {
   RCLCPP_INFO(
     logger_,
-    "Deactivating controller: %s of type regulated_graceful_controller::GracefulController",
+    "Deactivating controller: %s of type advanced_graceful_controller::GracefulController",
     plugin_name_.c_str());
   transformed_plan_pub_->on_deactivate();
   local_plan_pub_->on_deactivate();
@@ -208,7 +208,7 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
   // ★ [4] 노이즈 강인형 전방 매크로 곡률 예측 감속 (Predictive Slowdown) ★
   // =========================================================================
   double dynamic_v_max = params_->v_linear_max;
-  if (actual_speed > 3.0) {
+  if (actual_speed > 0.25) {
     double preview_distance = 2.0; // 전방 1.5m 스캔
     double max_macro_curvature = 0.0;
   
@@ -360,7 +360,7 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
       nav_msgs::msg::Path local_plan;
       if (simulateTrajectory(target_pose, costmap_transform, local_plan, target_cmd, reversing)) {
         motion_target_pub_->publish(target_pose);
-        auto slowdown_marker = regulated_graceful_controller::createSlowdownMarker(target_pose, params_->slowdown_radius);
+        auto slowdown_marker = advanced_graceful_controller::createSlowdownMarker(target_pose, params_->slowdown_radius);
         slowdown_pub_->publish(slowdown_marker);
         local_plan.header = transformed_plan.header;
         local_plan_pub_->publish(local_plan);
@@ -670,9 +670,9 @@ void GracefulController::validateOrientations(
   }
 }
 
-}  // namespace regulated_graceful_controller
+}  // namespace advanced_graceful_controller
 
 // Register this controller as a nav2_core plugin
 PLUGINLIB_EXPORT_CLASS(
-  regulated_graceful_controller::GracefulController,
+  advanced_graceful_controller::GracefulController,
   nav2_core::Controller)

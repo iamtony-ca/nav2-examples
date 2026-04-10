@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef REGULATED_GRACEFUL_CONTROLLER__GRACEFUL_CONTROLLER_HPP_
-#define REGULATED_GRACEFUL_CONTROLLER__GRACEFUL_CONTROLLER_HPP_
+#ifndef ADVANCED_GRACEFUL_CONTROLLER__GRACEFUL_CONTROLLER_HPP_
+#define ADVANCED_GRACEFUL_CONTROLLER__GRACEFUL_CONTROLLER_HPP_
 
 #include <string>
 #include <limits>
@@ -21,34 +21,35 @@
 #include <memory>
 #include <algorithm>
 #include <mutex>
+#include <cmath>
 
 #include "nav2_core/controller.hpp"
 #include "nav2_costmap_2d/footprint_collision_checker.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "pluginlib/class_loader.hpp"
 #include "pluginlib/class_list_macros.hpp"
-#include "regulated_graceful_controller/path_handler.hpp"
-#include "regulated_graceful_controller/parameter_handler.hpp"
-#include "regulated_graceful_controller/smooth_control_law.hpp"
-#include "regulated_graceful_controller/utils.hpp"
+#include "advanced_graceful_controller/path_handler.hpp"
+#include "advanced_graceful_controller/parameter_handler.hpp"
+#include "advanced_graceful_controller/smooth_control_law.hpp"
+#include "advanced_graceful_controller/utils.hpp"
 
-namespace regulated_graceful_controller
+namespace advanced_graceful_controller
 {
 
 /**
- * @class regulated_graceful_controller::GracefulController
+ * @class advanced_graceful_controller::GracefulController
  * @brief Graceful controller plugin
  */
 class GracefulController : public nav2_core::Controller
 {
 public:
   /**
-   * @brief Constructor for regulated_graceful_controller::GracefulController
+   * @brief Constructor for advanced_graceful_controller::GracefulController
    */
   GracefulController() = default;
 
   /**
-   * @brief Destructor for regulated_graceful_controller::GracefulController
+   * @brief Destructor for advanced_graceful_controller::GracefulController
    */
   ~GracefulController() override = default;
 
@@ -118,12 +119,16 @@ protected:
    * @param backward Flag to indicate if the robot is moving backward
    * @return true if the trajectory is collision free, false otherwise
    */
+
+// [추가] 시뮬레이션 시 현재 속도를 알아야 가감속을 반영할 수 있으므로 매개변수 추가
   bool simulateTrajectory(
     const geometry_msgs::msg::PoseStamped & motion_target,
     const geometry_msgs::msg::TransformStamped & costmap_transform,
     nav_msgs::msg::Path & trajectory,
     geometry_msgs::msg::TwistStamped & cmd_vel,
     bool backward);
+
+
 
   /**
    * @brief Rotate the robot to face the motion target with maximum angular velocity.
@@ -157,6 +162,19 @@ protected:
    */
   void validateOrientations(std::vector<geometry_msgs::msg::PoseStamped> & path);
 
+// [추가] 1D 가감속 제한 도우미 함수
+  double applyKinematicLimits(
+    double v_current, double v_target, 
+    double max_acc, double max_decel, double dt);
+// [추가] 이전 주기에 컨트롤러가 발행한 속도 명령값 저장용
+  geometry_msgs::msg::Twist last_cmd_vel_;
+
+  // [추가] dt 계산용 타이머
+  rclcpp::Clock::SharedPtr clock_;
+  rclcpp::Time last_control_time_;
+
+
+
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::string plugin_name_;
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros_;
@@ -177,11 +195,11 @@ protected:
   motion_target_pub_;
   std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::Marker>>
   slowdown_pub_;
-  std::unique_ptr<regulated_graceful_controller::PathHandler> path_handler_;
-  std::unique_ptr<regulated_graceful_controller::ParameterHandler> param_handler_;
-  std::unique_ptr<regulated_graceful_controller::SmoothControlLaw> control_law_;
+  std::unique_ptr<advanced_graceful_controller::PathHandler> path_handler_;
+  std::unique_ptr<advanced_graceful_controller::ParameterHandler> param_handler_;
+  std::unique_ptr<advanced_graceful_controller::SmoothControlLaw> control_law_;
 };
 
-}  // namespace regulated_graceful_controller
+}  // namespace advanced_graceful_controller
 
-#endif  // REGULATED_GRACEFUL_CONTROLLER__GRACEFUL_CONTROLLER_HPP_
+#endif  // ADVANCED_GRACEFUL_CONTROLLER__GRACEFUL_CONTROLLER_HPP_
