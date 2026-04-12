@@ -1,0 +1,17 @@
+common_settings:
+  machine_id: 1
+  type_id: "turtle"
+  robot_ids: ["robot_001", "robot_002"]
+
+  robot_001:
+    type_id: "TYPE_A_TURTLE"
+    machine_id: 11
+    robot_radius: 0.0
+    footprint: "[[0.25, 0.25], [0.25, -0.25], [-0.25, -0.25], [-0.25, 0.25]]"
+
+  robot_002:
+    type_id: "TYPE_B_TURTLE"
+    machine_id: 5
+    robot_radius: 0.0
+    footprint: "[[0.25, 0.25], [0.25, -0.25], [-0.25, -0.25], [-0.25, 0.25]]"
+
