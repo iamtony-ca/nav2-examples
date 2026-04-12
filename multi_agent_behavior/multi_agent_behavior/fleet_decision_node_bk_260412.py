@@ -26,8 +26,6 @@ class MovingCommand(IntEnum):
     WAIT_OHTHER_AMR = 2  # 30초/450초 대기 후 재탐색
     WAIT_ABNORMAL = 3    # 30초/300초 대기 후 재탐색
     REROUTE = 4          # 즉시 재라우팅 요청
-    WAIT_SIMPLE_REPLAN = 5  # ID 큰 로봇: 대기 후 Replan & Resume
-    WAIT_SIMPLE_RESUME = 6  # ID 작은 로봇: 대기 후 단순 Resume
 
 class MovingStopType(IntEnum):
     TYPE_NONE = 0
@@ -147,14 +145,6 @@ class FleetDecisionNode(Node):
         self.replan_flag_wait_sec = self.get_parameter("replan_flag_wait_sec").value
         self._replan_flag_timer = None
         
-
-        # [수정] Simple Mode 파라미터화 (하드코딩 방지)
-        self.declare_parameter("simple_mode", False)
-        self.declare_parameter("wait_simple_mode_sec", 5.0)
-        self.simple_mode = self.get_parameter("simple_mode").value
-        self.wait_simple_mode = self.get_parameter("wait_simple_mode_sec").value
-
-
         # Internal State
         self._is_reroute_status = RerouteStatus.NONE
         self._pre_moving_stop_type = MovingStopType.TYPE_NONE
@@ -233,8 +223,6 @@ class FleetDecisionNode(Node):
         self.get_logger().info(f" - topic_cmd_resume        : {self.get_parameter('topic_cmd_resume').value}")
         self.get_logger().info(f" - topic_cmd_stop          : {self.get_parameter('topic_cmd_stop').value}")
         self.get_logger().info(f" - replan_flag_wait_sec          : {self.get_parameter('replan_flag_wait_sec').value}")
-        self.get_logger().info(f" - simple_mode               : {self.get_parameter('simple_mode').value}")
-        self.get_logger().info(f" - wait_simple_mode_sec      : {self.get_parameter('wait_simple_mode_sec').value}")
 
         self.get_logger().info("====================================================")
 
@@ -386,20 +374,7 @@ class FleetDecisionNode(Node):
         
         n_check_complete = MovingCommand.WAIT
         moving_stop_type = MovingStopType.TYPE_NONE
-
-# ---------------------------------------------------------
-        # [수정] Simple Mode 로직: ID 비교에 따른 분기
-        # ---------------------------------------------------------
-        if self.simple_mode:
-            if self.my_id > target_id: 
-                # ID가 큰 녀석: 대기 후 Replan 해서 감
-                return MovingCommand.WAIT_SIMPLE_REPLAN, MovingStopType.TYPE_4
-            else:
-                # ID가 작은 녀석: 대기만 하고 바로 Resume (Replan 안 함)
-                return MovingCommand.WAIT_SIMPLE_RESUME, MovingStopType.TYPE_4
-        # ---------------------------------------------------------
-
-
+        
         if self.use_reroute and self._is_reroute_status == RerouteStatus.PREPARE:
             self._is_reroute_status = RerouteStatus.EXECUTE
 
@@ -618,39 +593,22 @@ class FleetDecisionNode(Node):
             wait_time = self.wait_abnormal_long_sec if self.use_reroute else self.wait_abnormal_short_sec
         elif command == MovingCommand.WAIT: # TYPE_11
              wait_time = self.wait_obstacle_sec
-        # [수정] Simple Mode 시간 매핑 통합
-        elif command in [MovingCommand.WAIT_SIMPLE_REPLAN, MovingCommand.WAIT_SIMPLE_RESUME]:    
-            wait_time = self.wait_simple_mode             
 
-# ---------------------------------------------------------
-        # [수정] 공통 타이머 로직 (중복 if문 제거, 여기서 통합 처리)
-        # ---------------------------------------------------------
+        # [리뷰 반영] TYPE_11 포함 모든 WAIT 커맨드에 대해 타이머 적용
         if not self.wait_manager.is_waiting:
-            # 1. 처음 감지됨 -> 대기 시작
             self.wait_manager.start_wait(wait_time, stop_type)
             self._publish_stop()
             self._publish_state(state_str + f" -> WAIT({wait_time}s)")
         else:
             if self.wait_manager.check_finished():
-                # 2. 타임아웃 발생 (대기 시간 끝)
+                self.get_logger().warn(f"Wait finished for {stop_type.name}. Requesting Replan.")
                 self.wait_manager.reset()
-                
-                # --- 명령어에 따라 Replan 여부 다르게 동작 ---
-                if command == MovingCommand.WAIT_SIMPLE_RESUME:
-                    # [ID 작은 로봇] Replan 없이 단순 Resume
-                    self.get_logger().warn(f"Wait finished for {stop_type.name}. RESUME ONLY (Simple Mode).")
-                    self.pub_cmd_resume.publish(Bool(data=False))
-                    self._publish_state(state_str + " -> TIMEOUT RESUME ONLY")
-                else:
-                    # [ID 큰 로봇 및 기본 동작] Replan 요청 후 Resume
-                    self.get_logger().warn(f"Wait finished for {stop_type.name}. Requesting Replan.")
-                    self._publish_replan()
-                    self.pub_cmd_resume.publish(Bool(data=False))
-                    self._publish_state(state_str + " -> TIMEOUT REPLAN & RESUME")
+                self._publish_replan()
+                # BT의 Stop 노드를 풀기 위해 Resume 토픽도 같이 발행!
+                self.pub_cmd_resume.publish(Bool(data=False))
+                self._publish_state(state_str + " -> TIMEOUT REPLAN & RESUME")
             else:
-                # 3. 대기 중 -> 계속 STOP 발행
                 self._publish_stop()
-
 
     # ------------------------------------------------------------------
     # [수정] 장애물 없음 처리 (RUN vs RESUME 분기)

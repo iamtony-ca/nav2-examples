@@ -11,6 +11,9 @@ fleet_decision_node:
     wait_abnormal_long_sec: 300.0   # TYPE 2 (Reroute ON)
     wait_abnormal_short_sec: 30.0   # TYPE 2 (Reroute OFF)
     wait_obstacle_sec: 15.0         # TYPE 11 (General Obstacle)
+    
+    simple_mode: false  # [수정] Simple Mode 활성화 여부 (true/false)
+    wait_simple_mode_sec: 5.0  # [수정] Simple Mode에서 대기하는 시간 (초)
 
     # --- Thresholds ---
     replan_ignore_sec_after_agent: 0.5
