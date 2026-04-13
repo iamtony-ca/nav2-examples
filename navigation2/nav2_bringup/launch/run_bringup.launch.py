@@ -1,18 +1,24 @@
 import os
 import yaml
 import tempfile
+import copy  # [추가] 1. 깊은 복사를 위한 copy 모듈 임포트
+
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 
+
+# [수정] 2. 함수 내부에 copy.deepcopy() 적용
 def replace_keys_recursively(data, rewrites):
     if isinstance(data, dict):
         for k, v in data.items():
             if k in rewrites:
-                data[k] = rewrites[k]
+                # 메모리 참조를 끊어 똑같은 데이터를 넣어도 Alias(*, &)가 생기지 않도록 강제함
+                data[k] = copy.deepcopy(rewrites[k])
             elif isinstance(v, dict):
                 replace_keys_recursively(v, rewrites)
+
 
 def generate_launch_description():
     bringup_dir = get_package_share_directory('amr_bringup')
