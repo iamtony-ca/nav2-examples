@@ -40,10 +40,10 @@ set(dependencies
 
 # [변경 2] 내부 라이브러리 타겟 이름을 변경 (충돌 방지 핵심!)
 # 기존: add_library(smooth_control_law SHARED src/smooth_control_law.cpp)
-add_library(regulated_smooth_control_law SHARED src/smooth_control_law.cpp)
+add_library(advanced_smooth_control_law SHARED src/smooth_control_law.cpp)
 
 # [변경 3] 의존성 타겟 이름도 변경된 이름으로 적용
-ament_target_dependencies(regulated_smooth_control_law ${dependencies})
+ament_target_dependencies(advanced_smooth_control_law ${dependencies})
 
 # Add Graceful Controller
 # [변경 4] 메인 라이브러리 이름 변수 설정
@@ -58,12 +58,12 @@ add_library(${library_name} SHARED
 
 # [변경 5] 링크할 라이브러리 이름을 위에서 변경한 이름으로 수정
 # 기존: target_link_libraries(${library_name} smooth_control_law)
-target_link_libraries(${library_name} regulated_smooth_control_law)
+target_link_libraries(${library_name} advanced_smooth_control_law)
 
 ament_target_dependencies(${library_name} ${dependencies})
 
 # [변경 6] 인스톨 타겟 이름 수정
-install(TARGETS regulated_smooth_control_law ${library_name}
+install(TARGETS advanced_smooth_control_law ${library_name}
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
@@ -83,7 +83,7 @@ endif()
 ament_export_include_directories(include)
 
 # [변경 7] export 라이브러리 이름 수정
-ament_export_libraries(regulated_smooth_control_law ${library_name})
+ament_export_libraries(advanced_smooth_control_law ${library_name})
 ament_export_dependencies(${dependencies})
 
 # [변경 8] 플러그인 XML 파일명 변경 (파일도 실제로 이름 바꿨는지 확인 필요)
