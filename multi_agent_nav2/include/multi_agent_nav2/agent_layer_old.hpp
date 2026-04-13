@@ -6,14 +6,17 @@
 #include <utility>
 #include <algorithm>
 #include <cmath>
-#include <map>  // [NEW]
+#include <map>
+#include <memory> // unique_ptr
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 
 #include <nav2_costmap_2d/layer.hpp>
-#include <nav2_costmap_2d/layered_costmap.hpp>  // add
+#include <nav2_costmap_2d/layered_costmap.hpp>
 #include <nav2_costmap_2d/costmap_2d.hpp>
+// [NEW] 시각화 토픽 발행을 위해 추가
+#include <nav2_costmap_2d/costmap_2d_publisher.hpp> 
 
 #include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/polygon_stamped.hpp>
@@ -23,8 +26,6 @@
 #include <multi_agent_msgs/msg/agent_layer_meta_array.hpp>
 #include <multi_agent_msgs/msg/agent_status.hpp>
 
-
-// [NEW] Add TF2 headers for transformation
 #include <tf2_ros/buffer.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
@@ -59,6 +60,10 @@ private:
   rclcpp::Subscription<multi_agent_msgs::msg::MultiAgentInfoArray>::SharedPtr sub_;
   rclcpp::Publisher<multi_agent_msgs::msg::AgentLayerMetaArray>::SharedPtr meta_pub_;
 
+  // [NEW] 시각화 전용: 마스터 그리드와 별개로 Agent만 그릴 캔버스 및 발행기
+  nav2_costmap_2d::Costmap2D viz_costmap_;
+  std::unique_ptr<nav2_costmap_2d::Costmap2DPublisher> costmap_pub_;
+
   // last data
   std::mutex data_mtx_;
   multi_agent_msgs::msg::MultiAgentInfoArray::SharedPtr last_infos_;
@@ -77,69 +82,57 @@ private:
   unsigned char waiting_cost_{200};
   int         manual_cost_bias_{30};
 
-  // [CHANGED] 등방성 팽창과 전방 스미어를 분리
-  double      dilation_m_{0.05};          // 등방성(모든 방향) 기본 여유
-  double      forward_smear_m_{0.25};     // 이동 중일 때만 전방(+x)으로 늘릴 길이
-  double      sigma_k_{2.0};              // pos_std_m 가중
+  double      dilation_m_{0.05};          
+  double      forward_smear_m_{0.25};     
+  double      sigma_k_{2.0};              
 
   bool        publish_meta_{true};
   int         meta_stride_{3};
   int         freshness_timeout_ms_{800};
   int         max_poses_{40};
   bool        qos_reliable_{true};
-// [NEW] To support rolling window
-  // bool        rolling_window_{false};
 
   // bounds cache for this cycle
   double touch_min_x_{0.0}, touch_min_y_{0.0}, touch_max_x_{0.0}, touch_max_y_{0.0};
   bool   touched_{false};
 
-// [NEW] Cached robot pose for updateCosts
+  // Cached robot pose for updateCosts
   double cached_robot_x_{0.0};
   double cached_robot_y_{0.0};
 
-// [NEW] Map to store footprint data from YAML
+  // Map to store footprint data from YAML
   struct AgentFootprintData
   {
-    // We use Point32 directly to match dilateFootprintDirectional helper
     std::vector<geometry_msgs::msg::Point32> points;
     double radius{0.0};
     bool use_radius{true};
   };
-  // Map from machine_id to its footprint/radius data
   std::map<uint16_t, AgentFootprintData> agent_footprints_;
 
-  // [NEW] Helper to get footprint for a given agent
+  // Helpers
   geometry_msgs::msg::PolygonStamped 
   getFootprintForAgent(const multi_agent_msgs::msg::MultiAgentInfo & a);
 
-  // [NEW] Helper to convert nav2_costmap_2d::makeFootprint... results
   static std::vector<geometry_msgs::msg::Point32> toPoint32(
       const std::vector<geometry_msgs::msg::Point>& points);
 
-
-// [NEW] Helper for transforming agent data to the costmap's frame
   bool transformAgentInfo(
       const multi_agent_msgs::msg::MultiAgentInfo & agent_in_map,
       multi_agent_msgs::msg::MultiAgentInfo & agent_in_costmap_frame,
       const std::string & costmap_frame) const;
 
-
-  // helpers
   void infosCallback(const multi_agent_msgs::msg::MultiAgentInfoArray::SharedPtr msg);
   bool isSelf(const multi_agent_msgs::msg::MultiAgentInfo & a) const;
   bool stale(const rclcpp::Time & stamp) const;
 
-  // [CHANGED] forward_len 인자를 추가
   void rasterizeAgentPath(const multi_agent_msgs::msg::MultiAgentInfo & a,
                           nav2_costmap_2d::Costmap2D * grid,
                           std::vector<std::pair<unsigned int,unsigned int>> & meta_hits);
 
-  // [CHANGED] 전방 스미어 길이를 인자로 전달
   void fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
                        const geometry_msgs::msg::Pose & pose,
                        double extra_dilation_m,
-                       double forward_len_m, // [NEW]
+                       double forward_len_m,
                        nav2_costmap_2d::Costmap2D * grid,
                        unsigned char cost,
                        std::vector<std::pair<unsigned int,unsigned int>> * meta_hits = nullptr);
@@ -147,12 +140,10 @@ private:
   static bool pointInPolygon(const std::vector<geometry_msgs::msg::Point> & poly,
                              double x, double y);
 
-  // [CHANGED] 등방성 팽창만 반환 (전방 스미어 제외)
   double computeDilation(const multi_agent_msgs::msg::MultiAgentInfo & a) const;
 
   unsigned char computeCost(const multi_agent_msgs::msg::MultiAgentInfo & a) const;
 
-  // [NEW] 이동상태 판별 헬퍼
   static inline bool isMovingPhase(uint8_t phase)
   {
     using S = multi_agent_msgs::msg::AgentStatus;
