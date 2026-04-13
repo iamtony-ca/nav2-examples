@@ -41,7 +41,12 @@ public:
   void onInitialize() override;
   void activate() override;
   void deactivate() override;
-  void reset() override { current_ = true; }
+//reset()을 아래와 같이 수정
+  void reset() override { 
+    current_ = true; 
+    last_touched_ = false; 
+    touched_ = false; 
+  }
 
   // costmap callbacks
   void updateBounds(double robot_x, double robot_y, double robot_yaw,
@@ -96,9 +101,16 @@ private:
   double touch_min_x_{0.0}, touch_min_y_{0.0}, touch_max_x_{0.0}, touch_max_y_{0.0};
   bool   touched_{false};
 
+// [추가된 부분] 이전 사이클의 Bounds (잔상을 지우기 위한 캐시)
+  double last_min_x_{1e9}, last_min_y_{1e9}, last_max_x_{-1e9}, last_max_y_{-1e9};
+  bool   last_touched_{false};
+
   // Cached robot pose for updateCosts
   double cached_robot_x_{0.0};
   double cached_robot_y_{0.0};
+
+// [1] TF 시간차 방지를 위한 캐시 컨테이너
+  std::vector<multi_agent_msgs::msg::MultiAgentInfo> transformed_agents_;
 
   // Map to store footprint data from YAML
   struct AgentFootprintData
