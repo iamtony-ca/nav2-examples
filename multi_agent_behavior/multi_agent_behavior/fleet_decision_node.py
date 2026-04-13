@@ -603,7 +603,9 @@ class FleetDecisionNode(Node):
 
             # 2. Resume 요청 (무조건 발행 - BT Stop 해제용)
             # Reroute 토픽은 아껴도 Resume 토픽은 계속 보내줘야 로봇이 멈추지 않음
-            self.pub_cmd_resume.publish(Bool(data=False))
+            # [버그 수정] Replan Flag 5초 대기 중이 아닐 때만 출발 (Pause=False) 허용
+            if self._replan_flag_timer is None:
+                self.pub_cmd_resume.publish(Bool(data=False))
             
             self._publish_state(state_str + " -> REROUTE & RESUME")
             return
@@ -639,13 +641,19 @@ class FleetDecisionNode(Node):
                 if command == MovingCommand.WAIT_SIMPLE_RESUME:
                     # [ID 작은 로봇] Replan 없이 단순 Resume
                     self.get_logger().warn(f"Wait finished for {stop_type.name}. RESUME ONLY (Simple Mode).")
-                    self.pub_cmd_resume.publish(Bool(data=False))
+                    
+                    # [버그 수정] Replan Flag 5초 대기 중이 아닐 때만 출발 허용
+                    if self._replan_flag_timer is None:
+                        self.pub_cmd_resume.publish(Bool(data=False))
                     self._publish_state(state_str + " -> TIMEOUT RESUME ONLY")
                 else:
                     # [ID 큰 로봇 및 기본 동작] Replan 요청 후 Resume
                     self.get_logger().warn(f"Wait finished for {stop_type.name}. Requesting Replan.")
                     self._publish_replan()
-                    self.pub_cmd_resume.publish(Bool(data=False))
+                    
+                    # [버그 수정] Replan Flag 5초 대기 중이 아닐 때만 출발 허용
+                    if self._replan_flag_timer is None:
+                        self.pub_cmd_resume.publish(Bool(data=False))
                     self._publish_state(state_str + " -> TIMEOUT REPLAN & RESUME")
             else:
                 # 3. 대기 중 -> 계속 STOP 발행
@@ -658,6 +666,14 @@ class FleetDecisionNode(Node):
     def _handle_no_obstacle(self):
         """ 장애물이 없는 상태 처리: RUN 또는 RESUME """
         
+        # ---------------------------------------------------------
+        # [버그 수정 핵심] 외부 Replan Flag에 의해 5초 대기 중이라면 
+        # 강제로 출발(Resume)하는 것을 차단하고 계속 멈춤(Stop) 유지!
+        # ---------------------------------------------------------
+        if self._replan_flag_timer is not None:
+            self._publish_stop() # 하트비트처럼 계속 멈춤 신호 쏘기
+            return
+
         # 1. 이전에 멈춰있었는가? (MovingStopType이 NONE이 아님)
         if self._pre_moving_stop_type != MovingStopType.TYPE_NONE:
             # [CASE: RESUME] 멈췄다가 출발하는 경우
