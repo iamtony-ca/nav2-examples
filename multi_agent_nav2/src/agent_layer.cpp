@@ -210,6 +210,14 @@ void AgentLayer::onInitialize()
     {
       data.points = toPoint32(footprint_points); 
       data.use_radius = false;
+
+// [NEW] 다각형인 경우 중심점 기준 최대 거리를 구해 bounds 용 radius로 사용
+      double max_dist = 0.0;
+      for (const auto& p : footprint_points) {
+        max_dist = std::max(max_dist, std::hypot(p.x, p.y));
+      }
+      data.radius = max_dist;
+
     } else {
       data.use_radius = true;
       RCLCPP_INFO(logger_, 
@@ -323,17 +331,18 @@ double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo &
     case S::STATUS_WAITING_FOR_SAFETY:
     case S::STATUS_WAITING_FOR_FLOWCONTROL:
     case S::STATUS_WAITING_FOR_ROS_STATUS:
-      r = std::max(r, 0.0);
-      break;
     case S::STATUS_LOADING:
     case S::STATUS_UNLOADING:
     case S::STATUS_UNLOADED:
-    case S::STATUS_LOADED:
+    case S::STATUS_LOADED:    
+      r = std::max(r, 0.0);
+      break;
+
     case S::STATUS_RECOVERING:
     case S::STATUS_UNKNOWN:
     case S::STATUS_MANUAL_RUNNING:
     case S::STATUS_MANUAL_COMPLETE:
-      r = std::max(r, 0.1); 
+      r = std::max(r, 0.05); 
       break;
     default:
       break;
@@ -348,8 +357,25 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
     return;
   }
 
+// [ 1-1] 이번 사이클의 에이전트 리스트 초기화 (stale로 return 되더라도 비워져야 함)
+  transformed_agents_.clear();
+
+
   cached_robot_x_ = robot_x;
   cached_robot_y_ = robot_y;
+
+
+
+// =====================================================================
+  // [핵심 해결책 1] 이전 프레임에 그렸던 영역을 이번 업데이트 영역에 포함
+  // 이렇게 해야 로봇이 빠져나간 과거의 빈 공간이 확실하게 Clear 됩니다.
+  // =====================================================================
+  if (last_touched_) {
+    *min_x = std::min(*min_x, last_min_x_);
+    *min_y = std::min(*min_y, last_min_y_);
+    *max_x = std::max(*max_x, last_max_x_);
+    *max_y = std::max(*max_y, last_max_y_);
+  }
 
   touched_ = false;
   touch_min_x_ =  1e9; touch_min_y_ =  1e9;
@@ -382,31 +408,64 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
       continue;
     }
 
+// [1-2] TF 변환과 ROI 검사를 통과한 안전한 데이터를 저장! (updateCosts에서 재사용)
+    transformed_agents_.push_back(a);
+
+// [NEW] 에이전트의 최대 영역(반경) 계산
+    double max_extent = 0.5; // fallback
+    auto it = agent_footprints_.find(a.machine_id);
+    if (it != agent_footprints_.end()) {
+        max_extent = it->second.radius;
+    }
+
+    // [핵심 해결책 2] 그릴 때와 똑같은 로직의 Dilation, Smear 값을 받아와서 Bounds 확장
+    double actual_dilation = computeDilation(a);
+    double actual_smear = isMovingPhase(a.status.phase) ? forward_smear_m_ : 0.0;
+    max_extent += actual_dilation + actual_smear + 0.1; // 0.1은 여유 마진
+    // Dilation과 Forward smear 길이, 안전 마진을 더함
+    // max_extent += dilation_m_ + forward_smear_m_ + 0.1;
+
+    // 중심점 기준 상하좌우를 max_extent 만큼 빼고 더해서 박스 크기를 키움
     {
       const auto & p = a.current_pose.pose.position;
-      touch_min_x_ = std::min(touch_min_x_, p.x);
-      touch_min_y_ = std::min(touch_min_y_, p.y);
-      touch_max_x_ = std::max(touch_max_x_, p.x);
-      touch_max_y_ = std::max(touch_max_y_, p.y);
+      touch_min_x_ = std::min(touch_min_x_, p.x - max_extent);
+      touch_min_y_ = std::min(touch_min_y_, p.y - max_extent);
+      touch_max_x_ = std::max(touch_max_x_, p.x + max_extent);
+      touch_max_y_ = std::max(touch_max_y_, p.y + max_extent);
       touched_ = true;
     }
 
     const int limit = std::min<int>(a.truncated_path.poses.size(), max_poses_);
     for (int i = 0; i < limit; ++i) {
       const auto & p = a.truncated_path.poses[i].pose.position; 
-      touch_min_x_ = std::min(touch_min_x_, p.x);
-      touch_min_y_ = std::min(touch_min_y_, p.y);
-      touch_max_x_ = std::max(touch_max_x_, p.x);
-      touch_max_y_ = std::max(touch_max_y_, p.y);
+      touch_min_x_ = std::min(touch_min_x_, p.x - max_extent);
+      touch_min_y_ = std::min(touch_min_y_, p.y - max_extent);
+      touch_max_x_ = std::max(touch_max_x_, p.x + max_extent);
+      touch_max_y_ = std::max(touch_max_y_, p.y + max_extent);
       touched_ = true;
     }
   }
+
 
   if (touched_) {
     *min_x = std::min(*min_x, touch_min_x_);
     *min_y = std::min(*min_y, touch_min_y_);
     *max_x = std::max(*max_x, touch_max_x_);
     *max_y = std::max(*max_y, touch_max_y_);
+
+// =====================================================================
+    // [핵심 해결책 2] 현재 계산된 영역을 다음 프레임을 위해 저장(백업)
+    // 약간의 패딩(0.1m)을 주어 회전 시 끝자락에 남는 찌꺼기까지 방지합니다.
+    // =====================================================================
+    last_min_x_ = touch_min_x_ - 0.1;
+    last_min_y_ = touch_min_y_ - 0.1;
+    last_max_x_ = touch_max_x_ + 0.1;
+    last_max_y_ = touch_max_y_ + 0.1;
+    last_touched_ = true;
+  } else {
+    last_touched_ = false;
+
+
   }
 }
 
@@ -481,11 +540,18 @@ void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
       for (size_t k=0, h=n-1; k<n; h=k++) {
         const double xi = poly[k].x, yi = poly[k].y;
         const double xh = poly[h].x, yh = poly[h].y;
+
+
+// [수정됨] if (inside) 없이 무조건 다각형 교차 여부를 검사해야 합니다.
+        // C++의 && 연산자 특성상 앞의 조건이 참일 때만 뒤의 나눗셈을 실행하므로 0으로 나누는 에러는 발생하지 않습니다.
         const bool hit = ((yi > wy) != (yh > wy)) &&
-                         (wx < (xh - xi) * (wy - yi) / std::max(1e-12, (yh - yi)) + xi);
-        if (hit) inside = !inside;
+                         (wx < (xh - xi) * (wy - yi) / (yh - yi) + xi);
+        if (hit) {
+            inside = !inside;
+        }
       }
 
+      // 루프가 끝난 후, 점이 다각형 내부에 있다면 코스트를 찍습니다.
       if (inside) {
         const unsigned char old_raw = grid->getCost(i, j);
         const int old = (old_raw == nav2_costmap_2d::NO_INFORMATION) ? 0 : static_cast<int>(old_raw);
@@ -497,6 +563,8 @@ void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
         if (meta_hits) meta_hits->emplace_back(
             static_cast<unsigned int>(i), static_cast<unsigned int>(j));
       }
+
+
     }
   }
 
@@ -536,6 +604,9 @@ void AgentLayer::rasterizeAgentPath(
   }
 }
 
+
+
+
 void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
                              int /*min_i*/, int /*min_j*/, int /*max_i*/, int /*max_j*/)
 {
@@ -563,37 +634,15 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
       unsigned char* char_map = viz_costmap_.getCharMap();
       unsigned int size_x = viz_costmap_.getSizeInCellsX();
       unsigned int size_y = viz_costmap_.getSizeInCellsY();
-      // 전체 맵을 0(FREE_SPACE)으로 초기화
       std::memset(char_map, 0, size_x * size_y * sizeof(unsigned char));
-  }
-
-  std::vector<multi_agent_msgs::msg::MultiAgentInfo> infos;
-  {
-    std::lock_guard<std::mutex> lk(data_mtx_);
-    if (!last_infos_ || stale(last_stamp_)) return;
-    infos.assign(last_infos_->agents.begin(), last_infos_->agents.end());
   }
 
   std::vector<std::pair<unsigned int,unsigned int>> meta_hits;
   meta_hits.reserve(256);
   std::vector<std::pair<unsigned int,unsigned int>> dummy_hits; 
 
-  const double robot_x = cached_robot_x_;
-  const double robot_y = cached_robot_y_;
-  const std::string & costmap_frame = layered_costmap_->getGlobalFrameID();
-
-  for (const auto & a_map : infos) { 
-    if (isSelf(a_map)) continue;
-
-    multi_agent_msgs::msg::MultiAgentInfo a;
-    if (!transformAgentInfo(a_map, a, costmap_frame)) {
-      continue;
-    }
-
-    const double dx = a.current_pose.pose.position.x - robot_x;
-    const double dy = a.current_pose.pose.position.y - robot_y;
-    if (std::hypot(dx, dy) > roi_range_m_) continue;
-
+  // [핵심 해결책 1-3] infos 콜백을 다시 돌거나 TF를 다시 호출하지 않고, 캐시된 데이터만 사용!
+  for (const auto & a : transformed_agents_) { 
     // 1. [NAVIGATION] Master Grid에 직접 그리기
     rasterizeAgentPath(a, &master_grid, meta_hits);
 
@@ -601,9 +650,7 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
     rasterizeAgentPath(a, &viz_costmap_, dummy_hits);
   }
 
-  // [VISUALIZATION] 별도 Costmap 발행
   if (costmap_pub_) {
-      // bounds 업데이트와 상관없이 생성자의 true 옵션 덕분에 항상 발행됨
       costmap_pub_->updateBounds(0, viz_costmap_.getSizeInCellsX(),
                                  0, viz_costmap_.getSizeInCellsY());
       costmap_pub_->publishCostmap();
@@ -629,6 +676,7 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
     meta_pub_->publish(std::move(arr));
   }
 }
+
 
 } // namespace multi_agent_nav2
 
