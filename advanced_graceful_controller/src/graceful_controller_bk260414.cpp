@@ -149,35 +149,6 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
 {
   std::lock_guard<std::mutex> param_lock(param_handler_->getMutex());
 
-  // --- [튜닝 파라미터 모음] ---
-  // 1. 제자리 회전
-  double MAX_IN_PLACE_VEL = 0.35; 
-  double ACC_IN_PLACE = 0.2;
-  double DEC_IN_PLACE = -2.0;
-
-  // 2. 주행 가감속
-  double ACC_LINEAR = 1.0;  
-  double DEC_LINEAR = -1.0; 
-  double ACC_ANGULAR = 3.0;
-  double DEC_ANGULAR = -3.0;
-
-  // 3. 전방 곡률 예측 감속 (Predictive Slowdown)
-  double PREDICTIVE_LOOKAHEAD_BASE = 1.0;  // 최소 스캔 거리
-  double PREDICTIVE_LOOKAHEAD_SCALE = 1.5; // 속도 비례 추가 스캔 거리
-  double BASE_CURVATURE_THRESHOLD = 0.45;  // 감속을 시작할 기본 곡률 임계값
-  double PREDICTIVE_LINEAR_GAIN = 0.15;    // 초과 곡률당 감속 강도 (고속 시 최대 적용)
-
-  // 4. 목적지 감속
-  double MIN_SLOWDOWN_DIST = 0.5; // 최소 감속 보장 거리
-
-  // 5. 궤적 보존 및 스무딩 (Adaptive Smoothing)
-  double MAX_INTERVENTION_RADIUS_ = 0.5;    // 궤적 보존 개입을 시작할 최대 회전 반경
-  double MIN_SMOOTHING_FACTOR = 0.15;      // 정지 상태일 때의 기본 스무딩 팩터 (최소 브레이크)
-  double SMOOTHING_FACTOR_SCALE = 0.25;    // 최고 속도일 때 추가되는 스무딩 팩터 (고속 브레이크 강화)
-  // ----------------------------
-
-
-
   // =========================================================================
   // [1] 루프 제어 주기(dt) 계산 및 안전장치
   // =========================================================================
@@ -192,17 +163,6 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
   // =========================================================================
   double actual_speed = velocity.linear.x;
   double actual_w = velocity.angular.z;
-
-
-  // testing.... 현재 로직은 odometry 기반이라서 아래 로직은 필요 없음.
-  // double max_lag_x = 0.3; 
-  // double max_lag_w = 0.4; 
-  // if (std::abs(last_cmd_vel_.linear.x) > std::abs(actual_speed) + max_lag_x) {
-  //     last_cmd_vel_.linear.x = std::copysign(std::abs(actual_speed) + max_lag_x, last_cmd_vel_.linear.x);
-  // }
-  // if (std::abs(last_cmd_vel_.angular.z) > std::abs(actual_w) + max_lag_w) {
-  //     last_cmd_vel_.angular.z = std::copysign(std::abs(actual_w) + max_lag_w, last_cmd_vel_.angular.z);
-  // }
 
 
   geometry_msgs::msg::TwistStamped target_cmd;
@@ -244,92 +204,68 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
   double euclidean_dist = std::hypot(dx, dy);
   double angle_to_goal = tf2::getYaw(transformed_plan.poses.back().pose.orientation);
 
-
-
-// =========================================================================
-  // ★ [4] 속도 적응형 전방 매크로 곡률 예측 감속 (Linear Predictive Slowdown) ★
+  // =========================================================================
+  // ★ [4] 노이즈 강인형 전방 매크로 곡률 예측 감속 (Predictive Slowdown) ★
   // =========================================================================
   double dynamic_v_max = params_->v_linear_max;
-
-  // 1. 현재 속도 비율 (0.0 ~ 1.0) 계산
-  double speed_ratio = std::clamp(std::abs(actual_speed) / params_->v_linear_max, 0.0, 1.0);
-
-  if (std::abs(actual_speed) > 0.25){ 
-      // 2. 속도 기반 동적 스캔 거리 (빠를수록 멀리 봄)
-      // double preview_distance = 1.0 + (1.5 * speed_ratio); 
-      double preview_distance = PREDICTIVE_LOOKAHEAD_BASE + (PREDICTIVE_LOOKAHEAD_SCALE * speed_ratio);
-      double max_macro_curvature = 0.0;
+  if (actual_speed > 0.25) {
+    double preview_distance = 2.0; // 전방 1.5m 스캔
+    double max_macro_curvature = 0.0;
   
-      if (transformed_plan.poses.size() > 1) {
-          double start_yaw = tf2::getYaw(transformed_plan.poses[0].pose.orientation);
+    if (transformed_plan.poses.size() > 1) {
+        double start_yaw = tf2::getYaw(transformed_plan.poses[0].pose.orientation);
   
-          for (size_t i = 1; i < transformed_plan.poses.size(); ++i) {
-              double L = nav2_util::geometry_utils::euclidean_distance(
-                  transformed_plan.poses[0].pose, transformed_plan.poses[i].pose);
-              
-              if (L > preview_distance) break;
-              if (L < 0.3) continue; // 그리드 노이즈 스킵
+        for (size_t i = 1; i < transformed_plan.poses.size(); ++i) {
+            double L = nav2_util::geometry_utils::euclidean_distance(
+                transformed_plan.poses[0].pose, transformed_plan.poses[i].pose);
+            
+            if (L > preview_distance) break;
+            // [핵심] 0.3m 이내의 점들은 그리드 노이즈 방지를 위해 스킵!
+            if (L < 0.3) continue; 
   
-              double pt_yaw = tf2::getYaw(transformed_plan.poses[i].pose.orientation);
-              double yaw_diff = std::abs(angles::shortest_angular_distance(start_yaw, pt_yaw));
+            double pt_yaw = tf2::getYaw(transformed_plan.poses[i].pose.orientation);
+            double yaw_diff = std::abs(angles::shortest_angular_distance(start_yaw, pt_yaw));
   
-              double macro_curvature = yaw_diff / L;
-              if (macro_curvature > max_macro_curvature) {
-                  max_macro_curvature = macro_curvature;
-              }
-          }
-      }
+            double macro_curvature = yaw_diff / L;
+            if (macro_curvature > max_macro_curvature) {
+                max_macro_curvature = macro_curvature;
+            }
+        }
+    }
 
-      // 3. 연속적(Linear) 곡률 감속 로직
-      // 속도에 따른 동적 임계값 (빠를수록 예민하게 감지)
-      double sensitivity_multiplier = 1.5 - speed_ratio; 
-      double base_curvature_threshold = BASE_CURVATURE_THRESHOLD * sensitivity_multiplier;
-
-      
-
-      // 계산된 곡률이 임계값을 넘었을 때만 비례 제어(P-Control) 감속 실행
-      if (max_macro_curvature > base_curvature_threshold) {
-          
-          // 임계값을 초과한 '순수 잉여 곡률량' (이 값이 클수록 커브가 심함)
-          double excess_curvature = max_macro_curvature - base_curvature_threshold;
-          
-          //  곡률 1.0당 깎아낼 속도 비율 (기본 감속 민감도)
-          // 속도(speed_ratio)를 곱해주어 빠를수록 더 강하게 브레이크를 밟게 함
-          // double linear_gain = 0.15 * speed_ratio; 
-          double linear_gain = PREDICTIVE_LINEAR_GAIN * speed_ratio;
-          
-          // 초과 곡률량에 비례하여(Linear) 부드럽게 깎아낼 속도량 계산
-          double preview_slowdown = excess_curvature * linear_gain;
-          dynamic_v_max = std::max(params_->v_linear_min, dynamic_v_max - preview_slowdown);
-      }
+    // 예측된 커브가 심하면 목표 최고 속도 상한을 미리 낮춤
+    double curvature_threshold1 = 1.35; // 약 1.0m 앞 타겟이 25도 이상 틀어져 있을 때 개입
+    double curvature_threshold2 = 0.9; // 약 1.0m 앞 타겟이 25도 이상 틀어져 있을 때 개입
+    double curvature_threshold3 = 0.45; // 약 1.0m 앞 타겟이 25도 이상 틀어져 있을 때 개입
+  
+    if (max_macro_curvature > curvature_threshold1) {
+        double preview_slowdown = (max_macro_curvature - curvature_threshold1) * 0.1; // 0.1는 감속 강도 Gain
+        dynamic_v_max = std::max(params_->v_linear_min, dynamic_v_max - preview_slowdown);
+    }
+    else if (max_macro_curvature > curvature_threshold2) {
+        double preview_slowdown = (max_macro_curvature - curvature_threshold2) * 0.05; // 0.4는 감속 강도 Gain
+        dynamic_v_max = std::max(params_->v_linear_min, dynamic_v_max - preview_slowdown);
+    }
+    else if (max_macro_curvature > curvature_threshold3) {
+        double preview_slowdown = (max_macro_curvature - curvature_threshold3) * 0.02; // 0.4는 감속 강도 Gain
+        dynamic_v_max = std::max(params_->v_linear_min, dynamic_v_max - preview_slowdown);
+    }
   }
   
   // =========================================================================
-  // ★ [5] 속도 기반 글로벌 목적지 감속 (Speed-Aware Distance Slowdown) ★
+  // [5] 글로벌 목적지 감속 (Distance Slowdown) 및 컨트롤러 주입
   // =========================================================================
-  // 속도에 비례하여 감속 시작 반경을 동적으로 줄이거나 늘림
-  double dynamic_slowdown_radius = params_->slowdown_radius * (0.5 + 0.5 * speed_ratio);
-
-  //  아무리 느려도 골인 지점 X 미터 앞에서는 반드시 감속 시작!
-  // double min_slowdown_dist = 0.5; // (예: 0.5m)
-  double min_slowdown_dist = MIN_SLOWDOWN_DIST; // (예: 0.5m)
-  dynamic_slowdown_radius = std::max(dynamic_slowdown_radius, min_slowdown_dist);
-  
-  // (안전장치) 단, 사용자가 설정한 원본 파라미터 값보다는 크지 않게 제한
-  dynamic_slowdown_radius = std::min(dynamic_slowdown_radius, params_->slowdown_radius);
-
-  // 목적지 감속 적용
-  if (dist_to_goal < dynamic_slowdown_radius && dynamic_slowdown_radius > 0.0) {
-      double ratio = dist_to_goal / dynamic_slowdown_radius; 
+  if (dist_to_goal < params_->slowdown_radius && params_->slowdown_radius > 0.0) {
+      double ratio = dist_to_goal / params_->slowdown_radius; 
       double dist_v_max = params_->v_linear_min + 
                           (params_->v_linear_max - params_->v_linear_min) * ratio;
+      // 곡률 예측 감속과 목적지 감속 중, 더 빡센(안전한) 속도 제한을 최종 적용
       dynamic_v_max = std::min(dynamic_v_max, dist_v_max);
   }
 
   control_law_->setCurvatureConstants(params_->k_phi, params_->k_delta, params_->beta, params_->lambda);
   control_law_->setSlowdownRadius(0.1); // 내부 지역 감속 무력화
   control_law_->setSpeedLimit(params_->v_linear_min, dynamic_v_max, params_->v_angular_max);
-
 
   // =========================================================================
   // [6] 3단계 모드 결정 (회전 / XY 안정화 / 경로 추종)
@@ -356,8 +292,7 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
         cmd_found = true; 
     } else {
         double target_vel = params_->rotation_scaling_factor * angle_to_goal * params_->v_angular_max;
-        // if (std::abs(target_vel) > 0.35) target_vel = std::copysign(0.35, target_vel);
-        if (std::abs(target_vel) > MAX_IN_PLACE_VEL) target_vel = std::copysign(MAX_IN_PLACE_VEL, target_vel);
+        if (std::abs(target_vel) > 0.35) target_vel = std::copysign(0.35, target_vel);
         if (std::abs(target_vel) < 0.01) target_vel = std::copysign(0.01, target_vel);
 
         size_t num_steps = fabs(angle_to_goal) / params_->in_place_collision_resolution;
@@ -391,8 +326,7 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
     if (euclidean_dist < 0.007) {
         cmd_found = true;
     } else {
-        // control_law_->setSpeedLimit(0.01, 0.3, 0.35); 
-        control_law_->setSpeedLimit(0.01, 0.3, MAX_IN_PLACE_VEL);    
+        control_law_->setSpeedLimit(0.01, 0.3, 0.35);     
     }
   }
 
@@ -453,10 +387,8 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
 
   if (std::abs(target_cmd.twist.linear.x) < 0.001) {
       // [제자리 회전 모드] 선속도가 0이므로 각속도만 단독으로 가감속 적용
-      // final_cmd.twist.angular.z = applyKinematicLimits(
-      //   last_cmd_vel_.angular.z, target_cmd.twist.angular.z, 0.2, -2.0, dt_control);
       final_cmd.twist.angular.z = applyKinematicLimits(
-        last_cmd_vel_.angular.z, target_cmd.twist.angular.z, ACC_IN_PLACE, DEC_IN_PLACE, dt_control);
+          last_cmd_vel_.angular.z, target_cmd.twist.angular.z, 0.2, -2.0, dt_control);
   } else {
       // [경로 추종 모드] 궤적 이탈(Wobbling) 방지를 위한 곡률(Curvature) 비율 유지 로직
       double target_v = target_cmd.twist.linear.x;
@@ -466,15 +398,15 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
       double kappa = target_w / target_v; 
 
       // B. 선속도(X)에만 가감속 한계 적용
-      // double limited_v = applyKinematicLimits(actual_speed, target_v, 1.0, -1.0, dt_control);
-      double limited_v = applyKinematicLimits(actual_speed, target_v, ACC_LINEAR, DEC_LINEAR, dt_control);
+      double limited_v = applyKinematicLimits(
+          actual_speed, target_v, 1.0, -1.0, dt_control);
       
       // C. 제한된 선속도에 곡률을 곱해 각속도(Z)를 다시 계산 (조향 비율 완벽 유지!)
       double limited_w = limited_v * kappa;
 
       // D. (안전장치) 다시 계산된 각속도가 물리적 한계를 초과하면, 각속도 기준으로 다시 맞춤
-      // double max_w_limit = applyKinematicLimits(actual_w, target_w, 3.0, -3.0, dt_control);
-      double max_w_limit = applyKinematicLimits(actual_w, target_w, ACC_ANGULAR, DEC_ANGULAR, dt_control);
+      double max_w_limit = applyKinematicLimits(
+          actual_w, target_w, 3.0, -3.0, dt_control);
       
       if (std::abs(limited_w) > std::abs(max_w_limit)) {
           limited_w = max_w_limit;
@@ -482,30 +414,27 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
           double turning_radius = 100.0;
           if (std::abs(kappa) > 0.001) turning_radius = 1.0 / std::abs(kappa);
 
-          // ==========================================================
-          // 속도 및 반경 적응형 연속 스무딩 (Linear Adaptive Smoothing)
-          // ==========================================================
-          // double max_intervention_radius = 0.5; // 0.5m 이하의 코너에서만 개입 시작
-          double max_intervention_radius = MAX_INTERVENTION_RADIUS_; // 0.5m 이하의 코너에서만 개입 시작
-
-          if (turning_radius < max_intervention_radius) {
-              // 1. 반경 기반 가중치 (Radius Severity) : 0.0 ~ 1.0
-              // 반경이 0.5m면 0.0(개입 안함), 0m에 가까울수록 1.0(최대 개입)으로 선형 증가
-              double radius_severity = 1.0 - (turning_radius / max_intervention_radius);
-
-              // 2. 속도 기반 최대 스무딩 팩터 (Max Smoothing Factor)
-              // 속도가 빠를수록 원심력 때문에 궤적을 벗어나기 쉬우므로, 브레이크 비중을 더 높여줌
-              // (예: 정지 시 0.15, 최고 속도 시 0.40까지 선형 증가)
-              // double max_smoothing_factor = 0.15 + (0.25 * speed_ratio); 
-              double max_smoothing_factor = MIN_SMOOTHING_FACTOR + (SMOOTHING_FACTOR_SCALE * speed_ratio);
-
-              // 3. 최종 동적 스무딩 팩터 산출
-              double dynamic_smoothing_factor = radius_severity * max_smoothing_factor;
-
-              // 수학적 이상적 감속값(strict_v)과 현재 속도(limited_v)를 동적 비율로 혼합
+          // 🎛️ [튜닝 포인트] 좁은 코너에서만 비율 보존 감속 (0.4m 반경 이하)
+          double min_radius1 = 0.2;         
+          double smoothing_factor1 = 0.25;   
+          double min_radius2 = 0.3;         
+          double smoothing_factor2 = 0.1;
+          double min_radius3 = 0.4;         
+          double smoothing_factor3 = 0.05;
+        
+          if (turning_radius < min_radius1) {
               double strict_v = limited_w / kappa;
-              limited_v = (strict_v * dynamic_smoothing_factor) + (limited_v * (1.0 - dynamic_smoothing_factor));
+              limited_v = (strict_v * smoothing_factor1) + (limited_v * (1.0 - smoothing_factor1));
           }
+          else if (turning_radius < min_radius2) {
+              double strict_v = limited_w / kappa;
+              limited_v = (strict_v * smoothing_factor2) + (limited_v * (1.0 - smoothing_factor2));
+          }              
+          else if (turning_radius < min_radius3) {
+              double strict_v = limited_w / kappa;
+              limited_v = (strict_v * smoothing_factor3) + (limited_v * (1.0 - smoothing_factor3));
+          }                   
+        
       }
 
       // 5. 비율 유지 스케일링 (Proportional Scaling)
@@ -523,28 +452,8 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
       limited_v *= final_scale;
       limited_w *= final_scale;
 
-
-      // testing...
-      // limited_v = std::clamp(limited_v, params_->v_linear_min, params_->v_linear_max);
-      limited_v = std::clamp(limited_v, -params_->v_linear_max, params_->v_linear_max);
+      limited_v = std::clamp(limited_v, params_->v_linear_min, params_->v_linear_max);
       limited_w = std::clamp(limited_w, -params_->v_angular_max, params_->v_angular_max);
-
-      // testing....
-      // 주행 중일 때 모터 스톨(웅웅거림) 방지 (정지 목표가 아닐 때만 적용)
-      // [수정된 스톨 방지 로직 - 완전 무결함]
-      if (std::abs(target_v) > 0.001) {
-          if (std::abs(limited_v) < params_->v_linear_min) {
-              
-              // [수정 핵심] 부호의 기준을 limited_v가 아닌 target_v로 변경!
-              double new_v = std::copysign(params_->v_linear_min, target_v); 
-              
-              // v가 0이었든 아니든 상관없이, 무조건 완벽한 조향 비율 유지
-              limited_w = new_v * kappa;
-              limited_v = new_v;
-
-              limited_w = std::clamp(limited_w, -params_->v_angular_max, params_->v_angular_max);
-          }
-      }
 
       final_cmd.twist.linear.x = limited_v;
       final_cmd.twist.angular.z = limited_w;
