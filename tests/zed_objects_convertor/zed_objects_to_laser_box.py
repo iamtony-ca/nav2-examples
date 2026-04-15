@@ -1,4 +1,5 @@
 import math
+import array  # 추가: C-style 배열을 만들기 위한 파이썬 표준 라이브러리
 from typing import List, Tuple
 
 import rclpy
@@ -90,7 +91,8 @@ class ZedBoxToLaserNode(Node):
 
         # 초기화 (에러 방지를 위해 range_max보다 약간 큰 값 사용)
         out_of_range_val = float(self.range_max + 1.0)
-        scan_ranges = [out_of_range_val] * self.num_rays
+        # scan_ranges = [out_of_range_val] * self.num_rays
+        scan_ranges = [math.inf] * self.num_rays
 
         for obj in msg.objects:
             if obj.tracking_state == 0:
@@ -128,7 +130,12 @@ class ZedBoxToLaserNode(Node):
                     self.draw_segment(scan_ranges, corners_2d[i], corners_2d[j])
 
         # 타입 에러 방지용 강제 캐스팅
-        scan_msg.ranges = [float(r) for r in scan_ranges]
+        # scan_msg.ranges = [float(r) for r in scan_ranges]
+        # 2. 타입 에러 및 inf 바운딩 에러 우회
+        # 파이썬 리스트를 C-style의 float32('f') 배열로 묶어서 대입합니다.
+        # 이렇게 하면 ROS 2가 개별 값 검사를 건너뛰고 C++로 바로 넘깁니다.
+        scan_msg.ranges = array.array('f', scan_ranges)
+        
         self.scan_pub.publish(scan_msg)
 
 
