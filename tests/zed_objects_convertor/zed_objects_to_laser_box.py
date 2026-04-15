@@ -111,6 +111,17 @@ class ZedBoxToLaserNode(Node):
             dist_to_center = math.hypot(obj.position[0], obj.position[1])
             if dist_to_center > 2.8:
                 continue
+
+            # 3. 추가: 속도(Velocity) 기반 필터링
+            # 사람이 멀어지는 속도가 너무 빠르면(예: 1.5m/s 이상) 
+            # 경계면에서 잔상이 남을 확률이 높으므로 선제적으로 차단할 수 있습니다.
+            vx = obj.velocity[0]
+            vy = obj.velocity[1]
+            speed = math.hypot(vx, vy)
+            
+            # 멀어지는 방향의 속도가 큰데 이미 경계선(2.5m 이상) 근처라면 유령일 확률 높음
+            if dist_to_center > 2.5 and speed > 1.2:
+                continue
             
             # 1. 3D 꼭짓점 추출 (ZED SDK 버전에 따른 필드명 호환)
             corners_2d = []
