@@ -51,6 +51,26 @@ class ZedBoxToLaserNode(Node):
             ObjectsStamped, self.objects_topic, self.objects_callback, 10
         )
 
+        # === [추가된 로깅 파트] ===
+        params_info = (
+            f"\n=== ZED Box to Laser Node Parameters ===\n"
+            f" - objects_topic:         {self.objects_topic}\n"
+            f" - scan_topic:            {self.scan_topic}\n"
+            f" - min_z_height:          {self.min_z} m\n"
+            f" - max_z_height:          {self.max_z} m\n"
+            f" - angle_min:             {self.angle_min:.4f} rad\n"
+            f" - angle_max:             {self.angle_max:.4f} rad\n"
+            f" - angle_increment:       {self.angle_increment:.6f} rad\n"
+            f" - range_min:             {self.range_min} m\n"
+            f" - range_max:             {self.range_max} m\n"
+            f" - projection_resolution: {self.proj_res} m\n"
+            f"========================================"
+        )
+        self.get_logger().info(params_info)
+        # ==========================
+
+
+
     def draw_segment(self, scan_ranges: List[float], p1: Tuple[float, float], p2: Tuple[float, float]):
         """두 점(p1, p2) 사이를 선분으로 잇고 LaserScan 배열을 업데이트합니다."""
         x1, y1 = p1
