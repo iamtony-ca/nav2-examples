@@ -1,0 +1,18 @@
+zed_box_to_laser_node:
+  ros__parameters:
+    objects_topic: "/zed/zed_node/obj_det/objects"
+    scan_topic: "/zed_object_scan"
+    
+    # Z-axis Filtering (Robot collision height)
+    min_z_height: 0.05
+    max_z_height: 2.0
+    
+    # LaserScan Specs
+    angle_min: -3.14159265359  # -pi
+    angle_max: 3.14159265359   # pi
+    angle_increment: 0.008726646 # 0.5 degrees in radians
+    range_min: 0.1
+    range_max: 5.0
+    
+    # Projection Resolution (m)
+    projection_resolution: 0.02
