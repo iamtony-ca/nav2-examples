@@ -24,12 +24,8 @@ fleet_decision_node:
     # --- Input Topics ---
     topic_collision: "/path_agent_collision_info"
     topic_agents: "/multi_agent_infos"
-    # topic_replan_flag: "/replan_flag"
-    topic_path_block_status: "/path_block_status"  # [NEW] 추가됨
-    wall_hugging_wait_sec: 2.0  # [NEW] Wall hugging 감지 시 대기하는 시간 (초)
-    direct_obs_clear_sec: 3.0   # [NEW] Direct Obstacle Clear 요구 시간 (초)
-    direct_obs_timeout_sec: 15.0 # [NEW] Direct Obstacle 타임아웃 시간 (초)
-
+    topic_replan_flag: "/replan_flag"
+    
     # --- Output Topics ---
     topic_decision_state: "/decision_state"
     topic_request_replan: "/request_replan"

@@ -25,6 +25,7 @@
 #include "nav_msgs/msg/path.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "std_msgs/msg/bool.hpp"
+#include "std_msgs/msg/int8.hpp"
 
 #include "nav2_costmap_2d/costmap_2d.hpp"
 #include "nav2_costmap_2d/cost_values.hpp"
@@ -72,6 +73,14 @@ public:
   PathValidatorNode();
 
 private:
+// [NEW] 상태 코드 정의 (가독성을 위해 enum 사용 권장)
+  enum BlockStatus : int8_t {
+    CLEAR = 0,
+    AGENT_BLOCK = 1,
+    DIRECT_OBSTACLE = 2,
+    WALL_HUGGING = 3
+  };
+
   // ========= Callbacks =========
   void costmapCallback(const nav2_msgs::msg::Costmap::SharedPtr msg);
   void agentMaskCallback(const nav2_msgs::msg::Costmap::SharedPtr msg);
@@ -147,7 +156,8 @@ private:
   static double headingTo(const geometry_msgs::msg::Pose & pose, double wx, double wy);
   static double speedAlong(const geometry_msgs::msg::Twist & tw, double heading_rad);
 
-  void triggerReplan(const std::string & reason);
+  // void triggerReplan(const std::string & reason);
+  void publishBlockStatus(BlockStatus status, const std::string & reason);
   void publishAgentCollisionList(const std::vector<AgentHit> & hits);
 
   // ========= Callback Groups =========
@@ -161,7 +171,8 @@ private:
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr robot_status_sub_;
   rclcpp::Subscription<multi_agent_msgs::msg::MultiAgentInfoArray>::SharedPtr agents_sub_;
 
-  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr replan_pub_;
+  // rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr replan_pub_;
+  rclcpp::Publisher<std_msgs::msg::Int8>::SharedPtr block_status_pub_;
   rclcpp::Publisher<multi_agent_msgs::msg::PathAgentCollisionInfo>::SharedPtr agent_collision_pub_;
 
   rclcpp::TimerBase::SharedPtr obstacle_db_update_timer_;

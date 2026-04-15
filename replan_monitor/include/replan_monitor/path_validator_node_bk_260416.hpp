@@ -13,6 +13,9 @@
 #include <chrono>
 #include <algorithm>
 
+// [NEW] Added for std::map
+#include <map>
+
 #include "rclcpp/rclcpp.hpp"
 
 #include "geometry_msgs/msg/pose.hpp"
@@ -31,8 +34,6 @@
 #include "multi_agent_msgs/msg/multi_agent_info_array.hpp"
 #include "multi_agent_msgs/msg/multi_agent_info.hpp"
 #include "multi_agent_msgs/msg/agent_status.hpp"
-
-// ★ 네 패키지명으로 교체
 #include "multi_agent_msgs/msg/path_agent_collision_info.hpp"
 
 #include "tf2_ros/buffer.h"
@@ -112,7 +113,37 @@ private:
     std::string note;
   };
 
+  // [NEW] Map to store footprint data from YAML
+  struct AgentFootprintData
+  {
+    // existing code uses Point32, so we store Point32
+    std::vector<geometry_msgs::msg::Point32> points;
+    double radius{0.0};
+    bool use_radius{true};
+  };
+  // Map from machine_id to its footprint/radius data
+  std::map<uint16_t, AgentFootprintData> agent_footprints_;
+
+  // [NEW] Helper to get footprint for a given agent
+  std::vector<geometry_msgs::msg::Point32> 
+  getFootprintForAgent(const multi_agent_msgs::msg::MultiAgentInfo & a) const;
+
+  // [NEW] Helper to convert nav2_costmap_2d::makeFootprint... results
+  static std::vector<geometry_msgs::msg::Point32> toPoint32(
+      const std::vector<geometry_msgs::msg::Point>& points);
+
+
+
+  // wx, wy를 커버하는 agent의 footprint 또는 truncated_path 튜브를 찾아 리턴
   std::vector<AgentHit> whoCoversPoint(double wx, double wy) const;
+
+  // 내부: 경로 튜브(footprint를 얇게 확장)에서 포함 여부 검사
+  static bool pathTubeCoversPoint(const multi_agent_msgs::msg::MultiAgentInfo & a,
+                                  double wx, double wy,
+                                  double stride_m, double dilate_m,
+                                  int max_poses, double frame_yaw,
+                                  const std::string & global_frame);
+
   static double headingTo(const geometry_msgs::msg::Pose & pose, double wx, double wy);
   static double speedAlong(const geometry_msgs::msg::Twist & tw, double heading_rad);
 
@@ -152,7 +183,7 @@ private:
 
   std::atomic<bool> is_robot_in_driving_state_{false};
   rclcpp::Time last_replan_time_;        // replan 쿨다운 기준
-  rclcpp::Time last_agent_block_time_;   // ★ 에이전트 홀드 기준
+  rclcpp::Time last_agent_block_time_;   // 에이전트 홀드 기준
 
   std::unordered_map<uint64_t, ObstacleInfo> obstacle_db_;
   mutable std::mutex obstacle_db_mutex_;
@@ -164,6 +195,9 @@ private:
   // ========= Parameters =========
   std::string global_frame_;
   std::string base_frame_;
+
+// [add] 본인 식별용 ID 변수
+  uint16_t self_machine_id_{0};
 
   double cooldown_sec_;
   size_t consecutive_threshold_;
@@ -211,9 +245,18 @@ private:
   bool use_radius_{true};
   double robot_radius_m_{0.1};
 
-  // ★ NEW: 에이전트 홀드 파라미터
+  // 에이전트 홀드 파라미터
   double agent_block_hold_sec_{2.0};
   double agent_block_max_wait_sec_{8.0};
+
+  // === NEW: 에이전트 경로 튜브 매칭 파라미터 ===
+  bool   agent_path_hit_enable_{true};
+  double agent_path_hit_stride_m_{0.35};
+  double agent_path_hit_dilate_m_{0.02};
+  int    agent_path_hit_max_poses_{200};
+
+  // [NEW] 우선순위에 따른 경로 검사 옵션
+  bool respect_higher_priority_path_{false};  
 };
 
 }  // namespace replan_monitor

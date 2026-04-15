@@ -7,8 +7,8 @@ path_validator_node:
     base_frame: "base_link"
 
     # Event pulse / cooldown
-    cooldown_sec: 1.0
-    publish_false_pulse: true
+    cooldown_sec: 0.2 #1.0         ## replan_flag/충돌 감지 후 다음 감지까지 최소 대기 시간
+    publish_false_pulse: false #true
     flag_pulse_ms: 120
 
     # Obstacle persistence & thresholds

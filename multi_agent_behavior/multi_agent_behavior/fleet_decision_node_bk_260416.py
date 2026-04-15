@@ -7,7 +7,7 @@ from rclpy.node import Node
 from rclpy.time import Time
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy, QoSDurabilityPolicy
 
-from std_msgs.msg import Bool, String, Int8 # [수정] Int8 추가
+from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
 from geometry_msgs.msg import Pose
@@ -20,21 +20,6 @@ from typing import Optional, Dict, Tuple, List
 # ----------------------------------------------------------------------
 # 1) Enums & Constants
 # ----------------------------------------------------------------------
-
-# ----------------------------------------------------------------------
-# [NEW] Block Status & State Machine Enums
-# ----------------------------------------------------------------------
-class BlockStatus(IntEnum):
-    CLEAR = 0
-    AGENT_BLOCK = 1
-    DIRECT_OBSTACLE = 2
-    WALL_HUGGING = 3
-
-class BlockHandleState(IntEnum):
-    IDLE = 0             # 평상시
-    HANDLING_WALL = 1    # Wall Hugging 처리 중 (타이머 작동 중)
-    HANDLING_DIRECT = 2  # Direct Obstacle 처리 중 (N초 Clear 및 M초 타임아웃 감시 중)
-
 class MovingCommand(IntEnum):
     WAIT = 0             # 일반 대기
     WAIT_DETECT_AMR = 1  # 2초 대기 후 재탐색
@@ -127,7 +112,7 @@ class FleetDecisionNode(Node):
         # Topics
         self.declare_parameter("topic_collision", "/path_agent_collision_info")
         self.declare_parameter("topic_agents", "/multi_agent_infos")
-        # self.declare_parameter("topic_replan_flag", "/replan_flag")
+        self.declare_parameter("topic_replan_flag", "/replan_flag")
 
         # Output Topics
         self.declare_parameter("topic_decision_state", "/decision_state")
@@ -158,20 +143,10 @@ class FleetDecisionNode(Node):
 # ---------------------------------------------------------
         # [수정 1] Replan Flag 수신 시 대기할 시간(N sec) 및 타이머 변수 추가
         # ---------------------------------------------------------
-
+        self.declare_parameter("replan_flag_wait_sec", 2.0)
+        self.replan_flag_wait_sec = self.get_parameter("replan_flag_wait_sec").value
+        self._replan_flag_timer = None
         
-        # [NEW] Path Block Status 파라미터
-        self.declare_parameter("topic_path_block_status", "/path_block_status")
-        self.declare_parameter("wall_hugging_wait_sec", 2.0)     # 기존 replan_flag_wait_sec 대체
-        self.declare_parameter("direct_obs_clear_sec", 3.0)      # N sec (연속 Clear 요구 시간)
-        self.declare_parameter("direct_obs_timeout_sec", 15.0)   # M sec (Replan 강제 타임아웃 시간)
-
-        # ... (Fetch Params) ...
-        self.wall_hugging_wait_sec = self.get_parameter("wall_hugging_wait_sec").value
-        self.direct_obs_clear_sec = self.get_parameter("direct_obs_clear_sec").value
-        self.direct_obs_timeout_sec = self.get_parameter("direct_obs_timeout_sec").value
-
-
 
         # [수정] Simple Mode 파라미터화 (하드코딩 방지)
         self.declare_parameter("simple_mode", False)
@@ -179,14 +154,6 @@ class FleetDecisionNode(Node):
         self.simple_mode = self.get_parameter("simple_mode").value
         self.wait_simple_mode = self.get_parameter("wait_simple_mode_sec").value
 
-
-        # ---------------------------------------------------------
-        # [NEW] 상태 머신 제어용 변수
-        # ---------------------------------------------------------
-        self._block_state = BlockHandleState.IDLE
-        self._wall_hugging_timer = None
-        self._direct_start_time: Optional[Time] = None
-        self._clear_continuous_start_time: Optional[Time] = None
 
         # Internal State
         self._is_reroute_status = RerouteStatus.NONE
@@ -209,12 +176,8 @@ class FleetDecisionNode(Node):
         self.create_subscription(PathAgentCollisionInfo, 
             self.get_parameter("topic_collision").value, self.on_collision, 10)
         
-        # self.create_subscription(Bool, 
-        #     self.get_parameter("topic_replan_flag").value, self.on_replan_flag, 10)
-        self.create_subscription(Int8, 
-            self.get_parameter("topic_path_block_status").value, self.on_path_block_status_callback, 10)
-
-
+        self.create_subscription(Bool, 
+            self.get_parameter("topic_replan_flag").value, self.on_replan_flag, 10)
 
         # Publishers
         qos_req = QoSProfile(history=QoSHistoryPolicy.KEEP_LAST, depth=1,
@@ -269,13 +232,10 @@ class FleetDecisionNode(Node):
         self.get_logger().info(f" - service_reroute         : {self.get_parameter('service_reroute').value}")        
         self.get_logger().info(f" - topic_cmd_resume        : {self.get_parameter('topic_cmd_resume').value}")
         self.get_logger().info(f" - topic_cmd_stop          : {self.get_parameter('topic_cmd_stop').value}")
+        self.get_logger().info(f" - replan_flag_wait_sec          : {self.get_parameter('replan_flag_wait_sec').value}")
         self.get_logger().info(f" - simple_mode               : {self.get_parameter('simple_mode').value}")
         self.get_logger().info(f" - wait_simple_mode_sec      : {self.get_parameter('wait_simple_mode_sec').value}")
-        self.get_logger().info(f" - topic_path_block_status   : {self.get_parameter('topic_path_block_status').value}")
-        self.get_logger().info(f" - wall_hugging_wait_sec     : {self.get_parameter('wall_hugging_wait_sec').value}")
-        self.get_logger().info(f" - direct_obs_clear_sec      : {self.get_parameter('direct_obs_clear_sec').value}")
-        self.get_logger().info(f" - direct_obs_timeout_sec    : {self.get_parameter('direct_obs_timeout_sec').value}")
-        
+
         self.get_logger().info("====================================================")
 
     # ------------------------------------------------------------------
@@ -319,112 +279,65 @@ class FleetDecisionNode(Node):
             else:
                 self._is_reroute_status = RerouteStatus.NONE
 
-
-
+    # def on_replan_flag(self, msg: Bool):
+    #     if not msg.data: return
+    #     now = self.get_clock().now()
+    #     if self._last_agent_event_time is not None:
+    #         dt = (now - self._last_agent_event_time).nanoseconds * 1e-9
+    #         if dt < self.replan_ignore_sec:
+    #             return
+    #     self.get_logger().warn("External replan_flag -> REPLAN")
+    #     self._publish_replan()
+    #     self._publish_state("REPLAN (Flag)")
+    
+# ------------------------------------------------------------------
+    # [수정 2] on_replan_flag 콜백 변경 및 Timer 콜백 함수 추가
     # ------------------------------------------------------------------
-    # [NEW] Path Block Status 처리 (상태 머신)
-    # ------------------------------------------------------------------
-    def on_path_block_status_callback(self, msg: Int8):
-        status = msg.data
+    def on_replan_flag(self, msg: Bool):
+        if not msg.data: return
         now = self.get_clock().now()
-
-        # 1. 쿨다운 무시 로직 (기존과 동일)
         if self._last_agent_event_time is not None:
             dt = (now - self._last_agent_event_time).nanoseconds * 1e-9
             if dt < self.replan_ignore_sec:
                 return
-
-        # ---------------------------------------------------------
-        # 상태 머신 (State Machine) 처리
-        # ---------------------------------------------------------
-        if self._block_state == BlockHandleState.IDLE:
-            # 평상시: 새로운 이벤트 감지
-            if status == BlockStatus.WALL_HUGGING:
-                self._start_wall_hugging(now)
-            elif status == BlockStatus.DIRECT_OBSTACLE:
-                self._start_direct_obstacle(now)
-
-        elif self._block_state == BlockHandleState.HANDLING_WALL:
-            # Wall Hugging 처리 중일 때는 타이머가 알아서 하므로 무시
-            pass 
-
-        elif self._block_state == BlockHandleState.HANDLING_DIRECT:
-            # Direct Obstacle 처리 중일 때: 매 0.1초마다 들어오는 상태를 평가
-            self._process_direct_obstacle(now, status)
-
-
-    # --- 서브 함수 1: WALL_HUGGING 시작 ---
-    def _start_wall_hugging(self, now):
-        self.get_logger().warn(f"[Block] WALL_HUGGING 감지 -> STOP & Wait {self.wall_hugging_wait_sec}s")
-        self._block_state = BlockHandleState.HANDLING_WALL
-        self._publish_stop()
-        self._publish_state(f"WALL_HUGGING -> WAIT({self.wall_hugging_wait_sec}s)")
-
-        if self.wall_hugging_wait_sec > 0.0:
-            self._wall_hugging_timer = self.create_timer(self.wall_hugging_wait_sec, self._wall_hugging_timer_callback)
-        else:
-            self._wall_hugging_timer_callback() # 0초면 즉시 실행
-
-    def _wall_hugging_timer_callback(self):
-        if self._wall_hugging_timer is not None:
-            self._wall_hugging_timer.cancel()
-            self.destroy_timer(self._wall_hugging_timer)
-            self._wall_hugging_timer = None
-
-        self.get_logger().warn("[Block] WALL_HUGGING -> REPLAN & RESUME")
-        self._publish_replan()
-        self.pub_cmd_resume.publish(Bool(data=False))
-        self._publish_state("WALL_HUGGING -> RESUME")
-        self._block_state = BlockHandleState.IDLE # 상태 초기화
-
-
-    # --- 서브 함수 2: DIRECT_OBSTACLE 시작 ---
-    def _start_direct_obstacle(self, now):
-        self.get_logger().warn("[Block] DIRECT_OBSTACLE 감지 -> 강제 STOP 유지 시작")
-        self._block_state = BlockHandleState.HANDLING_DIRECT
-        self._direct_start_time = now
-        self._clear_continuous_start_time = None
         
-        self._publish_stop()
-        self._publish_state("DIRECT_OBS -> PAUSE")
-
-
-    # --- 서브 함수 3: DIRECT_OBSTACLE 진행 감시 (핵심 로직) ---
-    def _process_direct_obstacle(self, now, status):
-        # M초 조건: 전체 타임아웃 감시 (계속 막혀있는 경우)
-        total_dt = (now - self._direct_start_time).nanoseconds * 1e-9
-        if total_dt >= self.direct_obs_timeout_sec:
-            self.get_logger().warn(f"[Block] DIRECT_OBS 타임아웃({self.direct_obs_timeout_sec}s) -> REPLAN & RESUME")
-            self._publish_replan()
-            self.pub_cmd_resume.publish(Bool(data=False))
-            self._publish_state("DIRECT_OBS -> TIMEOUT REPLAN")
-            self._block_state = BlockHandleState.IDLE
+        # 이미 대기 중인 타이머가 있다면 중복 실행 방지
+        if self._replan_flag_timer is not None:
+            self.get_logger().warn("External replan_flag ignored: Already waiting to replan.")
             return
+        
+        # 1. 즉시 STOP 퍼블리시
+        if self.replan_flag_wait_sec != 0.0:
+            self.get_logger().warn(f"External replan_flag -> STOP and Wait {self.replan_flag_wait_sec}s")            
+            self._publish_stop()
+            self._publish_state(f"REPLAN_FLAG -> WAIT({self.replan_flag_wait_sec}s)")
 
-        # N초 조건: CLEAR가 연속으로 들어오는지 감시
-        if status == BlockStatus.CLEAR:
-            if self._clear_continuous_start_time is None:
-                # CLEAR가 처음 들어오기 시작함 -> 카운트다운 시작
-                self._clear_continuous_start_time = now
-            else:
-                # CLEAR가 연속으로 유지 중임
-                clear_dt = (now - self._clear_continuous_start_time).nanoseconds * 1e-9
-                if clear_dt >= self.direct_obs_clear_sec:
-                    self.get_logger().info(f"[Block] 장애물 확실히 사라짐({self.direct_obs_clear_sec}s 유지) -> RESUME ONLY")
-                    self.pub_cmd_resume.publish(Bool(data=False))
-                    self._publish_state("DIRECT_OBS -> CLEARED")
-                    self._block_state = BlockHandleState.IDLE
-                    return
-        else:
-            # CLEAR가 아님 (장애물이 다시 튀어나오거나, Agent 등 다른 상태)
-            # -> CLEAR 연속 카운트다운 초기화!
-            self._clear_continuous_start_time = None
-            self._publish_stop() # 확실히 멈춤 유지
-
-
+            # 2. N초 후 REPLAN & RESUME을 실행할 1회용 비동기 타이머 생성
+            self._replan_flag_timer = self.create_timer(self.replan_flag_wait_sec, self._replan_flag_timer_callback)
+        elif self.replan_flag_wait_sec == 0.0:
+                    # 3. REPLAN 퍼블리시
+            self.get_logger().warn(f"External replan_flag -> REPLAN. Wait: {self.replan_flag_wait_sec}s")            
+            self._publish_replan()
+            self._publish_state("REPLAN_FLAG -> RESUME")
 
     
+    def _replan_flag_timer_callback(self):
+        """ N초 대기 후 Replan과 Resume을 실행하는 콜백 """
+        
+        # 타이머 파괴 (1회용 실행 보장 및 메모리 해제)
+        if self._replan_flag_timer is not None:
+            self._replan_flag_timer.cancel()
+            self.destroy_timer(self._replan_flag_timer)
+            self._replan_flag_timer = None
 
+        self.get_logger().warn("External replan_flag -> REPLAN & RESUME Executed")
+        
+        # 3. REPLAN 퍼블리시
+        self._publish_replan()
+        
+        # 4. RESUME 퍼블리시 (Pause 해제)
+        self.pub_cmd_resume.publish(Bool(data=False))
+        self._publish_state("REPLAN_FLAG -> RESUME")
 
 
     
@@ -691,7 +604,7 @@ class FleetDecisionNode(Node):
             # 2. Resume 요청 (무조건 발행 - BT Stop 해제용)
             # Reroute 토픽은 아껴도 Resume 토픽은 계속 보내줘야 로봇이 멈추지 않음
             # [버그 수정] Replan Flag 5초 대기 중이 아닐 때만 출발 (Pause=False) 허용
-            if self._block_state == BlockHandleState.IDLE:
+            if self._replan_flag_timer is None:
                 self.pub_cmd_resume.publish(Bool(data=False))
             
             self._publish_state(state_str + " -> REROUTE & RESUME")
@@ -730,7 +643,7 @@ class FleetDecisionNode(Node):
                     self.get_logger().warn(f"Wait finished for {stop_type.name}. RESUME ONLY (Simple Mode).")
                     
                     # [버그 수정] Replan Flag 5초 대기 중이 아닐 때만 출발 허용
-                    if self._block_state == BlockHandleState.IDLE:
+                    if self._replan_flag_timer is None:
                         self.pub_cmd_resume.publish(Bool(data=False))
                     self._publish_state(state_str + " -> TIMEOUT RESUME ONLY")
                 else:
@@ -739,7 +652,7 @@ class FleetDecisionNode(Node):
                     self._publish_replan()
                     
                     # [버그 수정] Replan Flag 5초 대기 중이 아닐 때만 출발 허용
-                    if self._block_state == BlockHandleState.IDLE:
+                    if self._replan_flag_timer is None:
                         self.pub_cmd_resume.publish(Bool(data=False))
                     self._publish_state(state_str + " -> TIMEOUT REPLAN & RESUME")
             else:
@@ -753,12 +666,12 @@ class FleetDecisionNode(Node):
     def _handle_no_obstacle(self):
         """ 장애물이 없는 상태 처리: RUN 또는 RESUME """
         
-# ---------------------------------------------------------
-        # [수정] 방어막: BlockStatus 관련 로직이 처리 중이라면 
-        # on_collision이 강제로 출발시키는 것을 절대 방어!
         # ---------------------------------------------------------
-        if self._block_state != BlockHandleState.IDLE:
-            self._publish_stop() 
+        # [버그 수정 핵심] 외부 Replan Flag에 의해 5초 대기 중이라면 
+        # 강제로 출발(Resume)하는 것을 차단하고 계속 멈춤(Stop) 유지!
+        # ---------------------------------------------------------
+        if self._replan_flag_timer is not None:
+            self._publish_stop() # 하트비트처럼 계속 멈춤 신호 쏘기
             return
 
         # 1. 이전에 멈춰있었는가? (MovingStopType이 NONE이 아님)

@@ -292,9 +292,12 @@ PathValidatorNode::PathValidatorNode()
 
   // ===== Publishers =====
   {
-    rclcpp::QoS qos(rclcpp::KeepLast(1));
-    qos.transient_local().reliable();
-    replan_pub_ = this->create_publisher<std_msgs::msg::Bool>("/replan_flag", qos);
+    // rclcpp::QoS qos(rclcpp::KeepLast(1));
+    // qos.transient_local().reliable();
+    // replan_pub_ = this->create_publisher<std_msgs::msg::Bool>("/replan_flag", qos);
+    block_status_pub_ = this->create_publisher<std_msgs::msg::Int8>(
+      "/path_block_status", rclcpp::QoS(10).reliable());
+
   }
   if (publish_agent_collision_) {
     agent_collision_pub_ = this->create_publisher<multi_agent_msgs::msg::PathAgentCollisionInfo>(
@@ -689,6 +692,8 @@ void PathValidatorNode::validateWithPoints(const std::vector<geometry_msgs::msg:
   }
 
   double acc = 0.0;
+  bool is_fully_blocked = false; // [NEW] 루프 끝 확인용 플래그
+
   for (size_t i = 0; i < gpath.size(); ++i) {
     if (i > 0) {
       const auto & p0 = gpath[i-1].pose.position;
@@ -744,6 +749,8 @@ void PathValidatorNode::validateWithPoints(const std::vector<geometry_msgs::msg:
         if (!hits.empty()) {
           publishAgentCollisionList(hits);
           last_agent_block_time_ = this->now();
+          publishBlockStatus(AGENT_BLOCK, "Agent overlap (Point)"); // [NEW]
+          is_fully_blocked = true;          
           return; // 에이전트 충돌 확정
         }
       }
@@ -759,6 +766,8 @@ void PathValidatorNode::validateWithPoints(const std::vector<geometry_msgs::msg:
           if (!hits2.empty()) {
             publishAgentCollisionList(hits2);
             last_agent_block_time_ = this->now();
+            publishBlockStatus(AGENT_BLOCK, "Agent mask overlap (Point)"); // [NEW]
+            is_fully_blocked = true;            
             return;
           }
         }
@@ -786,9 +795,31 @@ void PathValidatorNode::validateWithPoints(const std::vector<geometry_msgs::msg:
     best_streak = std::max(best_streak, streak);
 
     if (best_streak >= consecutive_threshold_) {
-      triggerReplan("blocked (points) streak threshold reached");
-      break;
+      // --- [NEW] Center Cost 확인 로직 ---
+      std::shared_ptr<nav2_costmap_2d::Costmap2D> cm;
+      { std::lock_guard<std::mutex> lock(costmap_mutex_); cm = costmap_; }
+      
+      if (cm) {
+          unsigned int center_mx, center_my;
+          if (cm->worldToMap(gpath[i].pose.position.x, gpath[i].pose.position.y, center_mx, center_my)) {
+              unsigned char center_cost = cm->getCost(center_mx, center_my);
+              if (center_cost >= 253) {
+                  publishBlockStatus(DIRECT_OBSTACLE, "Direct Obstacle Detected (Point)");
+              } else if (center_cost < 253 && center_cost >= 0) {
+                  publishBlockStatus(WALL_HUGGING, "Wall hugging detected (Point)");
+              }
+          } else {
+              publishBlockStatus(DIRECT_OBSTACLE, "Out of bounds obstacle (Point)");
+          }
+      }
+      is_fully_blocked = true;
+      break; // 막혔으므로 루프 탈출
     }
+  }
+
+  // [NEW] 루프를 무사히 다 돌았다면 CLEAR 상태 발행
+  if (!is_fully_blocked) {
+      publishBlockStatus(CLEAR, "Path is clear (Point)");
   }
 }
 
@@ -849,6 +880,7 @@ void PathValidatorNode::validateWithFootprint(const std::vector<geometry_msgs::m
   const unsigned char agent_thr  = static_cast<unsigned char>(agent_cost_threshold_);
 
   size_t consecutive = 0;
+  bool is_fully_blocked = false; // 루프를 끝까지 돌았는지 확인하기 위한 플래그
 
   for (const auto & ps : samples) {
     bool blocked_here = false;
@@ -957,6 +989,10 @@ void PathValidatorNode::validateWithFootprint(const std::vector<geometry_msgs::m
         if (!hits.empty()) {
           publishAgentCollisionList(hits);
           last_agent_block_time_ = this->now();
+          // [수정] AGENT_BLOCK 상태 발행
+          publishBlockStatus(AGENT_BLOCK, "Agent overlap");
+          is_fully_blocked = true;          
+          
           return;
         }
       }
@@ -972,6 +1008,9 @@ void PathValidatorNode::validateWithFootprint(const std::vector<geometry_msgs::m
           if (!hits2.empty()) {
             publishAgentCollisionList(hits2);
             last_agent_block_time_ = this->now();
+            // [수정] AGENT_BLOCK 상태 발행
+            publishBlockStatus(AGENT_BLOCK, "Agent mask overlap");
+            is_fully_blocked = true;            
             return;
           }
         }
@@ -980,14 +1019,38 @@ void PathValidatorNode::validateWithFootprint(const std::vector<geometry_msgs::m
       // 3) 여기까지 에이전트가 아니면 일반 장애물로 누적 처리
       consecutive++;
       if (consecutive >= consecutive_threshold_) {
-        triggerReplan("blocked (footprint) streak threshold reached");
-        return;
+        // --- [NEW] Center Cost 확인 로직 ---
+        unsigned int center_mx, center_my;
+        if (cm->worldToMap(ps.pose.position.x, ps.pose.position.y, center_mx, center_my)) {
+            unsigned char center_cost = cm->getCost(center_mx, center_my);
+            
+            // 253: nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE
+            if (center_cost >= 253) {
+                // [Case A] 경로 중심까지 막힌 진짜 장애물
+                publishBlockStatus(DIRECT_OBSTACLE, "Direct Obstacle Detected");
+            } else {
+                // [Case B] 중심은 253 미만인데 외곽만 부딪힘 (Wall-hugging)
+                publishBlockStatus(WALL_HUGGING, "Wall hugging detected");
+            }
+        } else {
+            // 맵 밖으로 벗어난 예외 상황 (안전을 위해 Direct Obstacle 취급)
+            publishBlockStatus(DIRECT_OBSTACLE, "Out of bounds obstacle");
+        }
+        
+        is_fully_blocked = true;
+        return; // 막혔으므로 함수 즉시 종료
       }
     } else {
       consecutive = 0;
     }
 
   }
+
+  // 4) 루프를 무사히 다 돌았다면 (아무것에도 막히지 않음) CLEAR 상태 발행
+  if (!is_fully_blocked) {
+      publishBlockStatus(CLEAR, "Path is clear");
+  }
+
 }
 
 // ===================== Agent 충돌 식별 =====================
@@ -1207,38 +1270,114 @@ void PathValidatorNode::publishAgentCollisionList(const std::vector<AgentHit> & 
   agent_collision_pub_->publish(msg);
 }
 
-void PathValidatorNode::triggerReplan(const std::string & reason)
+// void PathValidatorNode::triggerReplan(const std::string & reason)
+// {
+//   const rclcpp::Time now = this->now();
+
+//   // 홀드: 에이전트 알림 이후 일정 시간은 리플랜 방지
+//   const double since_agent = (now - last_agent_block_time_).seconds();
+//   if (since_agent >= 0.0 && since_agent < agent_block_hold_sec_) {
+//     RCLCPP_DEBUG(get_logger(),
+//       "Replan suppressed by agent-block hold (%.2fs < %.2fs)",
+//       since_agent, agent_block_hold_sec_);
+//     return;
+//   }
+
+//   if ((now - last_replan_time_).seconds() <= cooldown_sec_) return;
+//   last_replan_time_ = now;
+
+//   std_msgs::msg::Bool m; m.data = true;
+//   replan_pub_->publish(m);
+//   RCLCPP_WARN(this->get_logger(), "Triggering replan: %s", reason.c_str());
+
+//   if (publish_false_pulse_ && flag_pulse_ms_ > 0) {
+//     flag_reset_timer_.reset();
+//     auto weak_pub = std::weak_ptr<rclcpp::Publisher<std_msgs::msg::Bool>>(replan_pub_);
+//     flag_reset_timer_ = this->create_wall_timer(
+//         std::chrono::milliseconds(flag_pulse_ms_),
+//         [weak_pub]() {
+//           if (auto pub = weak_pub.lock()) {
+//             std_msgs::msg::Bool off; off.data = false;
+//             pub->publish(off);
+//           }
+//         });
+//   }
+// }
+
+
+// void PathValidatorNode::publishBlockStatus(BlockStatus status, const std::string & reason)
+// {
+//   const rclcpp::Time now = this->now();
+
+//   // 1. 홀드: 에이전트 알림 이후 일정 시간은 일반 장애물 알림 방지
+//   if (status != AGENT_BLOCK) {
+//       const double since_agent = (now - last_agent_block_time_).seconds();
+//       if (since_agent >= 0.0 && since_agent < agent_block_hold_sec_) {
+//         RCLCPP_DEBUG(get_logger(),
+//           "Status %d suppressed by agent-block hold (%.2fs < %.2fs)",
+//           status, since_agent, agent_block_hold_sec_);
+//         return;
+//       }
+//   }
+
+//   // 2. 쿨다운 로직 및 타이머 리셋
+//   if (status == CLEAR) {
+//       // 장애물이 사라졌으므로, 쿨다운 타이머를 0으로 리셋하여 
+//       // 다음에 장애물이 나타나면 즉각 반응하도록 함.
+//       last_replan_time_ = rclcpp::Time(0, 0, this->get_clock()->get_clock_type());
+//   } else {
+//       if ((now - last_replan_time_).seconds() <= cooldown_sec_) return;
+//       last_replan_time_ = now;
+//   }
+
+//   // 3. 메시지 발행
+//   std_msgs::msg::Int8 msg;
+//   msg.data = status;
+//   block_status_pub_->publish(msg);
+  
+//   // 4. 로그 출력
+//   if (status == CLEAR) {
+//       RCLCPP_DEBUG(this->get_logger(), "Status: CLEAR");
+//   } else {
+//       RCLCPP_WARN(this->get_logger(), "Status: %d, Reason: %s", status, reason.c_str());
+//   }
+// }
+
+
+
+void PathValidatorNode::publishBlockStatus(BlockStatus status, const std::string & reason)
 {
   const rclcpp::Time now = this->now();
 
-  // 홀드: 에이전트 알림 이후 일정 시간은 리플랜 방지
-  const double since_agent = (now - last_agent_block_time_).seconds();
-  if (since_agent >= 0.0 && since_agent < agent_block_hold_sec_) {
-    RCLCPP_DEBUG(get_logger(),
-      "Replan suppressed by agent-block hold (%.2fs < %.2fs)",
-      since_agent, agent_block_hold_sec_);
-    return;
+  // 1. 홀드: 에이전트 알림 이후 일정 시간은 일반 장애물 알림 방지 (이건 유지하는 것이 좋음)
+  if (status != AGENT_BLOCK) {
+      const double since_agent = (now - last_agent_block_time_).seconds();
+      if (since_agent >= 0.0 && since_agent < agent_block_hold_sec_) {
+        RCLCPP_DEBUG(get_logger(),
+          "Status %d suppressed by agent-block hold (%.2fs < %.2fs)",
+          status, since_agent, agent_block_hold_sec_);
+        return;
+      }
   }
 
-  if ((now - last_replan_time_).seconds() <= cooldown_sec_) return;
-  last_replan_time_ = now;
+  // [삭제] 쿨다운 로직 완전히 제거 (센서처럼 매 틱마다 쏘기 위함)
+  // last_replan_time_ 변수 자체를 안 써도 됩니다.
 
-  std_msgs::msg::Bool m; m.data = true;
-  replan_pub_->publish(m);
-  RCLCPP_WARN(this->get_logger(), "Triggering replan: %s", reason.c_str());
-
-  if (publish_false_pulse_ && flag_pulse_ms_ > 0) {
-    flag_reset_timer_.reset();
-    auto weak_pub = std::weak_ptr<rclcpp::Publisher<std_msgs::msg::Bool>>(replan_pub_);
-    flag_reset_timer_ = this->create_wall_timer(
-        std::chrono::milliseconds(flag_pulse_ms_),
-        [weak_pub]() {
-          if (auto pub = weak_pub.lock()) {
-            std_msgs::msg::Bool off; off.data = false;
-            pub->publish(off);
-          }
-        });
+  // 2. 메시지 발행 (10Hz)
+  std_msgs::msg::Int8 msg;
+  msg.data = status;
+  block_status_pub_->publish(msg);
+  
+  // 3. 로그 출력 (스팸 방지를 위해 디버그 레벨 조정 권장)
+  if (status == CLEAR) {
+      RCLCPP_DEBUG(this->get_logger(), "Status: CLEAR");
+  } else {
+      // 10Hz로 계속 찍히면 터미널이 지저분해지므로, THROTTLE을 걸어줍니다 (예: 1초에 한 번만 출력)
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, 
+                           "Status: %d, Reason: %s", status, reason.c_str());
   }
 }
+
+
 
 }  // namespace replan_monitor
