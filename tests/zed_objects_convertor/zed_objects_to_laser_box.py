@@ -95,9 +95,23 @@ class ZedBoxToLaserNode(Node):
         scan_ranges = [math.inf] * self.num_rays
 
         for obj in msg.objects:
-            if obj.tracking_state == 0:
+            # if obj.tracking_state == 0:
+            #     continue
+
+            # --- [수정 포인트 1: 정상 추적(OK) 상태만 허용] ---
+            # zed_interfaces 기준 tracking_state Enum:
+            # 0: OFF, 1: OK, 2: SEARCHING, 3: TERMINATE
+            # SEARCHING(2) 상태인 유령 박스를 강제 차단합니다.
+            if obj.tracking_state != 1:
                 continue
 
+            # --- [수정 포인트 2: Ghost Box 강제 거리 차단] ---
+            # 객체 중심(position)의 2D 평면(XY) 거리를 계산합니다.
+            # ZED의 3D 객체 인지 한계인 2.8m 밖으로 중심이 벗어나면 무조건 무시합니다.
+            dist_to_center = math.hypot(obj.position[0], obj.position[1])
+            if dist_to_center > 2.8:
+                continue
+            
             # 1. 3D 꼭짓점 추출 (ZED SDK 버전에 따른 필드명 호환)
             corners_2d = []
             z_values = []
