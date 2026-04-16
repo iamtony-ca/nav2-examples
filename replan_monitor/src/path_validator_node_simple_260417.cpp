@@ -1287,6 +1287,8 @@ void PathValidatorNode::publishAgentCollisionList(const std::vector<AgentHit> & 
   msg.header.stamp = this->now();
   msg.header.frame_id = global_frame_;
 
+
+  std::string agent_ids = "";
   for (const auto & h : hits) {
     msg.machine_id.push_back(h.machine_id);
     msg.type_id.push_back(h.type_id);
@@ -1294,7 +1296,15 @@ void PathValidatorNode::publishAgentCollisionList(const std::vector<AgentHit> & 
     msg.y.push_back(h.y);
     msg.ttc_first.push_back(h.ttc_first);
     msg.note.push_back(h.note);
+
+    agent_ids += std::to_string(h.machine_id) + "(" + h.type_id + ") ";    
   }
+
+
+// [추가] 1초 주기로 현재 충돌 중인 에이전트 목록을 로깅
+  RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+    "Publishing Agent Collision Info: [ %s] (Total: %zu hits)", 
+    agent_ids.c_str(), hits.size());
 
   agent_collision_pub_->publish(msg);
 }
@@ -1314,6 +1324,10 @@ void PathValidatorNode::triggerReplan(const std::string & reason)
 
   if ((now - last_replan_time_).seconds() <= cooldown_sec_) return;
   last_replan_time_ = now;
+
+// [추가] 리플랜 트리거 사유를 1초 주기로 로깅
+//   RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+//     "Publishing Replan Flag [True]. Reason: %s", reason.c_str());
 
   std_msgs::msg::Bool m; m.data = true;
   replan_pub_->publish(m);
