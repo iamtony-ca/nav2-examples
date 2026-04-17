@@ -773,13 +773,28 @@ void PathValidatorNode::updateObstacleDatabase()
   const double max_x = std::min(pose.position.x + lookahead, map_max_x);
   const double max_y = std::min(pose.position.y + lookahead, map_max_y);
 
-  unsigned int min_mx, min_my, max_mx, max_my;
-  if (!costmap->worldToMap(min_x, min_y, min_mx, min_my) ||
-      !costmap->worldToMap(max_x, max_y, max_mx, max_my)) {
-    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "ROI outside map bounds");
-    return;
-  }
+  // unsigned int min_mx, min_my, max_mx, max_my;
+  // if (!costmap->worldToMap(min_x, min_y, min_mx, min_my) ||
+  //     !costmap->worldToMap(max_x, max_y, max_mx, max_my)) {
+  //   RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "ROI outside map bounds");
+  //   return;
+  // }
 
+// worldToMapEnforceBounds는 int 타입을 사용하므로 캐스팅 변수 준비
+  int min_mx_i, min_my_i, max_mx_i, max_my_i;
+  
+  // 맵 경계를 벗어나더라도 알아서 유효한 인덱스(0 ~ size-1)로 안전하게 잘라줍니다.
+  costmap->worldToMapEnforceBounds(min_x, min_y, min_mx_i, min_my_i);
+  costmap->worldToMapEnforceBounds(max_x, max_y, max_mx_i, max_my_i);
+
+  // 이후 로직(unsigned int 기반)과 호환되도록 다시 캐스팅
+  unsigned int min_mx = static_cast<unsigned int>(min_mx_i);
+  unsigned int min_my = static_cast<unsigned int>(min_my_i);
+  unsigned int max_mx = static_cast<unsigned int>(max_mx_i);
+  unsigned int max_my = static_cast<unsigned int>(max_my_i);
+  
+  // 이제 경고 로그를 띄우거나 return 할 필요 없이, 잘라진 ROI 내부만 안전하게 검사합니다.
+    
   const rclcpp::Time now = this->now();
   std::unordered_set<uint64_t> visible;
 
