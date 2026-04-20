@@ -146,7 +146,9 @@ class FleetDecisionNode(Node):
         self.declare_parameter("replan_flag_wait_sec", 2.0)
         self.replan_flag_wait_sec = self.get_parameter("replan_flag_wait_sec").value
         self._replan_flag_timer = None
-        
+
+        # [추가] Resume 지연을 위한 타이머 변수
+        self._resume_timer = None        
 
         # [수정] Simple Mode 파라미터화 (하드코딩 방지)
         self.declare_parameter("simple_mode", False)
@@ -321,24 +323,60 @@ class FleetDecisionNode(Node):
             self._publish_state("REPLAN_FLAG -> RESUME")
 
     
-    def _replan_flag_timer_callback(self):
-        """ N초 대기 후 Replan과 Resume을 실행하는 콜백 """
+    # def _replan_flag_timer_callback(self):
+    #     """ N초 대기 후 Replan과 Resume을 실행하는 콜백 """
         
-        # 타이머 파괴 (1회용 실행 보장 및 메모리 해제)
+    #     # 타이머 파괴 (1회용 실행 보장 및 메모리 해제)
+    #     if self._replan_flag_timer is not None:
+    #         self._replan_flag_timer.cancel()
+    #         self.destroy_timer(self._replan_flag_timer)
+    #         self._replan_flag_timer = None
+
+    #     self.get_logger().warn("External replan_flag -> REPLAN & RESUME Executed")
+        
+    #     # 3. REPLAN 퍼블리시
+    #     self._publish_replan()
+        
+    #     # 4. RESUME 퍼블리시 (Pause 해제)
+    #     self.pub_cmd_resume.publish(Bool(data=False))
+    #     self._publish_state("REPLAN_FLAG -> RESUME")
+
+    def _replan_flag_timer_callback(self):
+        """ N초 대기 후 Replan을 실행하고, 다시 1.5초 후 Resume을 실행하도록 설정하는 콜백 """
+        
+        # 1. 기존 Replan 대기 타이머 파괴
         if self._replan_flag_timer is not None:
             self._replan_flag_timer.cancel()
             self.destroy_timer(self._replan_flag_timer)
             self._replan_flag_timer = None
 
-        self.get_logger().warn("External replan_flag -> REPLAN & RESUME Executed")
+        self.get_logger().warn("External replan_flag -> REPLAN Executed. Waiting 1.5s for RESUME...")
         
-        # 3. REPLAN 퍼블리시
+        # 2. REPLAN 퍼블리시
         self._publish_replan()
+        self._publish_state("REPLAN_FLAG -> REPLAN (Wait 1.5s)")
+        
+        # 3. 1.5초 대기 후 RESUME을 실행할 새로운 1회용 타이머 생성
+        if self._resume_timer is None:
+            self._resume_timer = self.create_timer(1.5, self._resume_timer_callback)
+
+    # [새로 추가하는 함수]
+    def _resume_timer_callback(self):
+        """ Replan 실행 1.5초 후 Resume을 실행하는 콜백 """
+        
+        # 타이머 파괴 (메모리 해제 및 1회용 보장)
+        if self._resume_timer is not None:
+            self._resume_timer.cancel()
+            self.destroy_timer(self._resume_timer)
+            self._resume_timer = None
+
+        self.get_logger().warn("1.5s passed -> RESUME Executed")
         
         # 4. RESUME 퍼블리시 (Pause 해제)
         self.pub_cmd_resume.publish(Bool(data=False))
         self._publish_state("REPLAN_FLAG -> RESUME")
 
+    
 
     
     def on_collision(self, msg: PathAgentCollisionInfo):
