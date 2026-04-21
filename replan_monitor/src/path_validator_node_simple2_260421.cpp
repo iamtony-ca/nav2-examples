@@ -673,9 +673,15 @@ void PathValidatorNode::validatePathOptimized(const std::vector<geometry_msgs::m
     }
     
     // 위험 구간을 충분히 통과했으면 안전하다고 판단하여 정밀 검사 조기 종료
-    // (phase1_hit_index를 지나치고, 현재 consecutive가 0이면 막힌 구간 완전 돌파)
-    if (i > static_cast<size_t>(phase1_hit_index + 10) && consecutive == 0) {
+    // 로봇 대각선(0.42m)의 약 2배 이상인 1.0m를 확실하게 벗어났는지 물리적 거리로 확인합니다.
+    double dist_passed = std::hypot(
+        gpath[i].pose.position.x - gpath[phase1_hit_index].pose.position.x,
+        gpath[i].pose.position.y - gpath[phase1_hit_index].pose.position.y
+    );
+    
+    if (dist_passed > 1.0 && consecutive == 0) {
         break;
+    }
     }
   }
 }
