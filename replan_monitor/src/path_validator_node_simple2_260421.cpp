@@ -445,31 +445,30 @@ void PathValidatorNode::transformPathToGlobal(const nav_msgs::msg::Path & in,
 
 
 
-
-
-
 void PathValidatorNode::validatePathOptimized(const std::vector<geometry_msgs::msg::PoseStamped> & gpath)
 {
   // =========================================================
   // [TUNING PARAMETERS] 충돌 민감도 튜닝용 로컬 변수 모음
   // =========================================================
   
-  // [Phase 1] 넓게 훑어볼 때 사용할 코스트 임계값 (위험 사전 감지용: 노이즈 방지를 위해 253 권장)
+  // [Phase 1] 넓게 훑어볼 때 사용할 코스트 임계값 (노이즈 방지를 위해 253 권장)
   const unsigned char phase1_thr = 253; 
   
   // [Phase 1] 경로 중심선 기준 좌우로 몇 미터까지 훑어볼 것인가? (맨해튼 버퍼)
-  const double phase1_buffer_m = 0.1;   
+  const double phase1_buffer_m = 0.001; //0.1;   
   
   // [Phase 2] 정밀 검사 시 '충돌(Hit)'로 판정할 코스트 (완전한 물리적 충돌: 254 고정)
   const unsigned char phase2_thr = 254; 
 
   // [Phase 2] 충돌 예상 지점에서 뒤로 몇 미터 후퇴하여 정밀 검사를 시작할 것인가?
-  // (0.6m 정사각형 로봇 대각선 절반 0.424m + 여유 마진 0.1m)
   const double backtrack_m = 0.55;      
 
   // [Phase 2] '모서리 스침'이 아닌 '경로가 꽉 막힘'으로 간주할 장애물의 물리적 면적 (m^2)
-  // (값을 줄이면 얇은 막대기에 민감해짐. 값을 늘리면 웬만한 장애물/노이즈는 무시함)
-  const double heavy_block_area_m2 = 0.0125; 
+  const double heavy_block_area_m2 = 1.0; //0.0125; 
+
+  // [NEW: Phase 2] 로봇 다각형(Footprint)을 물리적으로 확장할 여유 패딩 (m)
+  // 예: 0.02 ~ 0.05를 주면 실제 로봇보다 해당 수치만큼 부풀려진 크기로 충돌을 검사합니다.
+  const double phase2_footprint_padding_m = 0.0001; //0.02; 
 
   // =========================================================
 
@@ -488,12 +487,11 @@ void PathValidatorNode::validatePathOptimized(const std::vector<geometry_msgs::m
   const double res = costmap->getResolution();
   
   // =========================================================
-  // [Phase 1] Broad-Phase: 빠른 인덱스 스캔 (다각형 연산 없음)
+  // [Phase 1] Broad-Phase: 빠른 인덱스 스캔
   // =========================================================
   int phase1_hit_index = -1;
   double acc_dist = 0.0;
   
-  // phase1_buffer_m를 현재 해상도에 맞춰 셀 개수로 환산
   const int buffer_cells = static_cast<int>(phase1_buffer_m / res); 
   const int sx = static_cast<int>(costmap->getSizeInCellsX());
   const int sy = static_cast<int>(costmap->getSizeInCellsY());
@@ -511,7 +509,6 @@ void PathValidatorNode::validatePathOptimized(const std::vector<geometry_msgs::m
     const int ix = static_cast<int>(mx);
     const int iy = static_cast<int>(my);
 
-    // 맨해튼 버퍼 고속 스캔
     for(int dx = -buffer_cells; dx <= buffer_cells && !fast_hit; ++dx) {
       for(int dy = -buffer_cells; dy <= buffer_cells && !fast_hit; ++dy) {
         if (std::abs(dx) + std::abs(dy) > buffer_cells) continue;
@@ -531,18 +528,16 @@ void PathValidatorNode::validatePathOptimized(const std::vector<geometry_msgs::m
     }
   }
 
-  // 위험 지점이 없으면 안전하므로 검사 조기 종료 (연산량 극적 감소)
   if (phase1_hit_index == -1) {
     return;
   }
 
   // =========================================================
-  // [Phase 2] Narrow-Phase: 후퇴 및 정밀(밀도) 검사
+  // [Phase 2] Narrow-Phase 준비: 백트래킹 및 패딩 적용
   // =========================================================
   int narrow_start_idx = phase1_hit_index;
   double back_dist = 0.0;
 
-  // 1. 위험 지점에서 backtrack_m 만큼 후퇴한 시작 인덱스 찾기
   for (int i = phase1_hit_index; i > 0; --i) {
     const auto & p0 = gpath[i-1].pose.position;
     const auto & p1 = gpath[i].pose.position;
@@ -551,13 +546,39 @@ void PathValidatorNode::validatePathOptimized(const std::vector<geometry_msgs::m
     if (back_dist >= backtrack_m) break;
   }
 
-  // 2. 지정한 면적(m^2)을 현재 코스트맵 해상도 기준 셀 개수로 자동 환산
   const int HEAVY_BLOCK_THRESHOLD = std::max(1, static_cast<int>(heavy_block_area_m2 / (res * res)));
+
+  // [NEW] 루프 진입 전, 패딩이 적용된 부풀려진 Footprint 생성 (1회만 연산)
+  std::vector<geometry_msgs::msg::Point> padded_footprint;
+  padded_footprint.reserve(footprint_.size());
+  
+  if (phase2_footprint_padding_m > 0.0 && !footprint_.empty()) {
+    double cx = 0.0, cy = 0.0;
+    for (const auto & p : footprint_) { cx += p.x; cy += p.y; }
+    cx /= static_cast<double>(footprint_.size());
+    cy /= static_cast<double>(footprint_.size());
+    
+    for (const auto & p : footprint_) {
+      double vx = p.x - cx, vy = p.y - cy;
+      double n = std::hypot(vx, vy); 
+      if (n < 1e-6) n = 1.0;
+      
+      geometry_msgs::msg::Point q;
+      q.x = p.x + phase2_footprint_padding_m * (vx / n);
+      q.y = p.y + phase2_footprint_padding_m * (vy / n);
+      q.z = p.z;
+      padded_footprint.push_back(q);
+    }
+  } else {
+    padded_footprint = footprint_;
+  }
 
   size_t consecutive = 0;
   double narrow_acc = 0.0;
 
-  // 3. 후퇴한 지점부터 footprint_step_m 간격으로 전진하며 정밀 다각형 검사
+  // =========================================================
+  // [Phase 2] Narrow-Phase 실행
+  // =========================================================
   for (size_t i = narrow_start_idx; i < gpath.size(); ++i) {
     if (i > static_cast<size_t>(narrow_start_idx)) {
       const auto & p0 = gpath[i-1].pose.position;
@@ -572,11 +593,11 @@ void PathValidatorNode::validatePathOptimized(const std::vector<geometry_msgs::m
     const double c = std::cos(yaw), s = std::sin(yaw);
 
     std::vector<geometry_msgs::msg::Point> poly_world;
-    poly_world.reserve(footprint_.size());
+    poly_world.reserve(padded_footprint.size());
     double minx=1e9, miny=1e9, maxx=-1e9, maxy=-1e9;
     
-    // 로봇 다각형 회전 및 평행 이동
-    for (const auto & p : footprint_) {
+    // [수정 완료] 패딩이 적용된 footprint를 회전 및 평행이동
+    for (const auto & p : padded_footprint) {
       geometry_msgs::msg::Point q;
       q.x = ps.pose.position.x + c * p.x - s * p.y;
       q.y = ps.pose.position.y + s * p.x + c * p.y;
@@ -594,9 +615,8 @@ void PathValidatorNode::validatePathOptimized(const std::vector<geometry_msgs::m
 
     int blocked_cell_count = 0;
     unsigned int hit_mx = 0, hit_my = 0;
-    double min_hit_dist = 1e9; // 로봇의 물리적 위치(cur_pose) 기준 가장 가까운 충돌점 거리를 기록
+    double min_hit_dist_sq = 1e9; // [성능 최적화] 제곱합 비교용 변수
 
-    // 다각형 Bounding Box 내 셀 밀도 카운팅 및 최초 충돌점 추적
     for (int y = min_j; y <= max_j; ++y) {
       for (int x = min_i; x <= max_i; ++x) {
         double wx, wy; costmap->mapToWorld(x, y, wx, wy);
@@ -608,14 +628,16 @@ void PathValidatorNode::validatePathOptimized(const std::vector<geometry_msgs::m
         
         const unsigned char cost = costmap->getCost(umx, umy);
         
-        // 정밀 검사에서는 완전한 물리적 충돌(phase2_thr, 즉 254)만 카운트!
         if ((!ignore_unknown_ || cost != nav2_costmap_2d::NO_INFORMATION) && cost >= phase2_thr) {
           blocked_cell_count++;
           
-          // 로봇 실제 위치로부터 가장 가까운 유클리디안 거리의 셀을 기록
-          double dist_to_robot = std::hypot(wx - cur_pose.position.x, wy - cur_pose.position.y);
-          if (dist_to_robot < min_hit_dist) {
-            min_hit_dist = dist_to_robot;
+          // [성능 최적화] std::hypot 대신 유클리디안 제곱합으로 고속 비교
+          double dx = wx - cur_pose.position.x;
+          double dy = wy - cur_pose.position.y;
+          double dist_sq = dx * dx + dy * dy;          
+          
+          if (dist_sq < min_hit_dist_sq) {
+            min_hit_dist_sq = dist_sq;
             hit_mx = umx;
             hit_my = umy;
           }
@@ -628,30 +650,26 @@ void PathValidatorNode::validatePathOptimized(const std::vector<geometry_msgs::m
     // =========================================================
     if (blocked_cell_count > 0) {
       if (blocked_cell_count >= HEAVY_BLOCK_THRESHOLD) {
-        // 면적이 넓으면 얇은 막대기 또는 꽉 막힌 벽으로 간주 -> 단번에 리플랜 임계치 도달
         consecutive += consecutive_threshold_;
       } else {
-        // 면적이 좁으면 모서리 스침 노이즈로 간주 -> 카운트 1회만 증가
         consecutive++;
       }
 
-      // 연속성(또는 밀도)이 임계값을 넘었을 때만 최종 판단 수행
       if (consecutive >= consecutive_threshold_) {
         double hit_wx, hit_wy;
         costmap->mapToWorld(hit_mx, hit_my, hit_wx, hit_wy);
 
-        // 에이전트 마스크 검사
         if (compare_agent_mask_) {
           bool agent_mark = agentCellBlockedNear(
               hit_mx, hit_my, static_cast<unsigned char>(agent_cost_threshold_), agent_mask_manhattan_buffer_);
               
           if (agent_mark) {
-            const double allowed_dist = 0.424 + 0.1; // 로봇 대각선 + 통신 지연 오차 보정
+            const double allowed_dist = 0.424 + 0.1; 
             auto hits2 = findNearestAgent(hit_wx, hit_wy, allowed_dist);
             if (!hits2.empty()) {
               publishAgentCollisionList(hits2);
               last_agent_block_time_ = this->now();
-              return; // 에이전트면 리플랜 대기 (Hold)
+              return; 
             }
           }
         } else {
@@ -663,28 +681,271 @@ void PathValidatorNode::validatePathOptimized(const std::vector<geometry_msgs::m
           }
         }
 
-        // 에이전트가 아니면 일반 장애물 판정: 즉시 리플랜 실행!
         triggerReplan("blocked (optimized broad-narrow phase)");
         return; 
       }
     } else {
-      // 아무것도 닿지 않은 깨끗한 샘플 구역이면 카운트 초기화
       consecutive = 0;
     }
     
-    // 위험 구간을 충분히 통과했으면 안전하다고 판단하여 정밀 검사 조기 종료
-    // 로봇 대각선(0.42m)의 약 2배 이상인 1.0m를 확실하게 벗어났는지 물리적 거리로 확인합니다.
-    double dist_passed = std::hypot(
-        gpath[i].pose.position.x - gpath[phase1_hit_index].pose.position.x,
-        gpath[i].pose.position.y - gpath[phase1_hit_index].pose.position.y
-    );
-    
-    if (dist_passed > 1.0 && consecutive == 0) {
-        break;
-    }
+    // [수정 완료] 인덱스(칸 수)가 아닌, 물리적 거리(1.0m 이상)를 기준으로 조기 종료 방어 코드 적용
+    if (i > static_cast<size_t>(phase1_hit_index)) {
+      double dist_passed = std::hypot(
+          gpath[i].pose.position.x - gpath[phase1_hit_index].pose.position.x,
+          gpath[i].pose.position.y - gpath[phase1_hit_index].pose.position.y
+      );
+      
+      if (dist_passed > 1.0 && consecutive == 0) {
+          break;
+      }
     }
   }
 }
+
+
+// void PathValidatorNode::validatePathOptimized(const std::vector<geometry_msgs::msg::PoseStamped> & gpath)
+// {
+//   // =========================================================
+//   // [TUNING PARAMETERS] 충돌 민감도 튜닝용 로컬 변수 모음
+//   // =========================================================
+  
+//   // [Phase 1] 넓게 훑어볼 때 사용할 코스트 임계값 (위험 사전 감지용: 노이즈 방지를 위해 253 권장)
+//   const unsigned char phase1_thr = 253; 
+  
+//   // [Phase 1] 경로 중심선 기준 좌우로 몇 미터까지 훑어볼 것인가? (맨해튼 버퍼)
+//   const double phase1_buffer_m = 0.2;   
+  
+//   // [Phase 2] 정밀 검사 시 '충돌(Hit)'로 판정할 코스트 (완전한 물리적 충돌: 254 고정)
+//   const unsigned char phase2_thr = 254; 
+
+//   // [Phase 2] 충돌 예상 지점에서 뒤로 몇 미터 후퇴하여 정밀 검사를 시작할 것인가?
+//   // (0.6m 정사각형 로봇 대각선 절반 0.424m + 여유 마진 0.1m)
+//   const double backtrack_m = 0.55;      
+
+//   // [Phase 2] '모서리 스침'이 아닌 '경로가 꽉 막힘'으로 간주할 장애물의 물리적 면적 (m^2)
+//   // (값을 줄이면 얇은 막대기에 민감해짐. 값을 늘리면 웬만한 장애물/노이즈는 무시함)
+//   const double heavy_block_area_m2 = 1.0;  //0.0125; 
+
+//   // =========================================================
+
+//   std::shared_ptr<nav2_costmap_2d::Costmap2D> costmap;
+//   {
+//     std::lock_guard<std::mutex> lock(costmap_mutex_);
+//     if (!costmap_) return;
+//     costmap = costmap_;
+//   }
+
+//   geometry_msgs::msg::Pose cur_pose;
+//   if (!getCurrentPoseFromTF(cur_pose)) return;
+
+//   const double max_dist_by_time = std::max(min_lookahead_m_, max_speed_ * lookahead_time_sec_);
+//   const double max_check_dist = std::min(max_dist_by_time, path_check_distance_m_);
+//   const double res = costmap->getResolution();
+  
+//   // =========================================================
+//   // [Phase 1] Broad-Phase: 빠른 인덱스 스캔 (다각형 연산 없음)
+//   // =========================================================
+//   int phase1_hit_index = -1;
+//   double acc_dist = 0.0;
+  
+//   // phase1_buffer_m를 현재 해상도에 맞춰 셀 개수로 환산
+//   const int buffer_cells = static_cast<int>(phase1_buffer_m / res); 
+//   const int sx = static_cast<int>(costmap->getSizeInCellsX());
+//   const int sy = static_cast<int>(costmap->getSizeInCellsY());
+
+//   for (size_t i = 1; i < gpath.size(); ++i) {
+//     const auto & p0 = gpath[i-1].pose.position;
+//     const auto & p1 = gpath[i].pose.position;
+//     acc_dist += std::hypot(p1.x - p0.x, p1.y - p0.y);
+//     if (acc_dist > max_check_dist) break;
+
+//     unsigned int mx, my;
+//     if (!costmap->worldToMap(p1.x, p1.y, mx, my)) continue;
+
+//     bool fast_hit = false;
+//     const int ix = static_cast<int>(mx);
+//     const int iy = static_cast<int>(my);
+
+//     // 맨해튼 버퍼 고속 스캔
+//     for(int dx = -buffer_cells; dx <= buffer_cells && !fast_hit; ++dx) {
+//       for(int dy = -buffer_cells; dy <= buffer_cells && !fast_hit; ++dy) {
+//         if (std::abs(dx) + std::abs(dy) > buffer_cells) continue;
+//         int cx = ix + dx, cy = iy + dy;
+//         if(cx >= 0 && cx < sx && cy >= 0 && cy < sy) {
+//           const unsigned char c = costmap->getCost(cx, cy);
+//           if ((!ignore_unknown_ || c != nav2_costmap_2d::NO_INFORMATION) && c >= phase1_thr) {
+//             fast_hit = true;
+//           }
+//         }
+//       }
+//     }
+
+//     if (fast_hit) {
+//       phase1_hit_index = static_cast<int>(i);
+//       break; 
+//     }
+//   }
+
+//   // 위험 지점이 없으면 안전하므로 검사 조기 종료 (연산량 극적 감소)
+//   if (phase1_hit_index == -1) {
+//     return;
+//   }
+
+//   // =========================================================
+//   // [Phase 2] Narrow-Phase: 후퇴 및 정밀(밀도) 검사
+//   // =========================================================
+//   int narrow_start_idx = phase1_hit_index;
+//   double back_dist = 0.0;
+
+//   // 1. 위험 지점에서 backtrack_m 만큼 후퇴한 시작 인덱스 찾기
+//   for (int i = phase1_hit_index; i > 0; --i) {
+//     const auto & p0 = gpath[i-1].pose.position;
+//     const auto & p1 = gpath[i].pose.position;
+//     back_dist += std::hypot(p1.x - p0.x, p1.y - p0.y);
+//     narrow_start_idx = i - 1;
+//     if (back_dist >= backtrack_m) break;
+//   }
+
+//   // 2. 지정한 면적(m^2)을 현재 코스트맵 해상도 기준 셀 개수로 자동 환산
+//   const int HEAVY_BLOCK_THRESHOLD = std::max(1, static_cast<int>(heavy_block_area_m2 / (res * res)));
+
+//   size_t consecutive = 0;
+//   double narrow_acc = 0.0;
+
+//   // 3. 후퇴한 지점부터 footprint_step_m 간격으로 전진하며 정밀 다각형 검사
+//   for (size_t i = narrow_start_idx; i < gpath.size(); ++i) {
+//     if (i > static_cast<size_t>(narrow_start_idx)) {
+//       const auto & p0 = gpath[i-1].pose.position;
+//       const auto & p1 = gpath[i].pose.position;
+//       narrow_acc += std::hypot(p1.x - p0.x, p1.y - p0.y);
+//       if (narrow_acc < footprint_step_m_) continue;
+//       narrow_acc = 0.0;
+//     }
+
+//     const auto & ps = gpath[i];
+//     const double yaw = tf2::getYaw(ps.pose.orientation);
+//     const double c = std::cos(yaw), s = std::sin(yaw);
+
+//     std::vector<geometry_msgs::msg::Point> poly_world;
+//     poly_world.reserve(footprint_.size());
+//     double minx=1e9, miny=1e9, maxx=-1e9, maxy=-1e9;
+    
+//     // 로봇 다각형 회전 및 평행 이동
+//     for (const auto & p : footprint_) {
+//       geometry_msgs::msg::Point q;
+//       q.x = ps.pose.position.x + c * p.x - s * p.y;
+//       q.y = ps.pose.position.y + s * p.x + c * p.y;
+//       q.z = 0.0;
+//       poly_world.push_back(q);
+//       if(q.x < minx) minx = q.x;
+//       if(q.y < miny) miny = q.y;
+//       if(q.x > maxx) maxx = q.x;
+//       if(q.y > maxy) maxy = q.y;
+//     }
+
+//     int min_i, min_j, max_i, max_j;
+//     costmap->worldToMapEnforceBounds(minx, miny, min_i, min_j);
+//     costmap->worldToMapEnforceBounds(maxx, maxy, max_i, max_j);
+
+//     int blocked_cell_count = 0;
+//     unsigned int hit_mx = 0, hit_my = 0;
+//     double min_hit_dist = 1e9; // 로봇의 물리적 위치(cur_pose) 기준 가장 가까운 충돌점 거리를 기록
+
+//     // 다각형 Bounding Box 내 셀 밀도 카운팅 및 최초 충돌점 추적
+//     for (int y = min_j; y <= max_j; ++y) {
+//       for (int x = min_i; x <= max_i; ++x) {
+//         double wx, wy; costmap->mapToWorld(x, y, wx, wy);
+        
+//         if (!pointInPolygon(poly_world, wx, wy)) continue;
+        
+//         const unsigned int umx = static_cast<unsigned int>(x);
+//         const unsigned int umy = static_cast<unsigned int>(y);
+        
+//         const unsigned char cost = costmap->getCost(umx, umy);
+        
+//         // 정밀 검사에서는 완전한 물리적 충돌(phase2_thr, 즉 254)만 카운트!
+//         if ((!ignore_unknown_ || cost != nav2_costmap_2d::NO_INFORMATION) && cost >= phase2_thr) {
+//           blocked_cell_count++;
+          
+//           // 로봇 실제 위치로부터 가장 가까운 유클리디안 거리의 셀을 기록
+//           // double dist_to_robot = std::hypot(wx - cur_pose.position.x, wy - cur_pose.position.y);
+//     // std::hypot 대신 제곱합(dx*dx + dy*dy) 연산으로 속도 극대화
+//           double dx = wx - cur_pose.position.x;
+//           double dy = wy - cur_pose.position.y;
+//           double dist_to_robot = dx * dx + dy * dy;          
+          
+//           if (dist_to_robot < min_hit_dist) {
+//             min_hit_dist = dist_to_robot;
+//             hit_mx = umx;
+//             hit_my = umy;
+//           }
+//         }
+      
+//     }
+
+//     // =========================================================
+//     // [판단 로직] 밀도 확인 및 에이전트 분류
+//     // =========================================================
+//     if (blocked_cell_count > 0) {
+//       if (blocked_cell_count >= HEAVY_BLOCK_THRESHOLD) {
+//         // 면적이 넓으면 얇은 막대기 또는 꽉 막힌 벽으로 간주 -> 단번에 리플랜 임계치 도달
+//         consecutive += consecutive_threshold_;
+//       } else {
+//         // 면적이 좁으면 모서리 스침 노이즈로 간주 -> 카운트 1회만 증가
+//         consecutive++;
+//       }
+
+//       // 연속성(또는 밀도)이 임계값을 넘었을 때만 최종 판단 수행
+//       if (consecutive >= consecutive_threshold_) {
+//         double hit_wx, hit_wy;
+//         costmap->mapToWorld(hit_mx, hit_my, hit_wx, hit_wy);
+
+//         // 에이전트 마스크 검사
+//         if (compare_agent_mask_) {
+//           bool agent_mark = agentCellBlockedNear(
+//               hit_mx, hit_my, static_cast<unsigned char>(agent_cost_threshold_), agent_mask_manhattan_buffer_);
+              
+//           if (agent_mark) {
+//             const double allowed_dist = 0.424 + 0.1; // 로봇 대각선 + 통신 지연 오차 보정
+//             auto hits2 = findNearestAgent(hit_wx, hit_wy, allowed_dist);
+//             if (!hits2.empty()) {
+//               publishAgentCollisionList(hits2);
+//               last_agent_block_time_ = this->now();
+//               return; // 에이전트면 리플랜 대기 (Hold)
+//             }
+//           }
+//         } else {
+//           auto hits = whoCoversPoint(hit_wx, hit_wy); 
+//           if (!hits.empty()) {
+//             publishAgentCollisionList(hits);
+//             last_agent_block_time_ = this->now();
+//             return;
+//           }
+//         }
+
+//         // 에이전트가 아니면 일반 장애물 판정: 즉시 리플랜 실행!
+//         triggerReplan("blocked (optimized broad-narrow phase)");
+//         return; 
+//       }
+//     } else {
+//       // 아무것도 닿지 않은 깨끗한 샘플 구역이면 카운트 초기화
+//       consecutive = 0;
+//     }
+    
+//     // 위험 구간을 충분히 통과했으면 안전하다고 판단하여 정밀 검사 조기 종료
+//     // 로봇 대각선(0.42m)의 약 2배 이상인 1.0m를 확실하게 벗어났는지 물리적 거리로 확인합니다.
+//     double dist_passed = std::hypot(
+//         gpath[i].pose.position.x - gpath[phase1_hit_index].pose.position.x,
+//         gpath[i].pose.position.y - gpath[phase1_hit_index].pose.position.y
+//     );
+    
+//     // if (dist_passed > 1.0 && consecutive == 0) {
+//     if (i > static_cast<size_t>(phase1_hit_index) && dist_passed > 1.0 && consecutive == 0) {
+//         break;
+//     }
+//     }
+//   }
+// }
 
 
 
