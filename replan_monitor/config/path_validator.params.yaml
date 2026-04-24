@@ -38,3 +38,5 @@ path_validator_node:
     # true: 모든 에이전트의 경로 튜브 반영 (기존 방식)
     # false: 나보다 ID가 큰 에이전트의 경로 튜브만 반영
     respect_higher_priority_path: false
+
+    validation_frequency_hz: 5.0 # 5 Hz로 주기적 경로 검증 (충돌 감지 시 즉시 리플랜 신호 발행, false pulse 포함 여부는 publish_false_pulse에 따름)

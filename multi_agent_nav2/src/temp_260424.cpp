@@ -63,9 +63,7 @@ bool AgentLayer::transformAgentInfo(
 {
   const std::string& map_frame = last_infos_->header.frame_id;
 
-  if (map_frame.empty()) {
-    return false;
-  }
+  if (map_frame.empty()) return false;
 
   if (map_frame == costmap_frame) {
     agent_in_costmap_frame = agent_in_map;
@@ -75,7 +73,6 @@ bool AgentLayer::transformAgentInfo(
   agent_in_costmap_frame = agent_in_map; 
   agent_in_costmap_frame.truncated_path.poses.clear();
 
-  // [TF WARNING 해결] Time(0)을 사용하여 최신 변환을 가져옵니다.
   rclcpp::Time latest_time(0);
 
   try {
@@ -104,14 +101,12 @@ bool AgentLayer::transformAgentInfo(
     return true;
 
   } catch (const tf2::TransformException & ex) {
-    RCLCPP_WARN_THROTTLE(
-      logger_, *node_shared_->get_clock(), 2000,
+    RCLCPP_WARN_THROTTLE(logger_, *node_shared_->get_clock(), 2000,
       "Failed to transform agent %u from '%s' to '%s': %s",
       agent_in_map.machine_id, map_frame.c_str(), costmap_frame.c_str(), ex.what());
     return false;
   }
 }
-
 
 AgentLayer::AgentLayer() {}
 
@@ -142,6 +137,13 @@ void AgentLayer::onInitialize()
   declareParameter("max_poses", rclcpp::ParameterValue(10000));
   declareParameter("qos_reliable", rclcpp::ParameterValue(true));
 
+  // ========================================================
+  // [NEW] 경로용 파라미터 등록 (파라미터가 없으면 기본값 사용)
+  // ========================================================
+  declareParameter("path_dilation_m", rclcpp::ParameterValue(-0.1));
+  declareParameter("path_base_cost", rclcpp::ParameterValue(200));
+  declareParameter("path_end_cost", rclcpp::ParameterValue(50));
+
   node_shared_->get_parameter(name_ + "." + "enabled", enabled_);
   node_shared_->get_parameter(name_ + "." + "topic", topic_);
   {
@@ -153,25 +155,21 @@ void AgentLayer::onInitialize()
   node_shared_->get_parameter(name_ + "." + "use_path_header_frame", use_path_header_frame_);
   node_shared_->get_parameter(name_ + "." + "roi_range_m", roi_range_m_);
   node_shared_->get_parameter(name_ + "." + "time_decay_sec", time_decay_sec_);
-  {
-    int tmp = 254; 
-    node_shared_->get_parameter(name_ + "." + "lethal_cost", tmp);
-    lethal_cost_ = static_cast<unsigned char>(std::clamp(tmp, 0, 254));
-  }
-  {
-    int tmp = 180; 
-    node_shared_->get_parameter(name_ + "." + "moving_cost", tmp);
-    moving_cost_ = static_cast<unsigned char>(std::clamp(tmp, 0, 254));
-  }
-  {
-    int tmp = 200; 
-    node_shared_->get_parameter(name_ + "." + "waiting_cost", tmp);
-    waiting_cost_ = static_cast<unsigned char>(std::clamp(tmp, 0, 254));
-  }
+  
+  { int tmp = 254; node_shared_->get_parameter(name_ + "." + "lethal_cost", tmp); lethal_cost_ = static_cast<unsigned char>(std::clamp(tmp, 0, 254)); }
+  { int tmp = 180; node_shared_->get_parameter(name_ + "." + "moving_cost", tmp); moving_cost_ = static_cast<unsigned char>(std::clamp(tmp, 0, 254)); }
+  { int tmp = 200; node_shared_->get_parameter(name_ + "." + "waiting_cost", tmp); waiting_cost_ = static_cast<unsigned char>(std::clamp(tmp, 0, 254)); }
+  
   node_shared_->get_parameter(name_ + "." + "manual_cost_bias", manual_cost_bias_);
   node_shared_->get_parameter(name_ + "." + "dilation_m", dilation_m_);
   node_shared_->get_parameter(name_ + "." + "forward_smear_m", forward_smear_m_);
   node_shared_->get_parameter(name_ + "." + "sigma_k", sigma_k_);
+
+  // 파라미터 값 가져오기
+  node_shared_->get_parameter(name_ + "." + "path_dilation_m", path_dilation_m_);
+  node_shared_->get_parameter(name_ + "." + "path_base_cost", path_base_cost_);
+  node_shared_->get_parameter(name_ + "." + "path_end_cost", path_end_cost_);
+
   node_shared_->get_parameter(name_ + "." + "publish_meta", publish_meta_);
   node_shared_->get_parameter(name_ + "." + "meta_stride", meta_stride_);
   node_shared_->get_parameter(name_ + "." + "freshness_timeout_ms", freshness_timeout_ms_);
@@ -210,43 +208,27 @@ void AgentLayer::onInitialize()
     {
       data.points = toPoint32(footprint_points); 
       data.use_radius = false;
+
+      double max_dist = 0.0;
+      for (const auto& p : footprint_points) {
+        max_dist = std::max(max_dist, std::hypot(p.x, p.y));
+      }
+      data.radius = max_dist;
     } else {
       data.use_radius = true;
-      RCLCPP_INFO(logger_, 
-        "Using radius (%.2f) for machine_id %u (footprint string: '%s')",
-        data.radius, machine_id, footprint_str.c_str());
     }
-
     agent_footprints_[machine_id] = data;
-    
-    RCLCPP_INFO(logger_, 
-      "Loaded footprint for machine_id %u: use_radius=%s, points=%zu",
-      machine_id, (data.use_radius ? "true" : "false"), data.points.size());
   }
 
-  RCLCPP_INFO(
-      logger_,  
-      "AgentLayer '%s' initialized: self_machine_id=%u, self_type_id='%s', moving_cost=%u",
-      name_.c_str(), self_machine_id_, self_type_id_.c_str(), static_cast<unsigned int>(moving_cost_)
-    );
+  RCLCPP_INFO(logger_, "AgentLayer initialized. Body dilation: %.2f, Path dilation: %.2f", dilation_m_, path_dilation_m_);
 
-  // [VISUALIZATION] 시각화용 맵 초기화
   viz_costmap_.setDefaultValue(0); 
-
-  // [수정] 마지막 인자를 true로 설정하여 항상 전체 맵을 발행하도록 강제 (디버깅용)
   costmap_pub_ = std::make_unique<nav2_costmap_2d::Costmap2DPublisher>(
-      node_shared_, 
-      &viz_costmap_, 
-      layered_costmap_->getGlobalFrameID(), 
-      name_ + "/raw_costmap", 
-      true); // <--- HERE: always_send_full_costmap = true
+      node_shared_, &viz_costmap_, layered_costmap_->getGlobalFrameID(), 
+      name_ + "/raw_costmap", true);
 
   current_ = true;
   matchSize();
-
-  // [수정] 여기서 activate()를 강제로 호출하지 않습니다.
-  // Nav2 Lifecycle State Machine이 노드 활성화 시 자동으로 activate()를 호출합니다.
-  // if (enabled_) activate();  <--- 삭제됨
 }
 
 void AgentLayer::activate()
@@ -262,7 +244,6 @@ void AgentLayer::activate()
         "agent_layer_meta", rclcpp::QoS(1).reliable().transient_local());
   }
 
-  // [VISUALIZATION] 여기서 퍼블리셔가 실제로 활성화됩니다.
   if (costmap_pub_) costmap_pub_->on_activate();
 }
 
@@ -270,12 +251,10 @@ void AgentLayer::deactivate()
 {
   sub_.reset();
   meta_pub_.reset();
-
   if (costmap_pub_) costmap_pub_->on_deactivate();
 }
 
-void AgentLayer::infosCallback(
-  const multi_agent_msgs::msg::MultiAgentInfoArray::SharedPtr msg)
+void AgentLayer::infosCallback(const multi_agent_msgs::msg::MultiAgentInfoArray::SharedPtr msg)
 {
   std::lock_guard<std::mutex> lk(data_mtx_);
   last_infos_ = msg;
@@ -285,8 +264,7 @@ void AgentLayer::infosCallback(
 bool AgentLayer::stale(const rclcpp::Time & stamp) const
 {
   return (node_shared_->now() - stamp) >
-         rclcpp::Duration::from_nanoseconds(
-           static_cast<int64_t>(freshness_timeout_ms_) * 1000000LL);
+         rclcpp::Duration::from_nanoseconds(static_cast<int64_t>(freshness_timeout_ms_) * 1000000LL);
 }
 
 bool AgentLayer::isSelf(const multi_agent_msgs::msg::MultiAgentInfo & a) const
@@ -298,11 +276,9 @@ unsigned char AgentLayer::computeCost(const multi_agent_msgs::msg::MultiAgentInf
 {
   using S = multi_agent_msgs::msg::AgentStatus;
   const uint8_t p = a.status.phase;
-  const bool is_moving =
-      (p == S::STATUS_MOVING) || (p == S::STATUS_PATH_SEARCHING);
+  const bool is_moving = (p == S::STATUS_MOVING) || (p == S::STATUS_PATH_SEARCHING);
 
   unsigned char base = is_moving ? moving_cost_ : waiting_cost_;
-
   if (a.mode == "manual") {
     int c = static_cast<int>(base) + manual_cost_bias_;
     return static_cast<unsigned char>(std::clamp(c, 0, 254));
@@ -323,17 +299,18 @@ double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo &
     case S::STATUS_WAITING_FOR_SAFETY:
     case S::STATUS_WAITING_FOR_FLOWCONTROL:
     case S::STATUS_WAITING_FOR_ROS_STATUS:
-      r = std::max(r, 0.0);
-      break;
     case S::STATUS_LOADING:
     case S::STATUS_UNLOADING:
     case S::STATUS_UNLOADED:
-    case S::STATUS_LOADED:
+    case S::STATUS_LOADED:    
+      r = std::max(r, 0.0);
+      break;
+
     case S::STATUS_RECOVERING:
     case S::STATUS_UNKNOWN:
     case S::STATUS_MANUAL_RUNNING:
     case S::STATUS_MANUAL_COMPLETE:
-      r = std::max(r, 0.1); 
+      r = std::max(r, 0.05); 
       break;
     default:
       break;
@@ -344,12 +321,18 @@ double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo &
 void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw*/,
                               double* min_x, double* min_y, double* max_x, double* max_y)
 {
-  if (!enabled_) {
-    return;
-  }
+  if (!enabled_) return;
 
+  transformed_agents_.clear();
   cached_robot_x_ = robot_x;
   cached_robot_y_ = robot_y;
+
+  if (last_touched_) {
+    *min_x = std::min(*min_x, last_min_x_);
+    *min_y = std::min(*min_y, last_min_y_);
+    *max_x = std::max(*max_x, last_max_x_);
+    *max_y = std::max(*max_y, last_max_y_);
+  }
 
   touched_ = false;
   touch_min_x_ =  1e9; touch_min_y_ =  1e9;
@@ -358,46 +341,56 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
   std::vector<multi_agent_msgs::msg::MultiAgentInfo> infos;
   {
     std::lock_guard<std::mutex> lk(data_mtx_);
-    if (!last_infos_ || stale(last_stamp_)) {
-      return;
-    }
+    if (!last_infos_ || stale(last_stamp_)) return;
     infos.assign(last_infos_->agents.begin(), last_infos_->agents.end());
   }
 
   const std::string & costmap_frame = layered_costmap_->getGlobalFrameID();
 
   for (const auto & a_map : infos) { 
-    if (isSelf(a_map)) {
-      continue;
-    }
+    if (isSelf(a_map)) continue;
 
     multi_agent_msgs::msg::MultiAgentInfo a; 
-    if (!transformAgentInfo(a_map, a, costmap_frame)) {
-      continue; 
-    }
+    if (!transformAgentInfo(a_map, a, costmap_frame)) continue; 
 
     const double dx = a.current_pose.pose.position.x - robot_x;
     const double dy = a.current_pose.pose.position.y - robot_y;
-    if (std::hypot(dx, dy) > roi_range_m_) {
-      continue;
+    if (std::hypot(dx, dy) > roi_range_m_) continue;
+
+    transformed_agents_.push_back(a);
+
+    double base_radius = 0.5; // fallback
+    auto it = agent_footprints_.find(a.machine_id);
+    if (it != agent_footprints_.end()) {
+        base_radius = it->second.radius;
     }
 
+    // [수정] 본체(body)와 경로(path)의 bounding box 확장 반경을 서로 분리합니다.
+    double actual_body_dilation = computeDilation(a);
+    double actual_smear = isMovingPhase(a.status.phase) ? forward_smear_m_ : 0.0;
+    
+    double body_extent = base_radius + actual_body_dilation + actual_smear + 0.1;
+    // 음수 path_dilation은 Bounding Box를 키우지 않으므로 양수일 때만 더해줍니다.
+    double path_extent = base_radius + std::max(0.0, path_dilation_m_) + 0.1;
+
+    // 본체 Bounds
     {
       const auto & p = a.current_pose.pose.position;
-      touch_min_x_ = std::min(touch_min_x_, p.x);
-      touch_min_y_ = std::min(touch_min_y_, p.y);
-      touch_max_x_ = std::max(touch_max_x_, p.x);
-      touch_max_y_ = std::max(touch_max_y_, p.y);
+      touch_min_x_ = std::min(touch_min_x_, p.x - body_extent);
+      touch_min_y_ = std::min(touch_min_y_, p.y - body_extent);
+      touch_max_x_ = std::max(touch_max_x_, p.x + body_extent);
+      touch_max_y_ = std::max(touch_max_y_, p.y + body_extent);
       touched_ = true;
     }
 
+    // 경로 Bounds
     const int limit = std::min<int>(a.truncated_path.poses.size(), max_poses_);
     for (int i = 0; i < limit; ++i) {
       const auto & p = a.truncated_path.poses[i].pose.position; 
-      touch_min_x_ = std::min(touch_min_x_, p.x);
-      touch_min_y_ = std::min(touch_min_y_, p.y);
-      touch_max_x_ = std::max(touch_max_x_, p.x);
-      touch_max_y_ = std::max(touch_max_y_, p.y);
+      touch_min_x_ = std::min(touch_min_x_, p.x - path_extent);
+      touch_min_y_ = std::min(touch_min_y_, p.y - path_extent);
+      touch_max_x_ = std::max(touch_max_x_, p.x + path_extent);
+      touch_max_y_ = std::max(touch_max_y_, p.y + path_extent);
       touched_ = true;
     }
   }
@@ -407,14 +400,25 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
     *min_y = std::min(*min_y, touch_min_y_);
     *max_x = std::max(*max_x, touch_max_x_);
     *max_y = std::max(*max_y, touch_max_y_);
+
+    last_min_x_ = touch_min_x_ - 0.1;
+    last_min_y_ = touch_min_y_ - 0.1;
+    last_max_x_ = touch_max_x_ + 0.1;
+    last_max_y_ = touch_max_y_ + 0.1;
+    last_touched_ = true;
+  } else {
+    last_touched_ = false;
   }
 }
 
-
+// ========================================================================
+// [핵심 변경 사항 1] 다각형 꼬임(Bow-tie) 방지를 위한 안전한 음수 팽창 로직
+// ========================================================================
 static inline std::vector<geometry_msgs::msg::Point>
 dilateFootprintDirectional(const std::vector<geometry_msgs::msg::Point32> & in,
                            double iso_dilate_m,
-                           double forward_len_m)
+                           double forward_len_m,
+                           rclcpp::Logger logger) // 에러 로깅을 위해 추가
 {
   std::vector<geometry_msgs::msg::Point> out; out.reserve(in.size());
   if (in.empty()) return out;
@@ -424,12 +428,28 @@ dilateFootprintDirectional(const std::vector<geometry_msgs::msg::Point32> & in,
   cx /= static_cast<double>(in.size());
   cy /= static_cast<double>(in.size());
 
+  // 다각형 중심에서 가장 가까운 변(또는 꼭짓점)까지의 거리 계산
+  double min_dist = 1e9;
+  for (const auto & p : in) {
+      min_dist = std::min(min_dist, std::hypot(p.x - cx, p.y - cy));
+  }
+
+  // 사용자의 파라미터 에러 방어 (너무 큰 음수값 제한)
+  double applied_dilate = iso_dilate_m;
+  if (applied_dilate < 0.0 && std::abs(applied_dilate) >= min_dist) {
+      RCLCPP_WARN_THROTTLE(logger, *rclcpp::Clock().get(), 2000,
+          "[AgentLayer] Negative dilation (%.2f) exceeds min radius (%.2f). Clamping to safe boundary to prevent bow-tie effect.",
+          iso_dilate_m, min_dist);
+      // 최소 1cm(0.01m) 형체는 남겨두도록 강제 제한
+      applied_dilate = -min_dist + 0.01; 
+  }
+
   for (auto & p : in) {
     double vx = p.x - cx, vy = p.y - cy;
     double n = std::hypot(vx, vy); if (n < 1e-6) n = 1.0;
 
-    double x_local = p.x + iso_dilate_m * (vx / n);
-    double y_local = p.y + iso_dilate_m * (vy / n);
+    double x_local = p.x + applied_dilate * (vx / n);
+    double y_local = p.y + applied_dilate * (vy / n);
 
     if (forward_len_m > 1e-6 && (p.x - cx) >= 0.0) {
       x_local += forward_len_m;
@@ -442,6 +462,7 @@ dilateFootprintDirectional(const std::vector<geometry_msgs::msg::Point32> & in,
   return out;
 }
 
+// logger 인자 추가
 void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
                                  const geometry_msgs::msg::Pose & pose,
                                  double extra_dilation_m,
@@ -450,7 +471,7 @@ void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
                                  unsigned char cost,
                                  std::vector<std::pair<unsigned int,unsigned int>> * meta_hits)
 {
-  auto poly = dilateFootprintDirectional(fp.polygon.points, extra_dilation_m, forward_len_m);
+  auto poly = dilateFootprintDirectional(fp.polygon.points, extra_dilation_m, forward_len_m, logger_);
 
   const double yaw = tf2::getYaw(pose.orientation);
   const double c = std::cos(yaw), s = std::sin(yaw);
@@ -481,9 +502,12 @@ void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
       for (size_t k=0, h=n-1; k<n; h=k++) {
         const double xi = poly[k].x, yi = poly[k].y;
         const double xh = poly[h].x, yh = poly[h].y;
+
         const bool hit = ((yi > wy) != (yh > wy)) &&
-                         (wx < (xh - xi) * (wy - yi) / std::max(1e-12, (yh - yi)) + xi);
-        if (hit) inside = !inside;
+                         (wx < (xh - xi) * (wy - yi) / (yh - yi) + xi);
+        if (hit) {
+            inside = !inside;
+        }
       }
 
       if (inside) {
@@ -512,6 +536,9 @@ void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
   }
 }
 
+// ========================================================================
+// [핵심 변경 사항 2, 3] 본체와 경로 팽창 분리 및 경로 선형 코스트 감소
+// ========================================================================
 void AgentLayer::rasterizeAgentPath(
   const multi_agent_msgs::msg::MultiAgentInfo & a,
   nav2_costmap_2d::Costmap2D * grid,
@@ -523,16 +550,32 @@ void AgentLayer::rasterizeAgentPath(
   }
 
   const unsigned char cost_now = computeCost(a);
-  const double iso_extra = computeDilation(a);
+  const double body_iso_extra = computeDilation(a);
   const double forward_len = isMovingPhase(a.status.phase) ? forward_smear_m_ : 0.0;
 
-  fillFootprintAt(fp, a.current_pose.pose, iso_extra, forward_len,
-                  grid, cost_now, &meta_hits);
+  // 1. 에이전트 본체 그리기 (기존 로직: 동적 팽창 + 전방 스미어 적용)
+  fillFootprintAt(fp, a.current_pose.pose, body_iso_extra, forward_len, grid, cost_now, &meta_hits);
 
+  // 2. 미래 경로 그리기 (경로 전용 파라미터 적용)
   const int limit = std::min<int>(a.truncated_path.poses.size(), max_poses_);
   for (int i = 0; i < limit; ++i) {
-    const auto & ps = a.truncated_path.poses[i].pose;
-    fillFootprintAt(fp, ps, iso_extra * 0.5, 0.0, grid, cost_now, &meta_hits);
+    auto ps = a.truncated_path.poses[i].pose;
+    // (선택) 경로가 대각선일 때 찌그러짐을 방지하기 위해, 각도를 로봇 본체와 맞춰줌
+    ps.orientation = a.current_pose.pose.orientation;
+
+    // [기능 3] 선형적인 코스트 감소(Linear Cost Decay)
+    // i가 0이면 path_base_cost_, i가 limit-1이면 path_end_cost_에 도달함
+    double ratio = (limit > 1) ? static_cast<double>(i) / (limit - 1) : 0.0;
+    int decayed_cost_int = path_base_cost_ - static_cast<int>((path_base_cost_ - path_end_cost_) * ratio);
+    
+    // 0~255 안전 클램핑
+    unsigned char decay_cost = static_cast<unsigned char>(std::clamp(decay_cost_int, 0, 255));
+
+    // 코스트가 0(Free) 이하로 떨어졌다면 그릴 필요 없으므로 최적화를 위해 건너뜀
+    if (decay_cost == 0) continue;
+
+    // [기능 2] 경로에는 path_dilation_m_ 값을 팽창/수축값으로 고정 사용하여 그리기
+    fillFootprintAt(fp, ps, path_dilation_m_, 0.0, grid, decay_cost, &meta_hits);
   }
 }
 
@@ -541,9 +584,6 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
 {
   if (!enabled_) return;
 
-  // =================================================================
-  // [VISUALIZATION] 시각화용 맵(viz_costmap_) 동기화 및 초기화
-  // =================================================================
   {
       std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(viz_costmap_.getMutex()));
       
@@ -563,47 +603,19 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
       unsigned char* char_map = viz_costmap_.getCharMap();
       unsigned int size_x = viz_costmap_.getSizeInCellsX();
       unsigned int size_y = viz_costmap_.getSizeInCellsY();
-      // 전체 맵을 0(FREE_SPACE)으로 초기화
       std::memset(char_map, 0, size_x * size_y * sizeof(unsigned char));
-  }
-
-  std::vector<multi_agent_msgs::msg::MultiAgentInfo> infos;
-  {
-    std::lock_guard<std::mutex> lk(data_mtx_);
-    if (!last_infos_ || stale(last_stamp_)) return;
-    infos.assign(last_infos_->agents.begin(), last_infos_->agents.end());
   }
 
   std::vector<std::pair<unsigned int,unsigned int>> meta_hits;
   meta_hits.reserve(256);
   std::vector<std::pair<unsigned int,unsigned int>> dummy_hits; 
 
-  const double robot_x = cached_robot_x_;
-  const double robot_y = cached_robot_y_;
-  const std::string & costmap_frame = layered_costmap_->getGlobalFrameID();
-
-  for (const auto & a_map : infos) { 
-    if (isSelf(a_map)) continue;
-
-    multi_agent_msgs::msg::MultiAgentInfo a;
-    if (!transformAgentInfo(a_map, a, costmap_frame)) {
-      continue;
-    }
-
-    const double dx = a.current_pose.pose.position.x - robot_x;
-    const double dy = a.current_pose.pose.position.y - robot_y;
-    if (std::hypot(dx, dy) > roi_range_m_) continue;
-
-    // 1. [NAVIGATION] Master Grid에 직접 그리기
+  for (const auto & a : transformed_agents_) { 
     rasterizeAgentPath(a, &master_grid, meta_hits);
-
-    // 2. [VISUALIZATION] Viz Grid에 따로 그리기
     rasterizeAgentPath(a, &viz_costmap_, dummy_hits);
   }
 
-  // [VISUALIZATION] 별도 Costmap 발행
   if (costmap_pub_) {
-      // bounds 업데이트와 상관없이 생성자의 true 옵션 덕분에 항상 발행됨
       costmap_pub_->updateBounds(0, viz_costmap_.getSizeInCellsX(),
                                  0, viz_costmap_.getSizeInCellsY());
       costmap_pub_->publishCostmap();
@@ -619,11 +631,9 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
       double wx, wy; master_grid.mapToWorld(mx, my, wx, wy);
       multi_agent_msgs::msg::AgentLayerCellMeta cm;
       cm.header = arr.header;
-
       cm.machine_id = 0;
       cm.position.x = wx; cm.position.y = wy; cm.position.z = 0.0;
       cm.mx = mx; cm.my = my;
-
       arr.cells.emplace_back(std::move(cm));
     }
     meta_pub_->publish(std::move(arr));

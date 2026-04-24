@@ -69,7 +69,7 @@ global_costmap:
         # 입력 토픽 및 좌표계 체크
         topic: /multi_agent_infos
         use_path_header_frame: true     # path.header.frame_id가 global_frame과 같을 때만 반영
-        roi_range_m: 12.0               # 우리 로봇 기준 반경 ROI (성능/노이즈 필터링용)
+        roi_range_m: 6.0               # 우리 로봇 기준 반경 ROI (성능/노이즈 필터링용)
 
         # 자기 식별(내 로봇은 무시)
         self_machine_id: 0              # 내 robot의 machine_id
@@ -90,9 +90,18 @@ global_costmap:
         sigma_k: 2.0                    # pos_std_m * sigma_k 만큼 추가 여유
         forward_smear_m: 0.25           # 이동중일 때만 전방(+x)으로 늘리는 길이
 
+        path_dilation_m: -0.01           # path 기반 추가 팽창 (dilation_m과 별개로, 경로를 따라 추가 여유 공간 확보)
+        path_base_cost: 254              # path 기반 기본 코스트
+        path_end_cost: 50                # path 기반 종료 코스트
+
+
         # 메타 퍼블리시(디버그/시각화용)
         publish_meta: true
         meta_stride: 3
+
+
+
+
 
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
