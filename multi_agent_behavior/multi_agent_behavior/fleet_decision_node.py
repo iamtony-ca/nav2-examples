@@ -185,9 +185,9 @@ class FleetDecisionNode(Node):
         self.pub_cmd_stop = self.create_publisher(Bool, 
             self.get_parameter("topic_cmd_stop").value, qos_req, callback_group=self.cb_group)
 
-        self.create_timer(0.05, self.check_collision_obstacle, callback_group=self.cb_group)
+        self.create_timer(0.1, self.check_collision_obstacle, callback_group=self.cb_group)
 
-        self.create_timer(0.05, self.check_collision_agent, callback_group=self.cb_group)
+        self.create_timer(0.1, self.check_collision_agent, callback_group=self.cb_group)
 
 
         # [추가] 현재 일시정지/재계획 시퀀스가 진행 중인지 확인하는 플래그
