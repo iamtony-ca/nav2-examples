@@ -18,6 +18,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 
 from enum import IntEnum
 from typing import Optional, Dict, Tuple, List
+import time
 
 # ----------------------------------------------------------------------
 # 1) Enums & Constants
@@ -116,7 +117,7 @@ class FleetDecisionNode(Node):
 # ---------------------------------------------------------
         # [수정 1] Replan Flag 수신 시 대기할 시간(N sec) 및 타이머 변수 추가
         # ---------------------------------------------------------
-        self.declare_parameter("replan_flag_wait_sec", 2.0)
+        self.declare_parameter("replan_flag_wait_sec", 10.0)
         self.replan_flag_wait_sec = self.get_parameter("replan_flag_wait_sec").value
         self._replan_flag_timer = None
         
@@ -135,8 +136,6 @@ class FleetDecisionNode(Node):
         self.declare_parameter("replan_clear_timeout_sec", 2.0)
         self.replan_clear_timeout_sec = self.get_parameter("replan_clear_timeout_sec").value
         
-        # [추가] False가 처음 들어온 시간을 기록할 변수
-        self._replan_flag_false_start_time: Optional[Time] = None
 
         # Internal State
         self._is_reroute_status = RerouteStatus.NONE
@@ -186,11 +185,36 @@ class FleetDecisionNode(Node):
         self.pub_cmd_stop = self.create_publisher(Bool, 
             self.get_parameter("topic_cmd_stop").value, qos_req, callback_group=self.cb_group)
 
-        # [수정] Watchdog Timer 생성 (0.1초 간격으로 메시지 끊김 확인)
-        self.create_timer(0.1, self.check_collision_timeout, callback_group=self.cb_group)
+        self.create_timer(0.05, self.check_collision_obstacle, callback_group=self.cb_group)
+
+        self.create_timer(0.05, self.check_collision_agent, callback_group=self.cb_group)
+
 
         # [추가] 현재 일시정지/재계획 시퀀스가 진행 중인지 확인하는 플래그
-        self.is_processing_pause = False
+        self.is_processing_replan_pause = False
+        self.replan_flag_status = False
+        self.delay_after_replan = False 
+        self.replan_pause_timeout_sec = 15.0  # replan_flag가 True인 상태에서 대기할 최대 시간 (예: 15초)
+        self.delay_after_replan_start_time: Optional[Time] = None
+        self._pause_start_time: Optional[Time] = None
+        self._replan_flag_false_start_time: Optional[Time] = None
+
+
+# ==========================================================
+        # [신규 추가] Agent 충돌 예측 전용 상태 변수
+        # ==========================================================
+        self.agent_collision_status = False
+        self.is_processing_agent_pause = False
+        self.delay_after_agent_action = False
+        self.agent_pause_timeout_sec = 0.0  # N초 대기 (명령어마다 다름)
+        self.current_agent_command = MovingCommand.WAIT
+        self.current_agent_stop_type = MovingStopType.TYPE_NONE
+        
+        self.delay_after_agent_start_time: Optional[Time] = None
+        self._agent_pause_start_time: Optional[Time] = None
+        self._agent_clear_start_time: Optional[Time] = None
+        # ==========================================================
+
 
         # ------------------------------------------------------------------
         # Log All Parameters
@@ -219,34 +243,6 @@ class FleetDecisionNode(Node):
         self.get_logger().info("====================================================")
 
     # ------------------------------------------------------------------
-    # [NEW] Watchdog Timer Callback
-    # ------------------------------------------------------------------
-    def check_collision_timeout(self):
-        """
-        충돌 메시지가 일정 시간 동안 수신되지 않으면 장애물이 사라진 것으로 간주하고
-        RUN/RESUME 상태로 전환합니다.
-        """
-        # 아직 한 번도 충돌 메시지를 받은 적 없으면 패스 (혹은 기본 RUN 유지)
-        if self._last_collision_msg_time is None:
-            # 만약 초기 상태에서도 RUN 신호를 줘야 한다면 여기서 _handle_no_obstacle 호출 가능
-            # 현재 로직상 on_collision이 호출되어야 상태가 변하므로, 
-            # 초기에는 안전하게 아무것도 안 하거나, 안전하다고 가정하고 RUN을 쏠 수 있음.
-            # 여기서는 '이전에 멈춘 적이 있다면' 풀어주는 용도로 사용.
-            if self._pre_moving_stop_type != MovingStopType.TYPE_NONE:
-                 self._handle_no_obstacle()
-            return
-
-        # 마지막 수신 시간으로부터 경과 시간 계산
-        now = self.get_clock().now()
-        dt = (now - self._last_collision_msg_time).nanoseconds * 1e-9
-
-        # 타임아웃 발생 시 장애물 해소 처리
-        if dt > self.collision_msg_timeout:
-            # 이미 처리했으면(TYPE_NONE) 반복 호출 방지 (로그 스팸 방지용)
-            # 단, RUN/RESUME 신호는 지속적으로 줘야 하므로 _handle_no_obstacle 내부는 실행
-            self._handle_no_obstacle()
-
-    # ------------------------------------------------------------------
     # Callbacks
     # ------------------------------------------------------------------
     def on_agents(self, msg: MultiAgentInfoArray):
@@ -266,223 +262,239 @@ class FleetDecisionNode(Node):
 
 
     def on_replan_flag(self, msg: Bool):
+        self.get_logger().info(f"Received replan_flag: {msg.data}", throttle_duration_sec=2.0)
+        self.replan_flag_status = msg.data
+
+
+
+    def check_collision_obstacle(self):
+        """
+        충돌 메시지 타임아웃과 별개로, replan_flag가 True로 유지되는 경우 일정 시간 후에 자동으로 주행 재개하는 로직
+        """
+       
         now = self.get_clock().now()
 
-        # ---------------------------------------------------------
-        # 1. 장애물 없음 (False) 수신 처리 -> 조기 주행 재개 로직
-        # ---------------------------------------------------------
-        if not msg.data:
+        if self.is_processing_agent_pause is True:
+            return # Agent 충돌 시 Replan Pause 시퀀스 우선 처리
+
+
+        if self.delay_after_replan and self.delay_after_replan_start_time is not None:
+            elapsed_delay = (now - self.delay_after_replan_start_time).nanoseconds * 1e-9
+            if elapsed_delay >= 1.5:
+                self.pub_cmd_resume.publish(Bool(data=False))
+                self._publish_state("RUN (Delay After Replan)")  
+                self._pause_start_time = None
+                self.delay_after_replan_start_time = None
+                self.is_processing_replan_pause = False
+                self.delay_after_replan = False
+                self._replan_flag_false_start_time = None
+                return
+            return
+
+
+        if self.is_processing_replan_pause and self.replan_flag_status is True:
+            self._replan_flag_false_start_time = None
+            if self._pause_start_time is not None:
+                dt = (now - self._pause_start_time).nanoseconds * 1e-9
+                if dt < self.replan_pause_timeout_sec: 
+                    self.get_logger().info(f"Obstacle detected but pausing for {dt:.1f}s (within timeout threshold).", throttle_duration_sec=2.0)
+                elif dt >= self.replan_pause_timeout_sec:
+                    self.get_logger().warn(f"Obstacle detected timeout for {dt:.1f}s. Initiating resume sequence.")
+                    
+                    if self.delay_after_replan == False:
+                        self._publish_replan()
+                        self.delay_after_replan = True
+                        if self.delay_after_replan_start_time is None:
+                            self.delay_after_replan_start_time = now
+                            return
+
+
+        if self.is_processing_replan_pause and self.replan_flag_status is False and self.delay_after_replan == False:
             if self._replan_flag_false_start_time is None:
                 # 처음 False가 들어온 시간 기록
                 self._replan_flag_false_start_time = now
             else:
                 elapsed = (now - self._replan_flag_false_start_time).nanoseconds * 1e-9
-                
                 # M초(replan_clear_timeout_sec) 이상 연속으로 False가 들어오면
                 if elapsed >= self.replan_clear_timeout_sec:
-                    if self.is_processing_pause:
+                    if self.is_processing_replan_pause:
                         self.get_logger().warn(f"Path clear for {elapsed:.1f}s. Aborting Pause Sequence & Early Resume!")
-                        self._abort_sequence_and_resume()
+                        # self._abort_sequence_and_resume()
+                        
+                        # self._pre_moving_stop_type = MovingStopType.TYPE_NONE
+                        
+                        # 3. 주행 재개 신호 즉시 발행
+                        self.pub_cmd_resume.publish(Bool(data=False))
+                        
+                        self._publish_state("RUN (Early Resume)")  
                     
-                    # 이미 조기 종료를 처리했으므로 시간 초기화 (중복 실행 방지)
-                    self._replan_flag_false_start_time = None
-            return
-
-        # ---------------------------------------------------------
-        # 2. 장애물 감지 (True) 수신 처리
-        # ---------------------------------------------------------
-        # True가 한 번이라도 들어오면 False 연속 카운트 초기화
-        self._replan_flag_false_start_time = None  
-
-        if self.is_processing_pause: 
-            return # 이미 시퀀스가 돌고 있다면 무시
-
-        if self._last_agent_event_time is not None:
-            dt = (now - self._last_agent_event_time).nanoseconds * 1e-9
-            if dt < self.replan_ignore_sec: return
-        
-        resume_delay = 1.5 
-        self._start_moving_sequence(
-            self.replan_flag_wait_sec, 
-            resume_delay, 
-            MovingCommand.WAIT_SIMPLE_REPLAN, 
-            MovingStopType.TYPE_NONE
-        )
-
-    def _abort_sequence_and_resume(self):
-        """ 타이머 완료 전, 시퀀스를 강제 종료하고 주행을 즉시 재개합니다. """
-        
-        # 1. 돌아가고 있는 모든 타이머 강제 취소
-        if self._replan_flag_timer is not None:
-            self._replan_flag_timer.cancel()
-            self.destroy_timer(self._replan_flag_timer)
-            self._replan_flag_timer = None
-            
-        if self._resume_timer is not None:
-            self._resume_timer.cancel()
-            self.destroy_timer(self._resume_timer)
-            self._resume_timer = None
-            
-        # 2. 잠금 해제 및 상태 초기화
-        self.is_processing_pause = False
-        self._pre_moving_stop_type = MovingStopType.TYPE_NONE
-        
-        # 3. 주행 재개 신호 즉시 발행
-        self.pub_cmd_resume.publish(Bool(data=False))
-        self.pub_cmd_run.publish(Bool(data=True))
-        
-        self._publish_state("RUN (Early Resume)")
+                        # 이미 조기 종료를 처리했으므로 시간 초기화 (중복 실행 방지)
+                        self._replan_flag_false_start_time = None
+                        self._pause_start_time = None
+                        self.is_processing_replan_pause = False
+                        self.delay_after_replan = False
+                        self.delay_after_replan_start_time = None
 
 
-    def _start_moving_sequence(self, pause_sec: float, replan_delay: float, command: MovingCommand, stop_type: MovingStopType):
-        """
-        [최종 통합 시퀀스 제어기]
-        - pause_sec (N): 정지 대기 시간
-        - replan_delay (M): 요청 후 Resume까지의 추가 대기 시간
-        - command: N초 후 실행할 명령 (REROUTE, REPLAN, 혹은 NONE)
-        """
-        if self.is_processing_pause:
-            return
+                
 
-        self.is_processing_pause = True
-        self._pre_moving_stop_type = stop_type
-        
-        # STEP 1: PAUSE (N sec)
-        if pause_sec > 0.0:
-            self.get_logger().warn(f"[{stop_type.name}] STEP 1: Pause {pause_sec}s for {command.name}")
+        if self.replan_flag_status is True and not self.is_processing_replan_pause and self.delay_after_replan == False:
+            self.is_processing_replan_pause = True
+            self._pause_start_time = now
             self._publish_stop()
-            self._publish_state(f"{stop_type.name}: PAUSE {pause_sec}s")
+            return
+
+
+
+
+    def check_collision_agent(self):
+        """ Agent 충돌 예측에 대한 상태 머신 (20Hz 주기 실행) """
+        now = self.get_clock().now()
+
+        if self.is_processing_replan_pause is True:
+            return # Replan Pause 시퀀스 진행 중이면 Agent 충돌 상태 머신은 일시 중지 (우선순위 보장)
+
+
+        # [Phase 3] Action 후 지연 대기 (M초)
+        if self.delay_after_agent_action and self.delay_after_agent_start_time is not None:
+            elapsed_delay = (now - self.delay_after_agent_start_time).nanoseconds * 1e-9
             
-            # N초 후 STEP 2(Action 단계)로 이동
-            self._replan_flag_timer = self.create_timer(
-                pause_sec, 
-                partial(self._action_step_callback, replan_delay, command)
-            )
-        else:
-            # 대기 시간이 없으면 즉시 실행
-            self._action_step_callback(replan_delay, command)
+            # Reroute면 1.0초, 그 외는 1.5초 등 유동적 할당 가능
+            wait_m = 1.0 if self.current_agent_command == MovingCommand.REROUTE else 1.5
+            if self.current_agent_command == MovingCommand.WAIT_SIMPLE_RESUME:
+                wait_m = 0.0 # Replan/Reroute 안 하는 경우 바로 Resume
+                
+            if elapsed_delay >= wait_m:
+                self.pub_cmd_resume.publish(Bool(data=False))
+                self._publish_state(f"RUN ({self.current_agent_command.name} Done)")  
+                
+                self._agent_pause_start_time = None
+                self.delay_after_agent_start_time = None
+                self.is_processing_agent_pause = False
+                self.delay_after_agent_action = False
+                self._agent_clear_start_time = None
+            return
+
+        # [Phase 1 & 2] Pause 진행 중
+        if self.is_processing_agent_pause and self.agent_collision_status is True:
+            self._agent_clear_start_time = None # Early Exit 카운트 리셋
+            
+            if self._agent_pause_start_time is not None:
+                dt = (now - self._agent_pause_start_time).nanoseconds * 1e-9
+                if dt < self.agent_pause_timeout_sec: 
+                    self.get_logger().info(f"Agent Pause: {dt:.1f}s / {self.agent_pause_timeout_sec}s", throttle_duration_sec=2.0)
+                else:
+                    self.get_logger().warn(f"Agent Timeout {dt:.1f}s. Initiating Action.")
+                    if self.delay_after_agent_action == False:
+                        cmd = self.current_agent_command
+                        if cmd == MovingCommand.WAIT_SIMPLE_RESUME:
+                            # Replan 없이 즉시 출발
+                            self.get_logger().info("Simple Resume. Releasing lock.")
+                            self.pub_cmd_resume.publish(Bool(data=False))
+                            self._publish_state("RUN (Simple Resume)")
+                            # 상태 완전 초기화
+                            self.is_processing_agent_pause = False
+                            self._agent_pause_start_time = None
+                            self._agent_clear_start_time = None
+                            return # 여기서 끝냄
+
+                        # Reroute 또는 Replan 실행
+                        if cmd == MovingCommand.REROUTE:
+                            self._publish_reroute()
+                        else:
+                            self._publish_replan()
+                            
+                        self.delay_after_agent_action = True
+                        if self.delay_after_agent_start_time is None:
+                            self.delay_after_agent_start_time = now
+                        return
 
 
-    def _action_step_callback(self, delay: float, command: MovingCommand):
-        if self._replan_flag_timer is not None:
-            self._replan_flag_timer.cancel()
-            self.destroy_timer(self._replan_flag_timer)
-            self._replan_flag_timer = None
 
-        # --- STEP 2: 액션 실행 ---
-        if command == MovingCommand.REROUTE:
-            self.get_logger().error(f"STEP 2: Requesting REROUTE. Waiting {delay}s...")
-            self._publish_reroute()
-        elif command == MovingCommand.WAIT_SIMPLE_RESUME:
-            self.get_logger().info("STEP 2: Simple Resume Mode (No Action).")
-            delay = 0.0 # 강제로 지연시간 없앰
-        else:
-            # 기본적으로 Replan 실행 (M > 0 일 때)
-            if delay > 0.0:
-                self.get_logger().info(f"STEP 2: Requesting REPLAN. Waiting {delay}s...")
-                self._publish_replan()
+
+
+        # [Phase 0 -> 조기 종료] 연속 False 판정 (Early Exit)
+        if self.is_processing_agent_pause and self.agent_collision_status is False and self.delay_after_agent_action == False:
+            if self._agent_clear_start_time is None:
+                self._agent_clear_start_time = now
             else:
-                self.get_logger().info("STEP 2: Skip Action (M=0).")
+                elapsed = (now - self._agent_clear_start_time).nanoseconds * 1e-9
+                # collision_msg_timeout_sec (3.0초) 이상 비연속 충돌일 경우
+                # if elapsed >= self.collision_msg_timeout:
+                if elapsed >= 3.0: # [수정] 고정값으로 3.0초 사용 (충돌 메시지 타임아웃과 동일하게)
+                    self.get_logger().warn(f"Agent path clear for {elapsed:.1f}s. Early Resume!")
+                    self.pub_cmd_resume.publish(Bool(data=False))
+                    self._publish_state("RUN (Agent Early Resume)")  
+                
+                    self._agent_clear_start_time = None
+                    self._agent_pause_start_time = None
+                    self.is_processing_agent_pause = False
+                    self.delay_after_agent_action = False
+                    self.delay_after_agent_start_time = None
 
-        # STEP 3: RESUME 예약
-        if delay > 0.0:
-            if self._resume_timer is None:
-                self._resume_timer = self.create_timer(delay, self._resume_step_callback)
-        else:
-            self._resume_step_callback()
-
-    def _resume_step_callback(self):
-        """ STEP 3: 최종 Resume 및 잠금 해제 """
-        if self._resume_timer is not None:
-            self._resume_timer.cancel()
-            self.destroy_timer(self._resume_timer)
-            self._resume_timer = None
-
-        self.pub_cmd_resume.publish(Bool(data=False))
-        self.get_logger().warn("STEP 3: Sequence Finished -> RESUME")
-        self.is_processing_pause = False
-
-    def _execute_command(self, command: MovingCommand, stop_type: MovingStopType):
-        if self.is_processing_pause: return
-
-        # 기본 파라미터 설정
-        n_pause = 0.0
-        m_wait = 1.5  # 요청 후 안정화를 위한 기본 대기 시간
-
-
-
-        # 대기 시간 매핑
-        if command == MovingCommand.REROUTE:
-            # Reroute 전에도 주변 상황 파악을 위해 약간의 Pause(예: 1초)를 줄 수 있습니다.
-            # 즉시 요청하려면 n_pause = 0.0
-            n_pause = 5.0 
-            m_wait = 1.0  # Reroute는 경로 계산 시간이 더 걸릴 수 있으므로 길게 설정 가능
-
-        elif command == MovingCommand.WAIT_DETECT_AMR:
-            n_pause = self.wait_detect_sec
-        elif command == MovingCommand.WAIT_OHTHER_AMR:
-            n_pause = self.wait_other_long_sec if self.use_reroute else self.wait_other_short_sec
-        elif command == MovingCommand.WAIT_ABNORMAL:
-            n_pause = self.wait_abnormal_long_sec if self.use_reroute else self.wait_abnormal_short_sec
-        elif command == MovingCommand.WAIT: # TYPE_11
-             n_pause = self.wait_obstacle_sec
-        # [수정] Simple Mode 시간 매핑 통합
-        # elif command in [MovingCommand.WAIT_SIMPLE_REPLAN, MovingCommand.WAIT_SIMPLE_RESUME]:    
-        #     wait_time = self.wait_simple_mode  
-        elif command == MovingCommand.WAIT_SIMPLE_REPLAN:    
-            n_pause = 3.0            
-        elif command == MovingCommand.WAIT_SIMPLE_RESUME:
-            n_pause = 6.0
-
-
-        # 통합 시퀀스 시작
-        self._start_moving_sequence(n_pause, m_wait, command, stop_type)
+        # [Phase 0 -> 신규 진입] 새로운 장애물 발견 시
+        if self.agent_collision_status is True and not self.is_processing_agent_pause and self.delay_after_agent_action == False:
+            self.is_processing_agent_pause = True
+            self._agent_pause_start_time = now
+            
+            # 대기 시간(N초) 매핑
+            n_pause = 0.0
+            cmd = self.current_agent_command
+            if cmd == MovingCommand.REROUTE: n_pause = 5.0 
+            elif cmd == MovingCommand.WAIT_DETECT_AMR: n_pause = self.wait_detect_sec
+            elif cmd == MovingCommand.WAIT_OHTHER_AMR: n_pause = self.wait_other_long_sec if self.use_reroute else self.wait_other_short_sec
+            elif cmd == MovingCommand.WAIT_ABNORMAL: n_pause = self.wait_abnormal_long_sec if self.use_reroute else self.wait_abnormal_short_sec
+            elif cmd == MovingCommand.WAIT: n_pause = self.wait_obstacle_sec
+            elif cmd == MovingCommand.WAIT_SIMPLE_REPLAN: n_pause = 3.0            
+            elif cmd == MovingCommand.WAIT_SIMPLE_RESUME: n_pause = 6.0
+            
+            self.agent_pause_timeout_sec = n_pause
+            
+            self._publish_stop()
+            self._publish_state(f"{self.current_agent_stop_type.name}: PAUSE {n_pause}s")
 
 
 
-    
+
     def on_collision(self, msg: PathAgentCollisionInfo):
-        """ 메인 의사결정 루프 """
-        
-    # 1. 생존 신고(타임스탬프 갱신)는 조건 없이 무조건 가장 먼저 처리!
+        """ 센서처럼 주기적으로 들어오는 Agent 충돌 정보 업데이트 """
         self._last_collision_msg_time = self.get_clock().now()
-        self._last_agent_event_time = self.get_clock().now() # 기와이면 이것도 같이
-
-        # 2. Pause 시퀀스 중이면 의사결정 로직 무시 (타이머가 우선권)
-        if self.is_processing_pause:
-            return
-
-        # 혹시라도 빈 메시지가 들어올 경우를 대비한 방어 코드
-        if not msg.x: 
-            self._handle_no_obstacle()
-            return
-
         self._last_agent_event_time = self.get_clock().now()
 
-        # [리뷰 반영] machine_id가 비어있다 = 알려지지 않은 일반 장애물 = TYPE_11
-        if not msg.machine_id:
-            self._execute_command(MovingCommand.WAIT, MovingStopType.TYPE_11)
+        # 1. "non_collision" 이거나 x 좌표가 비어있으면 장애물 없음(False)으로 처리
+        is_clear = False
+        if not msg.x:
+            is_clear = True
+        elif msg.note and "non_collision" in msg.note[0]:
+            is_clear = True
+
+        if is_clear:
+            self.agent_collision_status = False
             return
 
-        # 가장 가까운 충돌 객체 정보 추출
-        target_id = int(msg.machine_id[0])
-        collision_x = float(msg.x[0])
-        collision_y = float(msg.y[0])
-
-        # 내 자신이면 무시 (Safety)
+        # 2. 장애물이 있을 때 (True)
+        target_id = int(msg.machine_id[0]) if msg.machine_id else 0
+        
+        # 내 자신이면 무시
         if target_id == self.my_id:
-            self._handle_no_obstacle()
-            return
-        
-        # 0번 ID도 보통 Invalid로 취급 -> TYPE_11로 Fallback하거나 RUN
-        if target_id == 0:
-            self._execute_command(MovingCommand.WAIT, MovingStopType.TYPE_11)
+            self.agent_collision_status = False
             return
 
-        # [리뷰 반영] 충돌 좌표를 넘겨서 정밀 판정 수행
-        command, stop_type = self._decide_obstacle_action(target_id, (collision_x, collision_y))
-        
-        self._execute_command(command, stop_type)
+        collision_x = float(msg.x[0]) if msg.x else 0.0
+        collision_y = float(msg.y[0]) if msg.y else 0.0
+
+        if target_id == 0:
+            command = MovingCommand.WAIT
+            stop_type = MovingStopType.TYPE_11
+        else:
+            command, stop_type = self._decide_obstacle_action(target_id, (collision_x, collision_y))
+
+        # 상태 업데이트
+        self.agent_collision_status = True
+        self.current_agent_command = command
+        self.current_agent_stop_type = stop_type
+
+
 
     # ------------------------------------------------------------------
     # Core Logic
@@ -673,29 +685,6 @@ class FleetDecisionNode(Node):
         return min_dist < THRESHOLD
 
 
-    def _handle_no_obstacle(self):
-        """ 장애물이 없는 상태 처리: RUN 또는 RESUME """
-        if self.is_processing_pause:
-            return        
-
-        if self._resume_timer is not None:
-            self._resume_timer.cancel()
-            self.destroy_timer(self._resume_timer)
-            self._resume_timer = None
-
-        if self._replan_flag_timer is not None:
-            self._publish_stop() # 대기 중이면 계속 멈춤 유지
-            return
-
-        if self._pre_moving_stop_type != MovingStopType.TYPE_NONE:
-            self.get_logger().info("[Decision] Clear -> RESUME")
-            self.pub_cmd_resume.publish(Bool(data=False)) 
-        else:
-            self.pub_cmd_run.publish(Bool(data=True))    
-        
-        # 모든 처리가 끝난 후 타입 초기화
-        self._pre_moving_stop_type = MovingStopType.TYPE_NONE
-        self._publish_state("RUN")
 
     # ------------------------------------------------------------------
     # Pub/Sub Utils
