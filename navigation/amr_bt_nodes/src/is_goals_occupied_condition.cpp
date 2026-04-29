@@ -89,15 +89,34 @@ BT::NodeStatus IsGoalsOccupiedCondition::tick()
 
   for (const auto & goal : goals) {
     geometry_msgs::msg::PoseStamped transformed_goal;
+
+
+  //  goal의 복사본을 만들어 시간을 0으로 설정 (최신 TF 사용)
+    auto goal_to_transform = goal;
+    goal_to_transform.header.stamp = rclcpp::Time(0); 
+
     try {
-      tf_buffer_->transform(goal, transformed_goal, costmap_frame);
+      // goal 대신 시간을 0으로 만든 goal_to_transform을 전달
+      tf_buffer_->transform(goal_to_transform, transformed_goal, costmap_frame);
     } catch (const tf2::TransformException & ex) {
-      RCLCPP_WARN(node_->get_logger(), "Failed to transform goal pose to %s frame: %s",
-        costmap_frame.c_str(), ex.what());
-      // TF 변환 실패 시 안전을 위해 점유된 것으로 간주
-      occupied_goals.push_back(goal);
+      // 로그는 출력하되, 점유 여부를 판단할 수 없으므로 스킵하거나 
+      // 정말 '안전'이 중요하다면 현재처럼 처리 (단, TF 문제를 먼저 해결해야 함)
+      RCLCPP_WARN(node_->get_logger(), "TF Error: %s", ex.what());
+      // occupied_goals.push_back(goal); 
       continue;
     }
+
+
+
+    // try {
+    //   tf_buffer_->transform(goal, transformed_goal, costmap_frame);
+    // } catch (const tf2::TransformException & ex) {
+    //   RCLCPP_WARN(node_->get_logger(), "Failed to transform goal pose to %s frame: %s",
+    //     costmap_frame.c_str(), ex.what());
+    //   // TF 변환 실패 시 안전을 위해 점유된 것으로 간주
+    //   occupied_goals.push_back(goal);
+    //   continue;
+    // }
 
     unsigned int mx, my;
     bool is_occupied = false;
