@@ -422,6 +422,18 @@ target_include_directories(check_and_extract_spin_action PUBLIC
   $<INSTALL_INTERFACE:include>)  
 
   
+# ───── Build remove_passed_goal_action ─────
+add_library(remove_passed_goal_action SHARED
+  src/remove_passed_goal_action.cpp)
+
+ament_target_dependencies(remove_passed_goal_action
+  rclcpp behaviortree_cpp pluginlib geometry_msgs nav2_util)
+
+target_include_directories(remove_passed_goal_action PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
+
 
 
 
@@ -459,6 +471,7 @@ install(TARGETS
   check_final_goal_yaw_action
   is_goals_occupied_agent_condition
   check_and_extract_spin_action
+  remove_passed_goal_action
 
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib

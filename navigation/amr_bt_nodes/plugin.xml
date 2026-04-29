@@ -271,3 +271,14 @@
     </description>
   </class>
 </library>
+
+
+<library path="remove_passed_goal_action">
+  <class name="amr_bt_nodes::RemovePassedGoalAction"
+         type="amr_bt_nodes::RemovePassedGoalAction"
+         base_class_type="BT::SyncActionNode">
+    <description>
+      Removes goal that have been passed by the robot.
+    </description>
+  </class>
+</library>
