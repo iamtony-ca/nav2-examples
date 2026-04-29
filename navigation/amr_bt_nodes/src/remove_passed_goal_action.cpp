@@ -28,12 +28,8 @@ RemovePassedGoalAction::RemovePassedGoalAction(
   const std::string & name,
   const BT::NodeConfiguration & conf)
 : BT::SyncActionNode(name, conf),
-  viapoint_achieved_radius_(0.5),
-  logger_(rclcpp::get_logger("RemovePassedGoalAction"))
+  viapoint_achieved_radius_(0.5)
 {
-  config.blackboard->get<rclcpp::Node::SharedPtr>("node", node_);
-  logger_ = node_->get_logger();
-
 }
 
 void RemovePassedGoalAction::initialize()
@@ -42,6 +38,10 @@ void RemovePassedGoalAction::initialize()
 
   tf_ = config().blackboard->get<std::shared_ptr<tf2_ros::Buffer>>("tf_buffer");
   auto node = config().blackboard->get<rclcpp::Node::SharedPtr>("node");
+  if (!node) {
+    throw std::runtime_error("Failed to get 'node' from blackboard in RemovePassedGoalAction");
+  }
+
   node->get_parameter("transform_tolerance", transform_tolerance_);
 
   robot_base_frame_ = BT::deconflictPortAndParamFrame<std::string>(
@@ -78,10 +78,18 @@ inline BT::NodeStatus RemovePassedGoalAction::tick()
     double dist_to_goal = euclidean_distance(goal_poses[0].pose, current_pose.pose);
 
     if (dist_to_goal <= viapoint_achieved_radius_) {
-      RCLCPP_DEBUG(
-            logger_,
+
+      static auto logger = rclcpp::get_logger("RemovePassedGoalAction"); // 최초 1회만 생성됨
+  
+      RCLCPP_WARN(
+            logger,
             "Removed first goal: %.2f, %.2f. Goals after removing first: %zu.",
             goal_poses[0].pose.position.x, goal_poses[0].pose.position.y, goal_poses.size());
+      
+
+            // overhead 줄이기 위해 logger를 static으로 선언하여 최초 1회만 생성되도록 변경
+      //  RCLCPP_DEBUG(rclcpp::get_logger("RemovePassedGoalAction"), "Removed first goal: ...");     
+
       goal_poses.erase(goal_poses.begin());
     }
   }

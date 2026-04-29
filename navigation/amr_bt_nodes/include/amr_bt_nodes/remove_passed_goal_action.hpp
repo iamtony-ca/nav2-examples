@@ -25,7 +25,7 @@
 #include "behaviortree_cpp/action_node.h"
 // #include "behaviortree_cpp/behavior_tree.h"
 
-// #include "nav2_behavior_tree/bt_utils.hpp"
+#include "nav2_behavior_tree/bt_utils.hpp"
 #include "rclcpp/rclcpp.hpp"
 
 
@@ -58,7 +58,7 @@ public:
   }
 
 private:
-  void halt() override {}
+  // void halt() override {}
   BT::NodeStatus tick() override;
 
   double viapoint_achieved_radius_;
@@ -66,8 +66,7 @@ private:
   std::shared_ptr<tf2_ros::Buffer> tf_;
   std::string robot_base_frame_;
 
-  rclcpp::Node::SharedPtr node_;
-  rclcpp::Logger logger_;
+
 
 };
 
