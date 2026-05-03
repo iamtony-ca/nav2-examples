@@ -1,0 +1,4 @@
+<PublishRemainingGoalsAction 
+    input_goals="{remaining_goals}" 
+    topic_name="/remaining_goals" 
+    publish_interval="0.1" />

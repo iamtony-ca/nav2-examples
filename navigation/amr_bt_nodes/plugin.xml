@@ -282,3 +282,16 @@
     </description>
   </class>
 </library>
+
+
+<library path="publish_remaining_goals_action">
+  <class name="amr_bt_nodes::PublishRemainingGoalsAction"
+         type="amr_bt_nodes::PublishRemainingGoalsAction"
+         base_class_type="BT::SyncActionNode">
+    <description>
+      Publishes the remaining goals to a specified topic.
+    </description>
+  </class>
+</library>
+
+

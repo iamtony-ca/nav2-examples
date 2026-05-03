@@ -434,7 +434,16 @@ target_include_directories(remove_passed_goal_action PUBLIC
   $<INSTALL_INTERFACE:include>)  
 
 
+# ───── Build publish_remaining_goals_action ─────
+add_library(publish_remaining_goals_action SHARED
+  src/publish_remaining_goals_action.cpp)
 
+ament_target_dependencies(publish_remaining_goals_action
+  rclcpp behaviortree_cpp pluginlib geometry_msgs nav_msgs)
+
+target_include_directories(publish_remaining_goals_action PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
 
 
 # ───── Pluginlib Export ─────
@@ -472,6 +481,7 @@ install(TARGETS
   is_goals_occupied_agent_condition
   check_and_extract_spin_action
   remove_passed_goal_action
+  publish_remaining_goals_action
 
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
