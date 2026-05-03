@@ -120,8 +120,8 @@ PathValidatorNode::PathValidatorNode()
 
 
   // 생성자(Constructor) 내부에 추가
-  this->declare_parameter("goal_doorstep_static_m", 0.3);
-  this->declare_parameter("goal_doorstep_agent_m", 0.5); // 에이전트는 지연 오차를 고려해 조금 더 크게 설정 가능
+  this->declare_parameter("goal_doorstep_static_m", 0.1);
+  this->declare_parameter("goal_doorstep_agent_m", 0.05); // 에이전트는 지연 오차를 고려해 조금 더 크게 설정 가능
 
   goal_doorstep_static_m_ = this->get_parameter("goal_doorstep_static_m").as_double();
   goal_doorstep_agent_m_ = this->get_parameter("goal_doorstep_agent_m").as_double();
@@ -889,200 +889,200 @@ bool PathValidatorNode::isGoalBlocked(
 
 
 
-// ===================== agent mask and footprint checking =====================
+// // ===================== agent mask and footprint checking =====================
 
-void PathValidatorNode::validateWithFootprint(const std::vector<geometry_msgs::msg::PoseStamped> & gpath)
-{
-  std::shared_ptr<nav2_costmap_2d::Costmap2D> costmap;
-  {
-    std::lock_guard<std::mutex> lock(costmap_mutex_);
-    if (!costmap_) return;
-    costmap = costmap_;
-  }
+// void PathValidatorNode::validateWithFootprint(const std::vector<geometry_msgs::msg::PoseStamped> & gpath)
+// {
+//   std::shared_ptr<nav2_costmap_2d::Costmap2D> costmap;
+//   {
+//     std::lock_guard<std::mutex> lock(costmap_mutex_);
+//     if (!costmap_) return;
+//     costmap = costmap_;
+//   }
 
-  geometry_msgs::msg::Pose cur_pose;
-  if (!getCurrentPoseFromTF(cur_pose)) return;
+//   geometry_msgs::msg::Pose cur_pose;
+//   if (!getCurrentPoseFromTF(cur_pose)) return;
 
-  const double max_dist_by_time = std::max(min_lookahead_m_, max_speed_ * lookahead_time_sec_);
-  const double max_check_dist = std::min(max_dist_by_time, path_check_distance_m_);
-  const double res = costmap->getResolution();
+//   const double max_dist_by_time = std::max(min_lookahead_m_, max_speed_ * lookahead_time_sec_);
+//   const double max_check_dist = std::min(max_dist_by_time, path_check_distance_m_);
+//   const double res = costmap->getResolution();
 
-  // 경로 샘플링
-  std::vector<geometry_msgs::msg::PoseStamped> samples;
-  samples.reserve(gpath.size());
-  double acc = 0.0;
-  samples.push_back(gpath.front());
-  for (size_t i = 1; i < gpath.size(); ++i) {
-    const auto & p0 = gpath[i-1].pose.position;
-    const auto & p1 = gpath[i].pose.position;
-    const double d = std::hypot(p1.x - p0.x, p1.y - p0.y);
-    if (d <= 1e-6) continue;
-    acc += d;
-    if (acc >= footprint_step_m_) {
-      samples.push_back(gpath[i]);
-      acc = 0.0;
-    }
-    const double total = std::hypot(gpath[i].pose.position.x - gpath.front().pose.position.x,
-                                    gpath[i].pose.position.y - gpath.front().pose.position.y);
-    if (total > max_check_dist) break;
-  }
+//   // 경로 샘플링
+//   std::vector<geometry_msgs::msg::PoseStamped> samples;
+//   samples.reserve(gpath.size());
+//   double acc = 0.0;
+//   samples.push_back(gpath.front());
+//   for (size_t i = 1; i < gpath.size(); ++i) {
+//     const auto & p0 = gpath[i-1].pose.position;
+//     const auto & p1 = gpath[i].pose.position;
+//     const double d = std::hypot(p1.x - p0.x, p1.y - p0.y);
+//     if (d <= 1e-6) continue;
+//     acc += d;
+//     if (acc >= footprint_step_m_) {
+//       samples.push_back(gpath[i]);
+//       acc = 0.0;
+//     }
+//     const double total = std::hypot(gpath[i].pose.position.x - gpath.front().pose.position.x,
+//                                     gpath[i].pose.position.y - gpath.front().pose.position.y);
+//     if (total > max_check_dist) break;
+//   }
 
-  const unsigned char master_thr = static_cast<unsigned char>(cost_threshold_);
-  const unsigned char agent_thr  = static_cast<unsigned char>(agent_cost_threshold_);
+//   const unsigned char master_thr = static_cast<unsigned char>(cost_threshold_);
+//   const unsigned char agent_thr  = static_cast<unsigned char>(agent_cost_threshold_);
 
-  size_t consecutive = 0;
+//   size_t consecutive = 0;
 
-  for (const auto & ps : samples) {
-    bool blocked_here = false;
-    unsigned int hit_mx = 0, hit_my = 0;
+//   for (const auto & ps : samples) {
+//     bool blocked_here = false;
+//     unsigned int hit_mx = 0, hit_my = 0;
 
-    if (use_radius_) {
-      unsigned int cx, cy;
-      if (!costmap->worldToMap(ps.pose.position.x, ps.pose.position.y, cx, cy)) {
-        consecutive = 0; continue;
-      }
-      const int r_cells = std::max(1, static_cast<int>(std::ceil(robot_radius_m_ / res)));
+//     if (use_radius_) {
+//       unsigned int cx, cy;
+//       if (!costmap->worldToMap(ps.pose.position.x, ps.pose.position.y, cx, cy)) {
+//         consecutive = 0; continue;
+//       }
+//       const int r_cells = std::max(1, static_cast<int>(std::ceil(robot_radius_m_ / res)));
 
-      for (int dx = -r_cells; dx <= r_cells && !blocked_here; ++dx) {
-        for (int dy = -r_cells; dy <= r_cells && !blocked_here; ++dy) {
-          if (dx*dx + dy*dy > r_cells*r_cells) continue;
-          const int mx = static_cast<int>(cx) + dx;
-          const int my = static_cast<int>(cy) + dy;
-          if (mx < 0 || my < 0 ||
-              mx >= static_cast<int>(costmap->getSizeInCellsX()) ||
-              my >= static_cast<int>(costmap->getSizeInCellsY())) continue;
+//       for (int dx = -r_cells; dx <= r_cells && !blocked_here; ++dx) {
+//         for (int dy = -r_cells; dy <= r_cells && !blocked_here; ++dy) {
+//           if (dx*dx + dy*dy > r_cells*r_cells) continue;
+//           const int mx = static_cast<int>(cx) + dx;
+//           const int my = static_cast<int>(cy) + dy;
+//           if (mx < 0 || my < 0 ||
+//               mx >= static_cast<int>(costmap->getSizeInCellsX()) ||
+//               my >= static_cast<int>(costmap->getSizeInCellsY())) continue;
 
-          const unsigned int umx = static_cast<unsigned int>(mx);
-          const unsigned int umy = static_cast<unsigned int>(my);
+//           const unsigned int umx = static_cast<unsigned int>(mx);
+//           const unsigned int umy = static_cast<unsigned int>(my);
 
-          if (masterCellBlocked(umx, umy, master_thr)) {
-            blocked_here = true; hit_mx = umx; hit_my = umy;
-          }
-        }
-      }
-    } else {
-      // 다각형 footprint → 월드 폴리곤
-      const double yaw = tf2::getYaw(ps.pose.orientation);
-      const double c = std::cos(yaw), s = std::sin(yaw);
+//           if (masterCellBlocked(umx, umy, master_thr)) {
+//             blocked_here = true; hit_mx = umx; hit_my = umy;
+//           }
+//         }
+//       }
+//     } else {
+//       // 다각형 footprint → 월드 폴리곤
+//       const double yaw = tf2::getYaw(ps.pose.orientation);
+//       const double c = std::cos(yaw), s = std::sin(yaw);
 
-      std::vector<geometry_msgs::msg::Point> poly_world;
-      poly_world.reserve(footprint_.size());
-      double minx=1e9, miny=1e9, maxx=-1e9, maxy=-1e9;
+//       std::vector<geometry_msgs::msg::Point> poly_world;
+//       poly_world.reserve(footprint_.size());
+//       double minx=1e9, miny=1e9, maxx=-1e9, maxy=-1e9;
 
-      for (const auto & p : footprint_) {
-        geometry_msgs::msg::Point q;
-        const double x = p.x, y = p.y;
-        q.x = ps.pose.position.x + c * x - s * y;
-        q.y = ps.pose.position.y + s * x + c * y;
-        q.z = 0.0;
-        poly_world.push_back(q);
-        if (q.x < minx) minx=q.x;
-        if (q.y < miny) miny=q.y;
-        if (q.x > maxx) maxx=q.x; 
-        if (q.y > maxy) maxy=q.y;
-      }
+//       for (const auto & p : footprint_) {
+//         geometry_msgs::msg::Point q;
+//         const double x = p.x, y = p.y;
+//         q.x = ps.pose.position.x + c * x - s * y;
+//         q.y = ps.pose.position.y + s * x + c * y;
+//         q.z = 0.0;
+//         poly_world.push_back(q);
+//         if (q.x < minx) minx=q.x;
+//         if (q.y < miny) miny=q.y;
+//         if (q.x > maxx) maxx=q.x; 
+//         if (q.y > maxy) maxy=q.y;
+//       }
 
-      int min_i, min_j, max_i, max_j;
-      costmap->worldToMapEnforceBounds(minx, miny, min_i, min_j);
-      costmap->worldToMapEnforceBounds(maxx, maxy, max_i, max_j);
+//       int min_i, min_j, max_i, max_j;
+//       costmap->worldToMapEnforceBounds(minx, miny, min_i, min_j);
+//       costmap->worldToMapEnforceBounds(maxx, maxy, max_i, max_j);
 
-      for (int j = min_j; j <= max_j && !blocked_here; ++j) {
-        for (int i = min_i; i <= max_i && !blocked_here; ++i) {
-          double wx, wy; costmap->mapToWorld(i, j, wx, wy);
-          if (!pointInPolygon(poly_world, wx, wy)) continue;
+//       for (int j = min_j; j <= max_j && !blocked_here; ++j) {
+//         for (int i = min_i; i <= max_i && !blocked_here; ++i) {
+//           double wx, wy; costmap->mapToWorld(i, j, wx, wy);
+//           if (!pointInPolygon(poly_world, wx, wy)) continue;
 
-          const unsigned int umx = static_cast<unsigned int>(i);
-          const unsigned int umy = static_cast<unsigned int>(j);
+//           const unsigned int umx = static_cast<unsigned int>(i);
+//           const unsigned int umy = static_cast<unsigned int>(j);
 
-          if (masterCellBlocked(umx, umy, master_thr)) {
-            blocked_here = true; hit_mx = umx; hit_my = umy;
-          }
-        }
-      }
-    }
+//           if (masterCellBlocked(umx, umy, master_thr)) {
+//             blocked_here = true; hit_mx = umx; hit_my = umy;
+//           }
+//         }
+//       }
+//     }
 
-    if (blocked_here) {
-      // --- costmap 포인터를 잠깐 복사 (락 최소화) ---
-      std::shared_ptr<nav2_costmap_2d::Costmap2D> cm;
-      { std::lock_guard<std::mutex> lock(costmap_mutex_); cm = costmap_; }
-      if (!cm) return;
+//     if (blocked_here) {
+//       // --- costmap 포인터를 잠깐 복사 (락 최소화) ---
+//       std::shared_ptr<nav2_costmap_2d::Costmap2D> cm;
+//       { std::lock_guard<std::mutex> lock(costmap_mutex_); cm = costmap_; }
+//       if (!cm) return;
 
-      // --- 중심 셀(히트셀) 기준 월드좌표 ---
-      double wx, wy;
-      cm->mapToWorld(static_cast<int>(hit_mx), static_cast<int>(hit_my), wx, wy);
+//       // --- 중심 셀(히트셀) 기준 월드좌표 ---
+//       double wx, wy;
+//       cm->mapToWorld(static_cast<int>(hit_mx), static_cast<int>(hit_my), wx, wy);
 
-      // [유지] 기존 람다 함수 (compare_agent_mask_ 가 false일 때 플랜 B로 사용)
-      auto agent_hit_around = [&](double cx, double cy,
-                                  unsigned int mx_c, unsigned int my_c) -> std::vector<AgentHit> {
-        auto hits = whoCoversPoint(cx, cy);
-        if (!hits.empty()) return hits;
+//       // [유지] 기존 람다 함수 (compare_agent_mask_ 가 false일 때 플랜 B로 사용)
+//       auto agent_hit_around = [&](double cx, double cy,
+//                                   unsigned int mx_c, unsigned int my_c) -> std::vector<AgentHit> {
+//         auto hits = whoCoversPoint(cx, cy);
+//         if (!hits.empty()) return hits;
 
-        static const int OFFS[8][2] = {
-          { 1, 0},{-1, 0},{ 0, 1},{ 0,-1},
-          { 1, 1},{ 1,-1},{-1, 1},{-1,-1}
-        };
-        for (auto &o : OFFS) {
-          double wxx, wyy;
-          cm->mapToWorld(static_cast<int>(mx_c)+o[0], static_cast<int>(my_c)+o[1], wxx, wyy);
-          auto h2 = whoCoversPoint(wxx, wyy);
-          if (!h2.empty()) return h2;
-        }
-        return {};
-      };
+//         static const int OFFS[8][2] = {
+//           { 1, 0},{-1, 0},{ 0, 1},{ 0,-1},
+//           { 1, 1},{ 1,-1},{-1, 1},{-1,-1}
+//         };
+//         for (auto &o : OFFS) {
+//           double wxx, wyy;
+//           cm->mapToWorld(static_cast<int>(mx_c)+o[0], static_cast<int>(my_c)+o[1], wxx, wyy);
+//           auto h2 = whoCoversPoint(wxx, wyy);
+//           if (!h2.empty()) return h2;
+//         }
+//         return {};
+//       };
 
-      // =========================================================
-      // [수정된 판별 로직: 마스크 유무에 따른 스마트 스위칭]
-      // =========================================================
-      if (compare_agent_mask_) {
-        // [Plan A] 마스크를 사용할 때는 복잡한 다각형 검사(agent_hit_around)를 건너뛰고,
-        // 가장 빠르고 확실한 '마스크 버퍼 검사 + 거리 기반 에이전트 찾기'를 수행합니다.
-        const bool agent_mark = agentCellBlockedNear(
-            hit_mx, hit_my,
-            static_cast<unsigned char>(agent_cost_threshold_),
-            agent_mask_manhattan_buffer_);
+//       // =========================================================
+//       // [수정된 판별 로직: 마스크 유무에 따른 스마트 스위칭]
+//       // =========================================================
+//       if (compare_agent_mask_) {
+//         // [Plan A] 마스크를 사용할 때는 복잡한 다각형 검사(agent_hit_around)를 건너뛰고,
+//         // 가장 빠르고 확실한 '마스크 버퍼 검사 + 거리 기반 에이전트 찾기'를 수행합니다.
+//         const bool agent_mark = agentCellBlockedNear(
+//             hit_mx, hit_my,
+//             static_cast<unsigned char>(agent_cost_threshold_),
+//             agent_mask_manhattan_buffer_);
             
-        if (agent_mark) {
-        //   auto hits2 = findNearestAgent(wx, wy);
-        // [Plan B: 깐깐한 거름망]
-          // 최대 예상 지연(예: 0.5초) * 최고 속도(예: 1.0m/s) = 0.5m의 오차 허용.
-          // 로봇 반경 + 지연 오차 마진 = 약 0.8m ~ 1.0m
-          const double MAX_LATENCY_ERROR_M = 0.1; // [meter] (필요시 파라미터로 도출)
-        //   const double allowed_dist = robot_radius_m_ + MAX_LATENCY_ERROR_M;
-          const double allowed_dist = 0.424 + MAX_LATENCY_ERROR_M; // [튜닝 필요: 로봇 최외각 0.424m + 최대 지연 오차 0.1m = 0.524m]
+//         if (agent_mark) {
+//         //   auto hits2 = findNearestAgent(wx, wy);
+//         // [Plan B: 깐깐한 거름망]
+//           // 최대 예상 지연(예: 0.5초) * 최고 속도(예: 1.0m/s) = 0.5m의 오차 허용.
+//           // 로봇 반경 + 지연 오차 마진 = 약 0.8m ~ 1.0m
+//           const double MAX_LATENCY_ERROR_M = 0.1; // [meter] (필요시 파라미터로 도출)
+//         //   const double allowed_dist = robot_radius_m_ + MAX_LATENCY_ERROR_M;
+//           const double allowed_dist = 0.424 + MAX_LATENCY_ERROR_M; // [튜닝 필요: 로봇 최외각 0.424m + 최대 지연 오차 0.1m = 0.524m]
 
-          auto hits2 = findNearestAgent(wx, wy, allowed_dist);
+//           auto hits2 = findNearestAgent(wx, wy, allowed_dist);
 
 
-          if (!hits2.empty()) {
-            publishAgentCollisionList(hits2, false, geometry_msgs::msg::Pose());
-            last_agent_block_time_ = this->now();
-            // [NEW] 에이전트 대기로 인해 리플랜은 하지 않으므로 False
-            std_msgs::msg::Bool m; m.data = false;
-            replan_pub_->publish(m);
-            return;
-          }
-        }
-      } else {
-        // [Plan B] 마스크를 사용하지 않을 경우, 기존의 '기하학적 수학 검사' 로직을 호출합니다.
-        auto hits = agent_hit_around(wx, wy, hit_mx, hit_my);
-        if (!hits.empty()) {
-          publishAgentCollisionList(hits, false, false, geometry_msgs::msg::Pose());
-          last_agent_block_time_ = this->now();
-          return;
-        }
-      }
+//           if (!hits2.empty()) {
+//             publishAgentCollisionList(hits2, false, geometry_msgs::msg::Pose());
+//             last_agent_block_time_ = this->now();
+//             // [NEW] 에이전트 대기로 인해 리플랜은 하지 않으므로 False
+//             std_msgs::msg::Bool m; m.data = false;
+//             replan_pub_->publish(m);
+//             return;
+//           }
+//         }
+//       } else {
+//         // [Plan B] 마스크를 사용하지 않을 경우, 기존의 '기하학적 수학 검사' 로직을 호출합니다.
+//         auto hits = agent_hit_around(wx, wy, hit_mx, hit_my);
+//         if (!hits.empty()) {
+//           publishAgentCollisionList(hits, false, false, geometry_msgs::msg::Pose());
+//           last_agent_block_time_ = this->now();
+//           return;
+//         }
+//       }
 
-      // 3) 여기까지 확인했는데도 에이전트가 아니면 일반 장애물로 누적 처리!
-      consecutive++;
-      if (consecutive >= consecutive_threshold_) {
-        triggerReplan("blocked (footprint) streak threshold reached", false, false, wx, wy, geometry_msgs::msg::Pose());
-        return;
-      }
-    } else {
-      consecutive = 0;
-    }
-  }
-}
+//       // 3) 여기까지 확인했는데도 에이전트가 아니면 일반 장애물로 누적 처리!
+//       consecutive++;
+//       if (consecutive >= consecutive_threshold_) {
+//         triggerReplan("blocked (footprint) streak threshold reached", false, false, wx, wy, geometry_msgs::msg::Pose());
+//         return;
+//       }
+//     } else {
+//       consecutive = 0;
+//     }
+//   }
+// }
 
 
 
@@ -1401,7 +1401,7 @@ void PathValidatorNode::validationTimerCallback()
     if (!current_remaining_goals_.empty()) {
       target_goal = current_remaining_goals_.front().pose;
       has_goal = true;
-      is_last_goal = (current_goals.size() == 1);
+      is_last_goal = (current_remaining_goals_.size() == 1);
     }
   }
 
@@ -1586,11 +1586,13 @@ void PathValidatorNode::validateWithPoints(const std::vector<geometry_msgs::msg:
 
           auto hits2 = findNearestAgent(wx, wy, allowed_dist);
           if (!hits2.empty()) {
-            publishAgentCollisionList(hits2, false, geometry_msgs::msg::Pose());
+            publishAgentCollisionList(hits2, false, false, geometry_msgs::msg::Pose());
             last_agent_block_time_ = this->now();
+            // to do
             // [NEW] 에이전트 대기로 인해 리플랜은 하지 않으므로 False
-            std_msgs::msg::Bool m; m.data = false;
-            replan_pub_->publish(m);
+            // std_msgs::msg::Bool m; m.data = false;
+            // replan_pub_->publish(m);
+
             return;
           }
         }

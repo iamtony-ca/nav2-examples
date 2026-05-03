@@ -35,6 +35,7 @@
 #include "multi_agent_msgs/msg/multi_agent_info.hpp"
 #include "multi_agent_msgs/msg/agent_status.hpp"
 #include "multi_agent_msgs/msg/path_agent_collision_info.hpp"
+#include "multi_agent_msgs/msg/path_static_collision_info.hpp"
 
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
@@ -80,6 +81,8 @@ private:
   void updateObstacleDatabase();
   void agentsCallback(const multi_agent_msgs::msg::MultiAgentInfoArray::SharedPtr msg);
 
+  void remainingGoalsCallback(const nav_msgs::msg::Path::SharedPtr msg);
+
   // ========= Helpers / Utils =========
   bool getCurrentPoseFromTF(geometry_msgs::msg::Pose & pose_out) const;
   bool transformToGlobal(const geometry_msgs::msg::PoseStamped & in,
@@ -96,7 +99,7 @@ private:
 
   void validateWithFootprint(const std::vector<geometry_msgs::msg::PoseStamped> & gpath);
   void validateWithPoints(const std::vector<geometry_msgs::msg::PoseStamped> & gpath);
-  void validatePathOptimized(const std::vector<geometry_msgs::msg::PoseStamped> & gpath, const geometry_msgs::msg::Pose& target_goal);
+  void validatePathOptimized(const std::vector<geometry_msgs::msg::PoseStamped> & gpath, const geometry_msgs::msg::Pose& target_goal, bool is_last_goal); // [NEW] bool 인자 추가
 
   inline bool masterCellBlocked(unsigned int mx, unsigned int my, unsigned char thr) const;
   inline bool agentCellBlockedNear(unsigned int mx, unsigned int my,
@@ -156,9 +159,9 @@ private:
   static double headingTo(const geometry_msgs::msg::Pose & pose, double wx, double wy);
   static double speedAlong(const geometry_msgs::msg::Twist & tw, double heading_rad);
 
-  // void triggerReplan(const std::string & reason);
-  void triggerReplan(const std::string & reason, bool is_goal_occupied, double hit_x, double hit_y, const geometry_msgs::msg::Pose& target_goal);
-  void publishAgentCollisionList(const std::vector<AgentHit> & hits, bool is_goal_occupied, const geometry_msgs::msg::Pose& target_goal);// [NEW] 아무 충돌이 없을 때 안전 상태를 퍼블리시하는 함수
+  void triggerReplan(const std::string & reason, bool is_goal_occupied, bool is_last_goal_occupied, double hit_x, double hit_y, const geometry_msgs::msg::Pose& target_goal); // [NEW] bool 인자 추가
+
+  void publishAgentCollisionList(const std::vector<AgentHit> & hits, bool is_goal_occupied, bool is_last_goal_occupied, const geometry_msgs::msg::Pose& target_goal); // [NEW] bool 인자 추가
   void publishSafeStatus();
 
 
@@ -186,7 +189,8 @@ private:
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr robot_status_sub_;
   rclcpp::Subscription<multi_agent_msgs::msg::MultiAgentInfoArray>::SharedPtr agents_sub_;
 
-  // rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr replan_pub_;
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr remaining_goals_sub_;
+
   rclcpp::Publisher<multi_agent_msgs::msg::PathStaticCollisionInfo>::SharedPtr static_collision_pub_;
   rclcpp::Publisher<multi_agent_msgs::msg::PathAgentCollisionInfo>::SharedPtr agent_collision_pub_;
 

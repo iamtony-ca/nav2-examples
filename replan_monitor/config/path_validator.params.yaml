@@ -40,3 +40,5 @@ path_validator_node:
     respect_higher_priority_path: false
 
     validation_frequency_hz: 5.0 # 5 Hz로 주기적 경로 검증 (충돌 감지 시 즉시 리플랜 신호 발행, false pulse 포함 여부는 publish_false_pulse에 따름)
+    goal_doorstep_static_m: 0.1 # 목표 지점 주변의 정적 장애물 허용 반경 (미터 단위)
+    goal_doorstep_agent_m: 0.05  # 목표 지점 주변의 에이전트 허용 반경 (미터 단위, 일반적으로 static보다 작게 설정)

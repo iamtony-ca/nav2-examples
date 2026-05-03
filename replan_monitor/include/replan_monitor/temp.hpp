@@ -12,6 +12,8 @@
 #include <vector>
 #include <chrono>
 #include <algorithm>
+
+// [NEW] Added for std::map
 #include <map>
 
 #include "rclcpp/rclcpp.hpp"
@@ -22,7 +24,7 @@
 #include "geometry_msgs/msg/polygon_stamped.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "std_msgs/msg/string.hpp"
-#include "std_msgs/msg/int8.hpp"
+#include "std_msgs/msg/bool.hpp"
 
 #include "nav2_costmap_2d/costmap_2d.hpp"
 #include "nav2_costmap_2d/cost_values.hpp"
@@ -33,6 +35,7 @@
 #include "multi_agent_msgs/msg/multi_agent_info.hpp"
 #include "multi_agent_msgs/msg/agent_status.hpp"
 #include "multi_agent_msgs/msg/path_agent_collision_info.hpp"
+#include "multi_agent_msgs/msg/path_static_collision_info.hpp"
 
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
@@ -70,25 +73,15 @@ public:
   PathValidatorNode();
 
 private:
-  // [NEW] 6단계 상태 코드 정의
-  enum BlockStatus : int8_t {
-    CLEAR = 0,
-    AGENT_BLOCK = 1,
-    DIRECT_OBSTACLE_254 = 2,
-    DIRECT_OBSTACLE_253 = 3,
-    SIDE_OBSTACLE = 4,
-    WALL_HUGGING = 5
-  };
-
   // ========= Callbacks =========
   void costmapCallback(const nav2_msgs::msg::Costmap::SharedPtr msg);
   void agentMaskCallback(const nav2_msgs::msg::Costmap::SharedPtr msg);
-  void staticMapCallback(const nav2_msgs::msg::Costmap::SharedPtr msg); // [NEW] 정적 맵 콜백
   void robotStatusCallback(const std_msgs::msg::String::SharedPtr msg);
-  void pathCallback(const nav_msgs::msg::Path::SharedPtr msg);          // [NEW] 경로 저장용
-  void validationTimerCallback();                                       // [NEW] 10Hz 검사 타이머
+  void validatePathCallback(const nav_msgs::msg::Path::SharedPtr msg);
   void updateObstacleDatabase();
   void agentsCallback(const multi_agent_msgs::msg::MultiAgentInfoArray::SharedPtr msg);
+
+  void remainingGoalsCallback(const nav_msgs::msg::Path::SharedPtr msg);
 
   // ========= Helpers / Utils =========
   bool getCurrentPoseFromTF(geometry_msgs::msg::Pose & pose_out) const;
@@ -103,8 +96,10 @@ private:
   }
 
   bool isBlockedCellKernel(unsigned int mx, unsigned int my) const;
+
   void validateWithFootprint(const std::vector<geometry_msgs::msg::PoseStamped> & gpath);
   void validateWithPoints(const std::vector<geometry_msgs::msg::PoseStamped> & gpath);
+  void validatePathOptimized(const std::vector<geometry_msgs::msg::PoseStamped> & gpath, const geometry_msgs::msg::Pose& target_goal, bool is_last_goal); // [NEW] bool 인자 추가
 
   inline bool masterCellBlocked(unsigned int mx, unsigned int my, unsigned char thr) const;
   inline bool agentCellBlockedNear(unsigned int mx, unsigned int my,
@@ -113,6 +108,15 @@ private:
   static bool pointInPolygon(const std::vector<geometry_msgs::msg::Point> & poly,
                              double x, double y);
 
+// ========= (NEW) Timer & Path Storage =========
+  void validationTimerCallback();
+  
+  rclcpp::TimerBase::SharedPtr validation_timer_;
+  std::vector<geometry_msgs::msg::PoseStamped> latest_global_path_;
+  mutable std::mutex path_mutex_;
+
+
+  // === Agent 충돌 식별 ===
   struct AgentHit {
     uint16_t machine_id{0};
     std::string type_id;
@@ -121,18 +125,31 @@ private:
     std::string note;
   };
 
+  // [NEW] Map to store footprint data from YAML
   struct AgentFootprintData
   {
+    // existing code uses Point32, so we store Point32
     std::vector<geometry_msgs::msg::Point32> points;
     double radius{0.0};
     bool use_radius{true};
   };
+  // Map from machine_id to its footprint/radius data
   std::map<uint16_t, AgentFootprintData> agent_footprints_;
 
-  std::vector<geometry_msgs::msg::Point32> getFootprintForAgent(const multi_agent_msgs::msg::MultiAgentInfo & a) const;
-  static std::vector<geometry_msgs::msg::Point32> toPoint32(const std::vector<geometry_msgs::msg::Point>& points);
+  // [NEW] Helper to get footprint for a given agent
+  std::vector<geometry_msgs::msg::Point32> 
+  getFootprintForAgent(const multi_agent_msgs::msg::MultiAgentInfo & a) const;
 
+  // [NEW] Helper to convert nav2_costmap_2d::makeFootprint... results
+  static std::vector<geometry_msgs::msg::Point32> toPoint32(
+      const std::vector<geometry_msgs::msg::Point>& points);
+
+
+
+  // wx, wy를 커버하는 agent의 footprint 또는 truncated_path 튜브를 찾아 리턴
   std::vector<AgentHit> whoCoversPoint(double wx, double wy) const;
+
+  // 내부: 경로 튜브(footprint를 얇게 확장)에서 포함 여부 검사
   static bool pathTubeCoversPoint(const multi_agent_msgs::msg::MultiAgentInfo & a,
                                   double wx, double wy,
                                   double stride_m, double dilate_m,
@@ -142,8 +159,24 @@ private:
   static double headingTo(const geometry_msgs::msg::Pose & pose, double wx, double wy);
   static double speedAlong(const geometry_msgs::msg::Twist & tw, double heading_rad);
 
-  void publishBlockStatus(BlockStatus status, const std::string & reason);
-  void publishAgentCollisionList(const std::vector<AgentHit> & hits);
+  void triggerReplan(const std::string & reason, bool is_goal_occupied, bool is_last_goal_occupied, double hit_x, double hit_y, const geometry_msgs::msg::Pose& target_goal); // [NEW] bool 인자 추가
+
+  void publishAgentCollisionList(const std::vector<AgentHit> & hits, bool is_goal_occupied, bool is_last_goal_occupied, const geometry_msgs::msg::Pose& target_goal); // [NEW] bool 인자 추가
+  void publishSafeStatus();
+
+
+  std::vector<AgentHit> findNearestAgent(double wx, double wy, double max_allowed_dist) const;
+
+
+
+  // [함수 시그니처 변경] 범용 검사기로 리팩토링
+  bool isGoalBlocked(
+      std::shared_ptr<nav2_costmap_2d::Costmap2D> cm, 
+      const geometry_msgs::msg::Pose& goal_pose, 
+      double buffer_m, 
+      unsigned char threshold) const;
+
+
 
   // ========= Callback Groups =========
   rclcpp::CallbackGroup::SharedPtr subs_callback_group_;
@@ -153,15 +186,16 @@ private:
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr pruned_path_sub_;
   rclcpp::Subscription<nav2_msgs::msg::Costmap>::SharedPtr costmap_sub_;
   rclcpp::Subscription<nav2_msgs::msg::Costmap>::SharedPtr agent_mask_sub_;
-  rclcpp::Subscription<nav2_msgs::msg::Costmap>::SharedPtr static_map_sub_; // [NEW]
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr robot_status_sub_;
   rclcpp::Subscription<multi_agent_msgs::msg::MultiAgentInfoArray>::SharedPtr agents_sub_;
 
-  rclcpp::Publisher<std_msgs::msg::Int8>::SharedPtr block_status_pub_;      // [NEW] Int8 퍼블리셔
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr remaining_goals_sub_;
+
+  rclcpp::Publisher<multi_agent_msgs::msg::PathStaticCollisionInfo>::SharedPtr static_collision_pub_;
   rclcpp::Publisher<multi_agent_msgs::msg::PathAgentCollisionInfo>::SharedPtr agent_collision_pub_;
 
-  rclcpp::TimerBase::SharedPtr validation_timer_;                           // [NEW] 10Hz 검사 타이머
   rclcpp::TimerBase::SharedPtr obstacle_db_update_timer_;
+  rclcpp::TimerBase::SharedPtr flag_reset_timer_;
 
   // ========= State =========
   std::shared_ptr<nav2_costmap_2d::Costmap2D> costmap_;
@@ -172,23 +206,19 @@ private:
   mutable std::mutex agent_mask_mutex_;
   CostmapSignature last_agent_sig_;
 
-  std::shared_ptr<nav2_costmap_2d::Costmap2D> static_map_;                  // [NEW] 정적 맵
-  mutable std::mutex static_map_mutex_;
-  CostmapSignature last_static_sig_;
-
-  nav_msgs::msg::Path::SharedPtr last_path_;                                // [NEW] 마지막 경로 저장
-  mutable std::mutex path_mutex_;
-
+  // 최신 MultiAgentInfoArray
   multi_agent_msgs::msg::MultiAgentInfoArray::SharedPtr last_agents_;
   rclcpp::Time last_agents_stamp_;
   mutable std::mutex agents_mutex_;
 
   std::atomic<bool> is_robot_in_driving_state_{false};
-  rclcpp::Time last_agent_block_time_;
+  rclcpp::Time last_replan_time_;        // replan 쿨다운 기준
+  rclcpp::Time last_agent_block_time_;   // 에이전트 홀드 기준
 
   std::unordered_map<uint64_t, ObstacleInfo> obstacle_db_;
   mutable std::mutex obstacle_db_mutex_;
 
+  // TF
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
@@ -196,8 +226,10 @@ private:
   std::string global_frame_;
   std::string base_frame_;
 
+// [add] 본인 식별용 ID 변수
   uint16_t self_machine_id_{0};
 
+  double cooldown_sec_;
   size_t consecutive_threshold_;
   double obstacle_persistence_sec_;
   double max_speed_;
@@ -206,44 +238,68 @@ private:
   double cost_threshold_;
   bool ignore_unknown_;
 
+  // DB/ROI
   double db_update_frequency_;
   double obstacle_prune_timeout_sec_;
   int db_stride_;
   double cone_angle_deg_;
   int kernel_half_size_;
 
+  // Path checking
   double path_check_distance_m_;
 
+  // Replan flag pulse
+  bool publish_false_pulse_;
+  int flag_pulse_ms_;
+
+  // Footprint / Agent mask / Output
   bool use_footprint_check_;
   double footprint_step_m_;
   bool compare_agent_mask_;
   std::string agent_mask_topic_;
-  std::string static_map_topic_; // [NEW]
   double agent_cost_threshold_;
   int agent_mask_manhattan_buffer_;
 
+  // 충돌 메시지
   bool publish_agent_collision_;
   std::string agent_collision_topic_;
 
+  // MultiAgent 구독
   std::string agents_topic_;
   int agents_freshness_timeout_ms_;
   double agent_match_dilate_m_;
 
+  // Nav2 footprint
   std::string footprint_str_;
   std::vector<geometry_msgs::msg::Point> footprint_;
   bool use_radius_{true};
   double robot_radius_m_{0.1};
-  double lookahead_margin_m_{0.15}; // [NEW] 전방 주시 마진
 
+  // 에이전트 홀드 파라미터
   double agent_block_hold_sec_{2.0};
   double agent_block_max_wait_sec_{8.0};
 
+  // === NEW: 에이전트 경로 튜브 매칭 파라미터 ===
   bool   agent_path_hit_enable_{true};
   double agent_path_hit_stride_m_{0.35};
   double agent_path_hit_dilate_m_{0.02};
   int    agent_path_hit_max_poses_{200};
 
+  // [NEW] 우선순위에 따른 경로 검사 옵션
   bool respect_higher_priority_path_{false};  
+
+
+
+  std::atomic<bool> goal_occupied_flag_{false};
+  geometry_msgs::msg::Pose locked_goal_pose_;
+  std::vector<geometry_msgs::msg::PoseStamped> current_remaining_goals_;
+  std::mutex goals_mutex_; // goals 데이터 보호용
+
+
+  // [파라미터 추가]
+  double goal_doorstep_static_m_;
+  double goal_doorstep_agent_m_;
+
 };
 
 }  // namespace replan_monitor
