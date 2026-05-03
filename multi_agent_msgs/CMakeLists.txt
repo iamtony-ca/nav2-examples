@@ -36,6 +36,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MultiAgentInfo.msg"
   "msg/AgentStatus.msg"
   "msg/PathAgentCollisionInfo.msg"
+  "msg/PathStaticCollisionInfo.msg"
 
   "srv/SmartRecoveryPath.srv"
   "srv/SetNavigationMode.srv"
