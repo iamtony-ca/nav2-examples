@@ -476,16 +476,23 @@ void PathValidatorNode::robotStatusCallback(const std_msgs::msg::String::SharedP
 {
   const std::string & s = msg->data;
   // PLANNING, DRIVING, PAUSED 인 경우에만 충돌 검사를 활성화
-  bool valid_state = (s == "PLANNING" || s == "DRIVING" || s == "PAUSED");
+  bool valid_state = (s == "PLANNING" || s == "DRIVING" || s == "PAUSED" || s == "RECEIVED_GOAL" || s == "RECOVERY_FAILURE" || s == "RECOVERY_RUNNING" || s == "RECOVERY_SUCCESS");
   is_robot_in_driving_state_.store(valid_state);
 
-  // 다른 상태(IDLE, CHARGING 등)인 경우 경로를 비워서 충돌이 없는 것으로 처리
+// 다른 상태(IDLE, CHARGING 등 미션 완전히 종료/대기)인 경우 데이터 초기화
   if (!valid_state) {
-    std::lock_guard<std::mutex> lock(path_mutex_);
-    latest_global_path_.clear();
+    {
+      std::lock_guard<std::mutex> lock(path_mutex_);
+      latest_global_path_.clear();
+    }
+    // 다음 미션을 위해 Goal 정보와 Lock-on 깃발도 깔끔하게 비워줍니다.
+    {
+      std::lock_guard<std::mutex> lock(goals_mutex_);
+      current_remaining_goals_.clear();
+      goal_occupied_flag_ = false; 
+    }
   }
 }
-
 
 
 // ===================== Goals handling =====================
