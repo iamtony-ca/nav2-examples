@@ -105,7 +105,7 @@ PathValidatorNode::PathValidatorNode()
   this->declare_parameter("robot_radius", 0.1);
 
   // 에이전트 홀드
-  this->declare_parameter("agent_block_hold_sec", 2.0);
+  this->declare_parameter("agent_block_hold_sec", 0.5);
   this->declare_parameter("agent_block_max_wait_sec", 8.0);
 
   // === NEW: 에이전트 경로 튜브 매칭 ===
