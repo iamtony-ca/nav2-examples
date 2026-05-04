@@ -2026,6 +2026,22 @@ void PathValidatorNode::publishAgentCollisionList(const std::vector<AgentHit> & 
   }
 
   agent_collision_pub_->publish(msg);
+
+
+    // 배타적 퍼블리시: 에이전트가 확실하므로 일반(Static) 장애물 토픽은 False로 pub.
+  if (static_collision_pub_) {
+    multi_agent_msgs::msg::PathStaticCollisionInfo static_msg;
+    static_msg.header.stamp = this->now();
+    static_msg.header.frame_id = global_frame_;
+    static_msg.replan_request = false;
+    static_msg.is_goal_occupied = false;
+    static_msg.is_last_goal_occupied = false;
+    static_msg.hit_x = 0.0;
+    static_msg.hit_y = 0.0;
+    static_msg.target_goal = target_goal;
+    static_collision_pub_->publish(static_msg);
+  }
+    
 }
 
 void PathValidatorNode::triggerReplan(const std::string & reason, bool is_goal_occupied, bool is_last_goal_occupied, double hit_x, double hit_y, const geometry_msgs::msg::Pose& target_goal)
@@ -2053,21 +2069,26 @@ void PathValidatorNode::triggerReplan(const std::string & reason, bool is_goal_o
   static_collision_pub_->publish(m);
   RCLCPP_WARN(this->get_logger(), "Triggering replan: %s", reason.c_str());
 
-  if (publish_false_pulse_ && flag_pulse_ms_ > 0) {
-    flag_reset_timer_.reset();
-    auto weak_pub = std::weak_ptr<rclcpp::Publisher<multi_agent_msgs::msg::PathStaticCollisionInfo>>(static_collision_pub_);
-    flag_reset_timer_ = this->create_wall_timer(
-        std::chrono::milliseconds(flag_pulse_ms_),
-        [weak_pub]() {
-          if (auto pub = weak_pub.lock()) {
-            multi_agent_msgs::msg::PathStaticCollisionInfo off;
-            off.replan_request = false;
-            off.is_goal_occupied = false;
-            off.is_last_goal_occupied = false;
-            pub->publish(off);
-          }
-        });
-  }
+// 배타적 퍼블리시: 정적 장애물이 확실하므로 에이전트 토픽은 빈 배열(False)로 pub.
+  // publishAgentCollisionList 내부에 hits가 empty()일 때 non_collision을 쏘는 로직 활용.
+  publishAgentCollisionList({}, false, false, target_goal);
+
+    
+  // if (publish_false_pulse_ && flag_pulse_ms_ > 0) {
+  //   flag_reset_timer_.reset();
+  //   auto weak_pub = std::weak_ptr<rclcpp::Publisher<multi_agent_msgs::msg::PathStaticCollisionInfo>>(static_collision_pub_);
+  //   flag_reset_timer_ = this->create_wall_timer(
+  //       std::chrono::milliseconds(flag_pulse_ms_),
+  //       [weak_pub]() {
+  //         if (auto pub = weak_pub.lock()) {
+  //           multi_agent_msgs::msg::PathStaticCollisionInfo off;
+  //           off.replan_request = false;
+  //           off.is_goal_occupied = false;
+  //           off.is_last_goal_occupied = false;
+  //           pub->publish(off);
+  //         }
+  //       });
+  // }
 }
 
 // [NEW] 아무 장애물도, 에이전트도 없을 때 호출
