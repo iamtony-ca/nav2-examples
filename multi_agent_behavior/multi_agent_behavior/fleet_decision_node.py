@@ -618,7 +618,7 @@ class FleetDecisionNode(Node):
         n_check_complete = MovingCommand.WAIT
         moving_stop_type = MovingStopType.TYPE_NONE
 
-# ---------------------------------------------------------
+        # ---------------------------------------------------------
         # [수정] Simple Mode 로직: ID 비교에 따른 분기
         # ---------------------------------------------------------
         if self.simple_mode:
