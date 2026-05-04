@@ -1378,6 +1378,106 @@ void PathValidatorNode::validatePathCallback(const nav_msgs::msg::Path::SharedPt
 
 
 
+// void PathValidatorNode::validationTimerCallback()
+// {
+//   std::vector<geometry_msgs::msg::PoseStamped> gpath;
+//   {
+//     std::lock_guard<std::mutex> lock(path_mutex_);
+//     gpath = latest_global_path_;
+//   }
+
+//   if (!is_robot_in_driving_state_.load()) {
+//     publishSafeStatus();
+//     return;
+//   }
+
+//   // 1. 현재 Remaining Goals의 0번 타겟(최종 혹은 당장 가야할 Goal)만 가져오기
+//   geometry_msgs::msg::Pose target_goal;
+//   bool has_goal = false;
+//   bool is_last_goal = false; // [NEW] 최종 Goal 여부 저장 변수
+
+//   {
+//     std::lock_guard<std::mutex> lock(goals_mutex_);
+//     if (!current_remaining_goals_.empty()) {
+//       target_goal = current_remaining_goals_.front().pose;
+//       has_goal = true;
+//       is_last_goal = (current_remaining_goals_.size() == 1);
+//     }
+//   }
+
+//   if (!has_goal) {
+//     if (gpath.empty()) publishSafeStatus();
+//     return; // 남은 Goal이 없으면 검사 스킵
+//   }
+
+//   // =========================================================
+//   // [Phase 1.5] 타겟 락온(Target Lock-on) 유지 방어!
+//   // =========================================================
+//   // ※ 이 부분이 Path가 날아가도 False Negative를 막아주는 핵심입니다.
+//   if (goal_occupied_flag_.load()) {
+//     double dist_moved = std::hypot(
+//         target_goal.position.x - locked_goal_pose_.position.x,
+//         target_goal.position.y - locked_goal_pose_.position.y);
+        
+//     if (dist_moved > 0.2) {
+//       goal_occupied_flag_ = false; // Goal이 변경됨 -> 락온 해제
+//     } else {
+//       std::shared_ptr<nav2_costmap_2d::Costmap2D> cm;
+//       { std::lock_guard<std::mutex> lock(costmap_mutex_); cm = costmap_; }
+      
+//       // 유클리디안 거리가 아닌, 락온된 좌표의 Costmap 자체를 검사
+//       if (isGoalBlocked(cm, locked_goal_pose_, goal_doorstep_static_m_, 253)) {
+//         // 여전히 막혀있음.
+//         unsigned int mx, my;
+//         cm->worldToMap(locked_goal_pose_.position.x, locked_goal_pose_.position.y, mx, my);
+//         bool is_agent = false;
+//         std::vector<AgentHit> hits;
+        
+//         if (compare_agent_mask_) {
+//           if (agentCellBlockedNear(mx, my, static_cast<unsigned char>(agent_cost_threshold_), agent_mask_manhattan_buffer_)) {
+//             hits = findNearestAgent(locked_goal_pose_.position.x, locked_goal_pose_.position.y, 0.524);
+//             if (!hits.empty()) is_agent = true;
+//           }
+//         } else {
+//           hits = whoCoversPoint(locked_goal_pose_.position.x, locked_goal_pose_.position.y);
+//           if (!hits.empty()) is_agent = true;
+//         }
+
+//         if (is_agent) {
+//             publishAgentCollisionList(hits, true, is_last_goal, locked_goal_pose_);
+//         } else {
+//             triggerReplan("Locked Goal still occupied", true, is_last_goal, locked_goal_pose_.position.x, locked_goal_pose_.position.y, locked_goal_pose_);        }
+//         return; // 🚨 여기서 리턴해야 밑의 gpath.empty() 조기 종료 로직에 빠지지 않음!
+//       } else {
+//         goal_occupied_flag_ = false; // 장애물 치워짐
+//       }
+//     }
+//   }
+
+//   // =========================================================
+//   // [Phase 2] Global Path 검사 (최초 탐지 역할)
+//   // =========================================================
+//   if (gpath.empty()) {
+//     publishSafeStatus();
+//     return;
+//   }
+
+//   // 홀드 타임 체크
+//   const rclcpp::Time now = this->now();
+//   const double since_agent = (now - last_agent_block_time_).seconds();
+//   if (since_agent >= 0.0 && since_agent < agent_block_hold_sec_) {
+//     return;
+//   }
+
+//   // 검증 로직 실행 (하이브리드 검사 진행)
+//   if (use_footprint_check_) {
+//     validatePathOptimized(gpath, target_goal, is_last_goal);
+//   } else {
+//     validateWithPoints(gpath);
+//   }
+// }
+
+
 void PathValidatorNode::validationTimerCallback()
 {
   std::vector<geometry_msgs::msg::PoseStamped> gpath;
@@ -1387,6 +1487,8 @@ void PathValidatorNode::validationTimerCallback()
   }
 
   if (!is_robot_in_driving_state_.load()) {
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
+      "[Validator] Robot not in driving state. Publishing Safe Status.");
     publishSafeStatus();
     return;
   }
@@ -1406,6 +1508,8 @@ void PathValidatorNode::validationTimerCallback()
   }
 
   if (!has_goal) {
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
+      "[Validator] No remaining goals. gpath empty? %s", gpath.empty() ? "true" : "false");
     if (gpath.empty()) publishSafeStatus();
     return; // 남은 Goal이 없으면 검사 스킵
   }
@@ -1413,21 +1517,25 @@ void PathValidatorNode::validationTimerCallback()
   // =========================================================
   // [Phase 1.5] 타겟 락온(Target Lock-on) 유지 방어!
   // =========================================================
-  // ※ 이 부분이 Path가 날아가도 False Negative를 막아주는 핵심입니다.
   if (goal_occupied_flag_.load()) {
     double dist_moved = std::hypot(
         target_goal.position.x - locked_goal_pose_.position.x,
         target_goal.position.y - locked_goal_pose_.position.y);
         
     if (dist_moved > 0.2) {
+      RCLCPP_INFO(this->get_logger(), 
+        "[Phase 1.5] Target goal changed (Moved %.2fm). Releasing Lock-on.", dist_moved);
       goal_occupied_flag_ = false; // Goal이 변경됨 -> 락온 해제
     } else {
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, 
+        "[Phase 1.5] Lock-on active. Checking locked goal pose...");
+
       std::shared_ptr<nav2_costmap_2d::Costmap2D> cm;
       { std::lock_guard<std::mutex> lock(costmap_mutex_); cm = costmap_; }
       
       // 유클리디안 거리가 아닌, 락온된 좌표의 Costmap 자체를 검사
       if (isGoalBlocked(cm, locked_goal_pose_, goal_doorstep_static_m_, 253)) {
-        // 여전히 막혀있음.
+        
         unsigned int mx, my;
         cm->worldToMap(locked_goal_pose_.position.x, locked_goal_pose_.position.y, mx, my);
         bool is_agent = false;
@@ -1444,11 +1552,18 @@ void PathValidatorNode::validationTimerCallback()
         }
 
         if (is_agent) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, 
+              "[Phase 1.5] Locked Goal is still occupied by an AGENT.");
             publishAgentCollisionList(hits, true, is_last_goal, locked_goal_pose_);
         } else {
-            triggerReplan("Locked Goal still occupied", true, is_last_goal, locked_goal_pose_.position.x, locked_goal_pose_.position.y, locked_goal_pose_);        }
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, 
+              "[Phase 1.5] Locked Goal is still occupied by STATIC obstacle.");
+            triggerReplan("Locked Goal still occupied", true, is_last_goal, locked_goal_pose_.position.x, locked_goal_pose_.position.y, locked_goal_pose_);        
+        }
         return; // 🚨 여기서 리턴해야 밑의 gpath.empty() 조기 종료 로직에 빠지지 않음!
       } else {
+        RCLCPP_INFO(this->get_logger(), 
+          "[Phase 1.5] Locked Goal is now CLEAR! Releasing Lock-on.");
         goal_occupied_flag_ = false; // 장애물 치워짐
       }
     }
@@ -1458,6 +1573,8 @@ void PathValidatorNode::validationTimerCallback()
   // [Phase 2] Global Path 검사 (최초 탐지 역할)
   // =========================================================
   if (gpath.empty()) {
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
+      "[Phase 2] Global path is empty and no Lock-on. Publishing Safe Status.");
     publishSafeStatus();
     return;
   }
@@ -1466,19 +1583,22 @@ void PathValidatorNode::validationTimerCallback()
   const rclcpp::Time now = this->now();
   const double since_agent = (now - last_agent_block_time_).seconds();
   if (since_agent >= 0.0 && since_agent < agent_block_hold_sec_) {
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, 
+      "[Phase 2] Suppressed by Agent Hold Time (%.2f / %.2f)", since_agent, agent_block_hold_sec_);
     return;
   }
 
   // 검증 로직 실행 (하이브리드 검사 진행)
+  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
+    "[Phase 2] Running path validation (Footprint check: %s, Is Last Goal: %s)", 
+    use_footprint_check_ ? "true" : "false", is_last_goal ? "true" : "false");
+
   if (use_footprint_check_) {
     validatePathOptimized(gpath, target_goal, is_last_goal);
   } else {
     validateWithPoints(gpath);
   }
 }
-
-
-
 
 
 
@@ -1910,7 +2030,7 @@ void PathValidatorNode::triggerReplan(const std::string & reason, bool is_goal_o
     return;
   }
 
-  if ((now - last_replan_time_).seconds() <= cooldown_sec_) return;
+  // if ((now - last_replan_time_).seconds() <= cooldown_sec_) return;
   last_replan_time_ = now;
 
   multi_agent_msgs::msg::PathStaticCollisionInfo m;
@@ -1946,7 +2066,7 @@ void PathValidatorNode::triggerReplan(const std::string & reason, bool is_goal_o
 // [NEW] 아무 장애물도, 에이전트도 없을 때 호출
 void PathValidatorNode::publishSafeStatus()
 {
-  multi_agent_msgs::msg::PathStaticCollisionInfo m;
+multi_agent_msgs::msg::PathStaticCollisionInfo m;
   m.header.stamp = this->now();
   m.header.frame_id = global_frame_;
   m.replan_request = false;
@@ -1954,9 +2074,21 @@ void PathValidatorNode::publishSafeStatus()
   m.is_last_goal_occupied = false;
   m.hit_x = 0.0;
   m.hit_y = 0.0;
+
+  // false를 보낼 때도 항상 최신 Goal을 가져와서 채워넣음
+  geometry_msgs::msg::Pose tgt_goal;
+  {
+    std::lock_guard<std::mutex> lock(goals_mutex_);
+    if (!current_remaining_goals_.empty()) {
+      tgt_goal = current_remaining_goals_.front().pose;
+    }
+  }
+  m.target_goal = tgt_goal;
+
   static_collision_pub_->publish(m);
 
-  publishAgentCollisionList({}, false, false, geometry_msgs::msg::Pose()); // 에이전트 쪽도 클리어
+  // 에이전트 쪽 클리어 할 때도 target_goal 전달
+  publishAgentCollisionList({}, false, false, tgt_goal);
 }
 
 
