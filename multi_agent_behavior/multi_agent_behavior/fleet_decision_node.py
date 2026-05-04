@@ -8,7 +8,7 @@ from rclpy.node import Node
 from rclpy.time import Time
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy, QoSDurabilityPolicy
 
-from std_msgs.msg import Bool, String, Int8
+from std_msgs.msg import Bool, String, UInt8
 from geometry_msgs.msg import Pose
 from multi_agent_msgs.msg import PathAgentCollisionInfo, PathStaticCollisionInfo
 from multi_agent_msgs.msg import MultiAgentInfoArray, MultiAgentInfo, AgentStatus
@@ -192,7 +192,7 @@ class FleetDecisionNode(Node):
         self.pub_cmd_pause = self.create_publisher(Bool, 
             self.get_parameter("topic_cmd_pause").value, qos_req, callback_group=self.cb_group)
 
-        self.pub_cmd_stop = self.create_publisher(Int8, 
+        self.pub_cmd_stop = self.create_publisher(UInt8, 
             self.get_parameter("topic_cmd_stop").value, 10, callback_group=self.cb_group)
 
 
@@ -337,7 +337,8 @@ class FleetDecisionNode(Node):
                     self.get_logger().info(f"Goal Occupied detected but pausing for {dt:.1f}s (within timeout threshold).", throttle_duration_sec=2.0)
                 elif dt >= self.goal_occupied_timeout_sec:   
                     self.get_logger().warn(f"Goal Occupied detected timeout for {dt:.1f}s. Initiating resume sequence.")
-                    self.pub_cmd_stop.publish(Int8(data=1))  # Stop 명령 발행 (예: 1 = 긴급 정지)
+                    self.pub_cmd_stop.publish(UInt8(data=1))  # Stop 명령 발행 (예: 1 = 긴급 정지)
+                    self.pub_cmd_stop.publish(UInt8(data=1))  # Stop 명령 발행 (예: 1 = 긴급 정지)
                     self._publish_state("STOP (Goal Occupied)")
                     self.nav_stop_complete_ = False # STOP 명령 발행 후 주행 재개 대기 상태로 전환
                     self.is_last_goal_occupied_ = False
