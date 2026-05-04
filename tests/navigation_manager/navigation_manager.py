@@ -453,34 +453,38 @@ class NavigationManager(Node):
         self._nav2_monitoring_data = NavigationMonitoring()
         self.get_logger().debug('clear_nav2_monitoring_data')
 
+
+
     def _update_nav2_status(self, status: int) -> None:
         """Map action GoalStatus -> monitoring flags.
 
-        Caller must hold ``self._state_lock``. Default-zero block first,
+        Caller must hold ``self._state_lock``. Default-False block first,
         then per-status overrides — keeps the table compact without
         changing the truth-table from the C++ original.
         """
         m = self._nav2_monitoring_data
-        m.ros_nav_driving = 0
-        m.ros_nav_acvtivation = 0
-        m.ros_nav_is_destination_reached = 0
-        m.ros_nav_pause = 0
-        m.ros_nav_path_search = 0
-        m.ros_nav_driving_abort = 0
+        
+        # rclpy strict type checking을 위해 0 대신 False 사용
+        m.ros_nav_driving = False
+        m.ros_nav_acvtivation = False
+        m.ros_nav_is_destination_reached = False
+        m.ros_nav_pause = False
+        m.ros_nav_path_search = False
+        m.ros_nav_driving_abort = False
 
         match status:
             case GoalStatus.STATUS_SUCCEEDED:
-                m.ros_nav_is_destination_reached = 1
+                m.ros_nav_is_destination_reached = True
             case GoalStatus.STATUS_ABORTED:
-                m.ros_nav_driving_abort = 1
+                m.ros_nav_driving_abort = True
             case GoalStatus.STATUS_ACCEPTED:
-                m.ros_nav_acvtivation = 1
+                m.ros_nav_acvtivation = True
             case GoalStatus.STATUS_EXECUTING:
-                m.ros_nav_driving = 1
-                m.ros_nav_acvtivation = 1
+                m.ros_nav_driving = True
+                m.ros_nav_acvtivation = True
             case _:
                 # STATUS_CANCELED, STATUS_CANCELING, STATUS_UNKNOWN, ...
-                # all leave the default-zero block intact.
+                # all leave the default-False block intact.
                 pass
 
 
