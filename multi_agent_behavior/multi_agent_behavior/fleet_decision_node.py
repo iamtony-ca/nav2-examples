@@ -160,7 +160,7 @@ class FleetDecisionNode(Node):
         self.create_subscription(PathAgentCollisionInfo, 
             self.get_parameter("topic_collision").value, self.on_collision, 10, callback_group=self.cb_group)
         
-        self.create_subscription(Bool, 
+        self.create_subscription(PathStaticCollisionInfo, 
             self.get_parameter("topic_replan_flag").value, self.on_replan_flag, 10, callback_group=self.cb_group)
 
         self.create_subscription(Bool,
