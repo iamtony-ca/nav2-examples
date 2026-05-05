@@ -463,6 +463,10 @@ class FleetDecisionNode(Node):
         """ Agent 충돌 예측에 대한 상태 머신 (20Hz 주기 실행) """
         now = self.get_clock().now()
 
+
+        if self.nav_stop_complete_ == False:
+            return # STOP 명령 발행 후 주행 재개 대기 중 (STOP 시퀀스 우선 처리)
+
         if self.is_processing_replan_pause is True or self.is_processing_goal_occupied_pause is True:
             return # Replan Pause 시퀀스 진행 중이면 Agent 충돌 상태 머신은 일시 중지 (우선순위 보장)
 
