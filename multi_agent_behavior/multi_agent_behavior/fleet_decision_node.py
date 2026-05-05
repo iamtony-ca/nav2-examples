@@ -138,7 +138,8 @@ class FleetDecisionNode(Node):
         self.replan_clear_timeout_sec = self.get_parameter("replan_clear_timeout_sec").value
         self.declare_parameter("goal_occupied_timeout_sec", 100.0)
         self.goal_occupied_timeout_sec = self.get_parameter("goal_occupied_timeout_sec").value        
-
+        self.declare_parameter("agent_wait_before_resume", 3.0)
+        self.agent_wait_before_resume = self.get_parameter("agent_wait_before_resume").value
 
         # Internal State
         self._is_reroute_status = RerouteStatus.NONE
@@ -214,16 +215,20 @@ class FleetDecisionNode(Node):
 
         self.is_processing_goal_occupied_pause = False
         self.is_last_goal_occupied_ = False
-        self.goal_occupied_timeout_sec = 100.0  # Goal 점유 상태에서 대기할 최대 시간 (예: 100초)   
+        # self.goal_occupied_timeout_sec = 100.0  # Goal 점유 상태에서 대기할 최대 시간 (예: 100초)   
         self._goal_occupied_false_start_time: Optional[Time] = None
         
         self.nav_stop_complete_ = True  # STOP 명령 발행 후 주행 재개 대기 상태 플래그 (초기값 True로 설정)
 
 
 # ==========================================================
-        # [신규 추가] Agent 충돌 예측 전용 상태 변수
+        # [add] Agent 충돌 예측 전용 상태 변수
         # ==========================================================
         self.agent_collision_status = False
+        # [add] on_collision에서 받아온 최신 Raw Data 저장용
+        self.latest_agent_target_id = 0
+        self.latest_agent_collision_xy = (0.0, 0.0)
+
         self.is_processing_agent_pause = False
         self.delay_after_agent_action = False
         self.agent_pause_timeout_sec = 0.0  # N초 대기 (명령어마다 다름)
@@ -464,6 +469,8 @@ class FleetDecisionNode(Node):
 
         # [Phase 3] Action 후 지연 대기 (M초)
         if self.delay_after_agent_action and self.delay_after_agent_start_time is not None:
+            self._agent_clear_start_time = None # Early Exit 카운트 리셋
+
             elapsed_delay = (now - self.delay_after_agent_start_time).nanoseconds * 1e-9
             
             # Reroute면 1.0초, 그 외는 1.5초 등 유동적 할당 가능
@@ -514,6 +521,7 @@ class FleetDecisionNode(Node):
                         self.delay_after_agent_action = True
                         if self.delay_after_agent_start_time is None:
                             self.delay_after_agent_start_time = now
+
                         return
 
 
@@ -526,10 +534,10 @@ class FleetDecisionNode(Node):
                 self._agent_clear_start_time = now
             else:
                 elapsed = (now - self._agent_clear_start_time).nanoseconds * 1e-9
-                # collision_msg_timeout_sec (3.0초) 이상 비연속 충돌일 경우
-                # if elapsed >= self.collision_msg_timeout:
-                if elapsed >= 3.0: # [수정] 고정값으로 3.0초 사용 (충돌 메시지 타임아웃과 동일하게)
-                    self.get_logger().warn(f"Agent path clear for {elapsed:.1f}s. Early Resume!")
+                # self.agent_wait_before_resume(3.0초) 이상 비연속 충돌일 경우
+                
+                if elapsed >= self.agent_wait_before_resume: # 3.0초 사용 
+                    self.get_logger().warn(f"Agent path clear for {elapsed:.1f}s. Early Resume after waiting {self.agent_wait_before_resume}s!")
                     self.pub_cmd_resume.publish(Bool(data=False))
                     self._publish_state("RUN (Agent Early Resume)")  
                 
@@ -541,6 +549,22 @@ class FleetDecisionNode(Node):
 
         # [Phase 0 -> 신규 진입] 새로운 장애물 발견 시
         if self.agent_collision_status is True and not self.is_processing_agent_pause and self.delay_after_agent_action == False:
+            # 시퀀스 진입 직전에 최신 데이터를 바탕으로 의사결정을 수행하여 변수 고정 (Locking)
+            if self.latest_agent_target_id == 0:
+                cmd = MovingCommand.WAIT
+                stop_type = MovingStopType.TYPE_11
+            else:
+                cmd, stop_type = self._decide_obstacle_action(
+                    self.latest_agent_target_id, 
+                    self.latest_agent_collision_xy
+                )
+
+            # 결정된 명령을 전역 변수에 고정 (시퀀스가 끝날 때까지 바뀌지 않음)
+            self.current_agent_command = cmd
+            self.current_agent_stop_type = stop_type            
+            
+            
+            # 시퀀스 잠금 시작
             self.is_processing_agent_pause = True
             self._agent_pause_start_time = now
             
@@ -597,16 +621,23 @@ class FleetDecisionNode(Node):
         collision_x = float(msg.x[0]) if msg.x else 0.0
         collision_y = float(msg.y[0]) if msg.y else 0.0
 
-        if target_id == 0:
-            command = MovingCommand.WAIT
-            stop_type = MovingStopType.TYPE_11
-        else:
-            command, stop_type = self._decide_obstacle_action(target_id, (collision_x, collision_y))
 
-        # 상태 업데이트
+        # 의사결정은 여기서 하지 않고 Raw Data만 갱신
+        self.latest_agent_target_id = target_id
+        self.latest_agent_collision_xy = (collision_x, collision_y)
         self.agent_collision_status = True
-        self.current_agent_command = command
-        self.current_agent_stop_type = stop_type
+
+
+        # if target_id == 0:
+        #     command = MovingCommand.WAIT
+        #     stop_type = MovingStopType.TYPE_11
+        # else:
+        #     command, stop_type = self._decide_obstacle_action(target_id, (collision_x, collision_y))
+
+        # # 상태 업데이트
+        # self.agent_collision_status = True
+        # self.current_agent_command = command
+        # self.current_agent_stop_type = stop_type
 
 
 

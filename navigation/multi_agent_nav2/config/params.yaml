@@ -94,6 +94,7 @@ global_costmap:
         path_base_cost: 254              # path 기반 기본 코스트
         path_end_cost: 50                # path 기반 종료 코스트
 
+        ignore_higher_machine_id_path: true  # 내 ID보다 큰 숫자의 ID의 경로는 무시 (우선순위 기반 경로 반영)
 
         # 메타 퍼블리시(디버그/시각화용)
         publish_meta: true

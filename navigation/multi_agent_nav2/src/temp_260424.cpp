@@ -144,6 +144,9 @@ void AgentLayer::onInitialize()
   declareParameter("path_base_cost", rclcpp::ParameterValue(200));
   declareParameter("path_end_cost", rclcpp::ParameterValue(50));
 
+  declareParameter("ignore_higher_machine_id_path", rclcpp::ParameterValue(true));
+
+
   node_shared_->get_parameter(name_ + "." + "enabled", enabled_);
   node_shared_->get_parameter(name_ + "." + "topic", topic_);
   {
@@ -175,6 +178,8 @@ void AgentLayer::onInitialize()
   node_shared_->get_parameter(name_ + "." + "freshness_timeout_ms", freshness_timeout_ms_);
   node_shared_->get_parameter(name_ + "." + "max_poses", max_poses_);
   node_shared_->get_parameter(name_ + "." + "qos_reliable", qos_reliable_);
+
+  node_shared_->get_parameter(name_ + "." + "ignore_higher_machine_id_path", ignore_higher_machine_id_path_);
 
   declareParameter("robot_ids", rclcpp::ParameterValue(std::vector<std::string>({})));
 
@@ -555,6 +560,18 @@ void AgentLayer::rasterizeAgentPath(
 
   // 1. 에이전트 본체 그리기 (기존 로직: 동적 팽창 + 전방 스미어 적용)
   fillFootprintAt(fp, a.current_pose.pose, body_iso_extra, forward_len, grid, cost_now, &meta_hits);
+
+
+  // =========================================================================
+  // 우선순위(ID 비교) 기반 경로 반영 로직
+  // 규칙: 내 ID가 상대방 ID보다 작으면(우선순위가 높으면) 상대방의 경로는 무시함.
+  // (원하는 정책에 따라 부등호 < 또는 > 방향을 바꾸시면 됨)
+  // =========================================================================
+  if ((self_machine_id_ < a.machine_id) && ignore_higher_machine_id_path_) {
+     return;  // 여기서 함수를 종료하여 아래의 "경로 그리기" 루프를 실행하지 않음!
+  }
+
+
 
   // 2. 미래 경로 그리기 (경로 전용 파라미터 적용)
   const int limit = std::min<int>(a.truncated_path.poses.size(), max_poses_);
