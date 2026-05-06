@@ -142,7 +142,7 @@ void AgentLayer::onInitialize()
   // ========================================================
   declareParameter("path_dilation_m", rclcpp::ParameterValue(-0.01));
   declareParameter("path_base_cost", rclcpp::ParameterValue(254));
-  declareParameter("path_end_cost", rclcpp::ParameterValue(250));
+  declareParameter("path_end_cost", rclcpp::ParameterValue(254));
   declareParameter("ignore_higher_machine_id_path", rclcpp::ParameterValue(true));
 
 
@@ -662,3 +662,5 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
 
 // pluginlib export
 PLUGINLIB_EXPORT_CLASS(multi_agent_nav2::AgentLayer, nav2_costmap_2d::Layer)
+맨위로
+이전메일 읽기다음
