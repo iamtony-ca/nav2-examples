@@ -116,6 +116,8 @@ private:
   double cached_robot_x_{0.0};
   double cached_robot_y_{0.0};
 
+  bool ignore_higher_machine_id_path_{true};
+
   // TF 시간차 캐시
   std::vector<multi_agent_msgs::msg::MultiAgentInfo> transformed_agents_;
 
