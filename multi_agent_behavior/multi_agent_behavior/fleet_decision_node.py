@@ -34,18 +34,18 @@ class MovingCommand(IntEnum):
 
 class MovingStopType(IntEnum):
     TYPE_NONE = 0
-    TYPE_1 = 1   
-    TYPE_2 = 2   
-    TYPE_3 = 3   
-    TYPE_4 = 4   
-    TYPE_5 = 5   
-    TYPE_6 = 6   
-    TYPE_7 = 7   
-    TYPE_8 = 8   
-    TYPE_9 = 9   
-    TYPE_10 = 10 
-    TYPE_11 = 11 
-    TYPE_12 = 12 
+    TYPE_1 = 1  
+    TYPE_2 = 2  
+    TYPE_3 = 3  
+    TYPE_4 = 4  
+    TYPE_5 = 5  
+    TYPE_6 = 6  
+    TYPE_7 = 7  
+    TYPE_8 = 8  
+    TYPE_9 = 9  
+    TYPE_10 = 10
+    TYPE_11 = 11
+    TYPE_12 = 12
 
 class RerouteStatus(IntEnum):
     NONE = 0
@@ -67,7 +67,7 @@ class FleetDecisionNode(Node):
         # ---- Parameters ----
         self.declare_parameter("my_machine_id", 1)
         self.declare_parameter("use_reroute", True)
-        
+       
         # Timeouts
         self.declare_parameter("wait_detect_amr_sec", 2.0)
         self.declare_parameter("wait_other_amr_long_sec", 450.0)
@@ -75,12 +75,12 @@ class FleetDecisionNode(Node):
         self.declare_parameter("wait_abnormal_long_sec", 300.0)
         self.declare_parameter("wait_abnormal_short_sec", 30.0)
         self.declare_parameter("wait_obstacle_sec", 15.0)
-        
+       
         self.declare_parameter("replan_ignore_sec_after_agent", 0.5)
-        
+       
         # [수정] 충돌 메시지 타임아웃 설정 (이 시간동안 메시지 없으면 장애물 해소로 간주)
-        self.declare_parameter("collision_msg_timeout_sec", 3.0) 
-        
+        self.declare_parameter("collision_msg_timeout_sec", 3.0)
+       
         # [수정] Reroute 요청 쿨다운 시간 설정 (예: 2초 동안 재요청 금지)
         self.declare_parameter("reroute_cooldown_sec", 5.0)
 
@@ -101,17 +101,17 @@ class FleetDecisionNode(Node):
         # Fetch Params
         self.my_id = self.get_parameter("my_machine_id").value
         self.use_reroute = self.get_parameter("use_reroute").value
-        
+       
         self.wait_detect_sec = self.get_parameter("wait_detect_amr_sec").value
         self.wait_other_long_sec = self.get_parameter("wait_other_amr_long_sec").value
         self.wait_other_short_sec = self.get_parameter("wait_other_amr_short_sec").value
         self.wait_abnormal_long_sec = self.get_parameter("wait_abnormal_long_sec").value
         self.wait_abnormal_short_sec = self.get_parameter("wait_abnormal_short_sec").value
         self.wait_obstacle_sec = self.get_parameter("wait_obstacle_sec").value
-        
+       
         self.replan_ignore_sec = self.get_parameter("replan_ignore_sec_after_agent").value
         self.collision_msg_timeout = self.get_parameter("collision_msg_timeout_sec").value
-        
+       
         # [수정] Reroute 쿨다운 값 가져오기
         self.reroute_cooldown_sec = self.get_parameter("reroute_cooldown_sec").value
 
@@ -121,7 +121,7 @@ class FleetDecisionNode(Node):
         self.declare_parameter("replan_flag_wait_sec", 10.0)
         self.replan_flag_wait_sec = self.get_parameter("replan_flag_wait_sec").value
         self._replan_flag_timer = None
-        
+       
         # [추가] Resume 지연을 위한 타이머 변수
         self._resume_timer = None
 
@@ -146,22 +146,22 @@ class FleetDecisionNode(Node):
         self._pre_moving_stop_type = MovingStopType.TYPE_NONE
         self._last_agent_event_time: Optional[Time] = None
         self._cached_agents: Dict[int, MultiAgentInfo] = {}
-        
+       
         # [수정] 마지막 충돌 메시지 수신 시각 저장용
-        self._last_collision_msg_time: Optional[Time] = None 
-        
+        self._last_collision_msg_time: Optional[Time] = None
+       
         # [수정] 마지막 Reroute 요청 시각 저장용
         self._last_reroute_req_time: Optional[Time] = None
 
 
         # Subscriptions
-        self.create_subscription(MultiAgentInfoArray, 
+        self.create_subscription(MultiAgentInfoArray,
             self.get_parameter("topic_agents").value, self.on_agents, 10, callback_group=self.cb_group)
-        
-        self.create_subscription(PathAgentCollisionInfo, 
+       
+        self.create_subscription(PathAgentCollisionInfo,
             self.get_parameter("topic_collision").value, self.on_collision, 10, callback_group=self.cb_group)
-        
-        self.create_subscription(PathStaticCollisionInfo, 
+       
+        self.create_subscription(PathStaticCollisionInfo,
             self.get_parameter("topic_replan_flag").value, self.on_replan_flag, 10, callback_group=self.cb_group)
 
         self.create_subscription(Bool,
@@ -173,27 +173,27 @@ class FleetDecisionNode(Node):
                              reliability=QoSReliabilityPolicy.RELIABLE,
                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
 
-        self.pub_req_replan = self.create_publisher(Bool, 
+        self.pub_req_replan = self.create_publisher(Bool,
             self.get_parameter("topic_request_replan").value, qos_req)
-        
+       
             # [수정] Reroute 전용 Publisher 생성
-        self.pub_req_reroute = self.create_publisher(Bool, 
+        self.pub_req_reroute = self.create_publisher(Bool,
             self.get_parameter("topic_request_reroute").value, 10, callback_group=self.cb_group)
-        
-        self.pub_state = self.create_publisher(String, 
+       
+        self.pub_state = self.create_publisher(String,
             self.get_parameter("topic_decision_state").value, 10)
-        
-        self.pub_cmd_run = self.create_publisher(Bool, 
+       
+        self.pub_cmd_run = self.create_publisher(Bool,
             self.get_parameter("topic_cmd_run").value, 10)
 
         # [수정] Resume Publisher 생성
-        self.pub_cmd_resume = self.create_publisher(Bool, 
+        self.pub_cmd_resume = self.create_publisher(Bool,
             self.get_parameter("topic_cmd_resume").value, qos_req, callback_group=self.cb_group)
-        
-        self.pub_cmd_pause = self.create_publisher(Bool, 
+       
+        self.pub_cmd_pause = self.create_publisher(Bool,
             self.get_parameter("topic_cmd_pause").value, qos_req, callback_group=self.cb_group)
 
-        self.pub_cmd_stop = self.create_publisher(UInt8, 
+        self.pub_cmd_stop = self.create_publisher(UInt8,
             self.get_parameter("topic_cmd_stop").value, 10, callback_group=self.cb_group)
 
 
@@ -206,18 +206,18 @@ class FleetDecisionNode(Node):
         self.is_processing_replan_pause = False
         self.replan_flag_status = False
         self.is_last_goal_occupied_ = False
-        self.delay_after_replan = False 
+        self.delay_after_replan = False
         self.replan_pause_timeout_sec = 15.0  # replan_flag가 True인 상태에서 대기할 최대 시간 (예: 15초)
         self.delay_after_replan_start_time: Optional[Time] = None
         self._pause_start_time: Optional[Time] = None
         self._replan_flag_false_start_time: Optional[Time] = None
-        
+       
 
         self.is_processing_goal_occupied_pause = False
         self.is_last_goal_occupied_ = False
-        # self.goal_occupied_timeout_sec = 100.0  # Goal 점유 상태에서 대기할 최대 시간 (예: 100초)   
+        # self.goal_occupied_timeout_sec = 100.0  # Goal 점유 상태에서 대기할 최대 시간 (예: 100초)  
         self._goal_occupied_false_start_time: Optional[Time] = None
-        
+       
         self.nav_stop_complete_ = True  # STOP 명령 발행 후 주행 재개 대기 상태 플래그 (초기값 True로 설정)
 
 
@@ -234,7 +234,7 @@ class FleetDecisionNode(Node):
         self.agent_pause_timeout_sec = 0.0  # N초 대기 (명령어마다 다름)
         self.current_agent_command = MovingCommand.WAIT
         self.current_agent_stop_type = MovingStopType.TYPE_NONE
-        
+       
         self.delay_after_agent_start_time: Optional[Time] = None
         self._agent_pause_start_time: Optional[Time] = None
         self._agent_clear_start_time: Optional[Time] = None
@@ -274,7 +274,7 @@ class FleetDecisionNode(Node):
     # ------------------------------------------------------------------
     def on_agents(self, msg: MultiAgentInfoArray):
         self._cached_agents = {a.machine_id: a for a in msg.agents}
-        
+       
         if self.my_id in self._cached_agents:
             me = self._cached_agents[self.my_id]
             if me.reroute:
@@ -338,9 +338,9 @@ class FleetDecisionNode(Node):
             self._goal_occupied_false_start_time = None
             if self._pause_start_time is not None:
                 dt = (now - self._pause_start_time).nanoseconds * 1e-9
-                if dt < self.goal_occupied_timeout_sec : 
+                if dt < self.goal_occupied_timeout_sec :
                     self.get_logger().info(f"Goal Occupied detected but pausing for {dt:.1f}s (within timeout threshold).", throttle_duration_sec=2.0)
-                elif dt >= self.goal_occupied_timeout_sec:   
+                elif dt >= self.goal_occupied_timeout_sec:  
                     self.get_logger().warn(f"Goal Occupied detected timeout for {dt:.1f}s. Initiating resume sequence.")
                     self.pub_cmd_stop.publish(UInt8(data=1))  # Stop 명령 발행 (예: 1 = 긴급 정지)
                     self.pub_cmd_stop.publish(UInt8(data=1))  # Stop 명령 발행 (예: 1 = 긴급 정지)
@@ -365,14 +365,14 @@ class FleetDecisionNode(Node):
                     if self.is_processing_goal_occupied_pause:
                         self.get_logger().warn(f"Path clear for {elapsed:.1f}s. Aborting Pause Sequence & Early Resume!")
                         # self._abort_sequence_and_resume()
-                        
+                       
                         # self._pre_moving_stop_type = MovingStopType.TYPE_NONE
-                        
+                       
                         # 3. 주행 재개 신호 즉시 발행
                         self.pub_cmd_resume.publish(Bool(data=False))
-                        
+                       
                         self._publish_state("RUN (Early Resume)")  
-                    
+                   
                         # 이미 조기 종료를 처리했으므로 시간 초기화 (중복 실행 방지)
                         self.is_last_goal_occupied_ = False
                         self._goal_occupied_false_start_time = None
@@ -408,11 +408,11 @@ class FleetDecisionNode(Node):
             self._replan_flag_false_start_time = None
             if self._pause_start_time is not None:
                 dt = (now - self._pause_start_time).nanoseconds * 1e-9
-                if dt < self.replan_pause_timeout_sec: 
+                if dt < self.replan_pause_timeout_sec:
                     self.get_logger().info(f"Obstacle detected but pausing for {dt:.1f}s (within timeout threshold).", throttle_duration_sec=2.0)
                 elif dt >= self.replan_pause_timeout_sec:
                     self.get_logger().warn(f"Obstacle detected timeout for {dt:.1f}s. Initiating resume sequence.")
-                    
+                   
                     if self.delay_after_replan == False:
                         self._publish_replan()
                         self.delay_after_replan = True
@@ -432,14 +432,14 @@ class FleetDecisionNode(Node):
                     if self.is_processing_replan_pause:
                         self.get_logger().warn(f"Path clear for {elapsed:.1f}s. Aborting Pause Sequence & Early Resume!")
                         # self._abort_sequence_and_resume()
-                        
+                       
                         # self._pre_moving_stop_type = MovingStopType.TYPE_NONE
-                        
+                       
                         # 3. 주행 재개 신호 즉시 발행
                         self.pub_cmd_resume.publish(Bool(data=False))
-                        
+                       
                         self._publish_state("RUN (Early Resume)")  
-                    
+                   
                         # 이미 조기 종료를 처리했으므로 시간 초기화 (중복 실행 방지)
                         self._replan_flag_false_start_time = None
                         self._pause_start_time = None
@@ -448,7 +448,7 @@ class FleetDecisionNode(Node):
                         self.delay_after_replan_start_time = None
 
 
-                
+               
 
         if self.replan_flag_status is True and not self.is_processing_replan_pause and self.delay_after_replan == False and self.is_processing_goal_occupied_pause is False:
             self.is_processing_replan_pause = True
@@ -476,16 +476,16 @@ class FleetDecisionNode(Node):
             self._agent_clear_start_time = None # Early Exit 카운트 리셋
 
             elapsed_delay = (now - self.delay_after_agent_start_time).nanoseconds * 1e-9
-            
+           
             # Reroute면 1.0초, 그 외는 1.5초 등 유동적 할당 가능
             wait_m = 1.0 if self.current_agent_command == MovingCommand.REROUTE else 1.5
             if self.current_agent_command == MovingCommand.WAIT_SIMPLE_RESUME:
                 wait_m = 0.0 # Replan/Reroute 안 하는 경우 바로 Resume
-                
+               
             if elapsed_delay >= wait_m:
                 self.pub_cmd_resume.publish(Bool(data=False))
                 self._publish_state(f"RUN ({self.current_agent_command.name} Done)")  
-                
+               
                 self._agent_pause_start_time = None
                 self.delay_after_agent_start_time = None
                 self.is_processing_agent_pause = False
@@ -496,10 +496,10 @@ class FleetDecisionNode(Node):
         # [Phase 1 & 2] Pause 진행 중
         if self.is_processing_agent_pause and self.agent_collision_status is True:
             self._agent_clear_start_time = None # Early Exit 카운트 리셋
-            
+           
             if self._agent_pause_start_time is not None:
                 dt = (now - self._agent_pause_start_time).nanoseconds * 1e-9
-                if dt < self.agent_pause_timeout_sec: 
+                if dt < self.agent_pause_timeout_sec:
                     self.get_logger().info(f"Agent Pause: {dt:.1f}s / {self.agent_pause_timeout_sec}s", throttle_duration_sec=2.0)
                 else:
                     self.get_logger().warn(f"Agent Timeout {dt:.1f}s. Initiating Action.")
@@ -521,7 +521,7 @@ class FleetDecisionNode(Node):
                             self._publish_reroute()
                         else:
                             self._publish_replan()
-                            
+                           
                         self.delay_after_agent_action = True
                         if self.delay_after_agent_start_time is None:
                             self.delay_after_agent_start_time = now
@@ -539,12 +539,12 @@ class FleetDecisionNode(Node):
             else:
                 elapsed = (now - self._agent_clear_start_time).nanoseconds * 1e-9
                 # self.agent_wait_before_resume(3.0초) 이상 비연속 충돌일 경우
-                
-                if elapsed >= self.agent_wait_before_resume: # 3.0초 사용 
+               
+                if elapsed >= self.agent_wait_before_resume: # 3.0초 사용
                     self.get_logger().warn(f"Agent path clear for {elapsed:.1f}s. Early Resume after waiting {self.agent_wait_before_resume}s!")
                     self.pub_cmd_resume.publish(Bool(data=False))
                     self._publish_state("RUN (Agent Early Resume)")  
-                
+               
                     self._agent_clear_start_time = None
                     self._agent_pause_start_time = None
                     self.is_processing_agent_pause = False
@@ -554,37 +554,41 @@ class FleetDecisionNode(Node):
         # [Phase 0 -> 신규 진입] 새로운 장애물 발견 시
         if self.agent_collision_status is True and not self.is_processing_agent_pause and self.delay_after_agent_action == False:
             # 시퀀스 진입 직전에 최신 데이터를 바탕으로 의사결정을 수행하여 변수 고정 (Locking)
+           
+            self.get_logger().warn(f"self.latest_agent_target_id : {self.latest_agent_target_id}, self.agent_collision_status : {self.agent_collision_status}, self.latest_agent_collision_xy: {self.latest_agent_collision_xy}")
             if self.latest_agent_target_id == 0:
+               
                 cmd = MovingCommand.WAIT
                 stop_type = MovingStopType.TYPE_11
+                self.get_logger().warn(f"self.latest_agent_target_id == 0 , n_check_complete : {cmd}, moving_stop_type : {stop_type}")
             else:
                 cmd, stop_type = self._decide_obstacle_action(
-                    self.latest_agent_target_id, 
+                    self.latest_agent_target_id,
                     self.latest_agent_collision_xy
                 )
 
             # 결정된 명령을 전역 변수에 고정 (시퀀스가 끝날 때까지 바뀌지 않음)
             self.current_agent_command = cmd
             self.current_agent_stop_type = stop_type            
-            
-            
+           
+           
             # 시퀀스 잠금 시작
             self.is_processing_agent_pause = True
             self._agent_pause_start_time = now
-            
+           
             # 대기 시간(N초) 매핑
             n_pause = 0.0
             cmd = self.current_agent_command
-            if cmd == MovingCommand.REROUTE: n_pause = 5.0 
+            if cmd == MovingCommand.REROUTE: n_pause = 5.0
             elif cmd == MovingCommand.WAIT_DETECT_AMR: n_pause = self.wait_detect_sec
             elif cmd == MovingCommand.WAIT_OHTHER_AMR: n_pause = self.wait_other_long_sec if self.use_reroute else self.wait_other_short_sec
             elif cmd == MovingCommand.WAIT_ABNORMAL: n_pause = self.wait_abnormal_long_sec if self.use_reroute else self.wait_abnormal_short_sec
             elif cmd == MovingCommand.WAIT: n_pause = self.wait_obstacle_sec
             elif cmd == MovingCommand.WAIT_SIMPLE_REPLAN: n_pause = 3.0            
             elif cmd == MovingCommand.WAIT_SIMPLE_RESUME: n_pause = 6.0
-            
+           
             self.agent_pause_timeout_sec = n_pause
-            
+           
             self._publish_pause()
             self._publish_state(f"{self.current_agent_stop_type.name}: PAUSE {n_pause}s")
 
@@ -615,8 +619,9 @@ class FleetDecisionNode(Node):
             return
 
         # 2. 장애물이 있을 때 (True)
+        if 0 in msg.machine_id: self.get_logger().warn(f"0 in msg.machine_id")
         target_id = int(msg.machine_id[0]) if msg.machine_id else 0
-        
+       
         # 내 자신이면 무시
         if target_id == self.my_id:
             self.agent_collision_status = False
@@ -631,6 +636,9 @@ class FleetDecisionNode(Node):
         self.latest_agent_collision_xy = (collision_x, collision_y)
         self.agent_collision_status = True
 
+
+
+       
 
         # if target_id == 0:
         #     command = MovingCommand.WAIT
@@ -649,7 +657,7 @@ class FleetDecisionNode(Node):
     # Core Logic
     # ------------------------------------------------------------------
     def _decide_obstacle_action(self, target_id: int, collision_xy: Tuple[float, float]) -> Tuple[MovingCommand, MovingStopType]:
-        
+       
         n_check_complete = MovingCommand.WAIT
         moving_stop_type = MovingStopType.TYPE_NONE
 
@@ -657,7 +665,7 @@ class FleetDecisionNode(Node):
         # [수정] Simple Mode 로직: ID 비교에 따른 분기
         # ---------------------------------------------------------
         if self.simple_mode:
-            if self.my_id > target_id: 
+            if self.my_id > target_id:
                 # ID가 큰 녀석: 대기 후 Replan 해서 감
                 return MovingCommand.WAIT_SIMPLE_REPLAN, MovingStopType.TYPE_4
             else:
@@ -675,7 +683,7 @@ class FleetDecisionNode(Node):
             return MovingCommand.WAIT, MovingStopType.TYPE_11
 
         # 3. Decision Tree
-        
+       
         # [리뷰 반영] Manual Mode 판정 강화
         if self._check_vehicle_manual_mode(agent):
             n_check_complete = MovingCommand.WAIT_DETECT_AMR
@@ -731,7 +739,9 @@ class FleetDecisionNode(Node):
                     else:
                         n_check_complete = MovingCommand.WAIT_DETECT_AMR
                         moving_stop_type = MovingStopType.TYPE_6
-        
+       
+        self.get_logger().warn(f"n_check_complete : {n_check_complete}, moving_stop_type : {moving_stop_type}")
+       
         return n_check_complete, moving_stop_type
 
     # ------------------------------------------------------------------
@@ -748,17 +758,17 @@ class FleetDecisionNode(Node):
         return False
 
     def _check_vehicle_path(self, agent: MultiAgentInfo) -> int:
-        """ 
+        """
         [리뷰 반영] Yaw 비교 + Vector 비교 Hybrid
         """
         if self.my_id not in self._cached_agents:
             return DIFFERENT_PATH
         me = self._cached_agents[self.my_id]
-        
+       
         # 1. Truncated Path Vector 비교 (가장 정확)
         my_vec = self._get_path_vector(me.truncated_path.poses)
         other_vec = self._get_path_vector(agent.truncated_path.poses)
-        
+       
         if my_vec and other_vec:
             dot = my_vec[0]*other_vec[0] + my_vec[1]*other_vec[1]
             # 내적 > 0.707 (cos 45도) 이면 같은 방향
@@ -771,7 +781,7 @@ class FleetDecisionNode(Node):
         my_yaw = self._get_yaw(me.current_pose.pose)
         other_yaw = self._get_yaw(agent.current_pose.pose)
         diff = abs(math.degrees(self._ang_wrap(my_yaw - other_yaw)))
-        
+       
         if diff < 45.0:
             return SAME_PATH
         return DIFFERENT_PATH
@@ -800,7 +810,7 @@ class FleetDecisionNode(Node):
             if lin_v < 0.01 and ang_v < 0.01:
                 return True # Stopped
             return False # Moving
-        
+       
         return True # Stopped (Idle, Error, etc.)
 
     def _check_vehicle_rerouting(self, agent: MultiAgentInfo) -> int:
@@ -809,12 +819,12 @@ class FleetDecisionNode(Node):
         return RerouteStatus.NONE
 
     def _check_vehicle_rerouting_path(self, agent: MultiAgentInfo, collision_xy: Tuple[float, float]) -> bool:
-        """ 
-        [리뷰 반영] 충돌 지점이 상대방의 Truncated Path 근처에 있는가? 
+        """
+        [리뷰 반영] 충돌 지점이 상대방의 Truncated Path 근처에 있는가?
         """
         if not agent.reroute:
             return False
-            
+           
         poses = agent.truncated_path.poses
         if not poses:
             return False # 경로 정보 없으면 판단 불가 -> False (보수적) or True? C++은 보통 False
@@ -830,7 +840,7 @@ class FleetDecisionNode(Node):
             dist = math.hypot(cx - px, cy - py)
             if dist < min_dist:
                 min_dist = dist
-        
+       
         return min_dist < THRESHOLD
 
 
@@ -861,7 +871,7 @@ def main():
     # 4개의 스레드를 사용하는 MultiThreadedExecutor 생성
     executor = MultiThreadedExecutor(num_threads=6)
     executor.add_node(node)
-    
+   
     try:
         executor.spin()
     except KeyboardInterrupt: pass
