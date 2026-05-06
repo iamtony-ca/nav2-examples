@@ -1,7 +1,3 @@
-현재 상대 agent의 path에 의해서 최초 충돌 예측이 되고, 일반 장애물에 의한건지, agent에 의한건지 판단을 할텐데, 이때 상대 agent의 path에 의한거면, agent에 의한 충돌로 판정이 되나?
-
-
-```
 #include "replan_monitor/path_validator_node.hpp"
 // [NEW] For makeFootprintFromString and makeFootprintFromRadius
 #include <nav2_costmap_2d/footprint.hpp>
@@ -1837,6 +1833,3 @@ multi_agent_msgs::msg::PathStaticCollisionInfo m;
 
 
 }  // namespace replan_monitor
-
-
-```
