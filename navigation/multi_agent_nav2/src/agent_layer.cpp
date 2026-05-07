@@ -662,5 +662,3 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
 
 // pluginlib export
 PLUGINLIB_EXPORT_CLASS(multi_agent_nav2::AgentLayer, nav2_costmap_2d::Layer)
-맨위로
-이전메일 읽기다음
