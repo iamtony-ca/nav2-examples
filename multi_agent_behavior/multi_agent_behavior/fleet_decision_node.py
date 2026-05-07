@@ -287,7 +287,7 @@ class FleetDecisionNode(Node):
 
     def stop_complete_callback(self, msg: Bool):
         self.nav_stop_complete_ = msg.data
-        self.get_logger().debug(f"STOP sequence complete topic received: {msg.data}", throttle_duration_sec=2.0)
+        self.get_logger().info(f"STOP sequence complete topic received: {msg.data}", throttle_duration_sec=2.0)
 
 
 # ------------------------------------------------------------------
@@ -465,9 +465,11 @@ class FleetDecisionNode(Node):
 
 
         if self.nav_stop_complete_ == False:
+            self.get_logger().info("Agent SM: Halted due to nav_stop_complete_ == False", throttle_duration_sec=2.0)            
             return # STOP 명령 발행 후 주행 재개 대기 중 (STOP 시퀀스 우선 처리)
 
         if self.is_processing_replan_pause is True or self.is_processing_goal_occupied_pause is True:
+            self.get_logger().info("Agent SM: Halted due to higher priority pause (Replan/GoalOccupied)", throttle_duration_sec=2.0)
             return # Replan Pause 시퀀스 진행 중이면 Agent 충돌 상태 머신은 일시 중지 (우선순위 보장)
 
 
@@ -482,7 +484,11 @@ class FleetDecisionNode(Node):
             if self.current_agent_command == MovingCommand.WAIT_SIMPLE_RESUME:
                 wait_m = 0.0 # Replan/Reroute 안 하는 경우 바로 Resume
                 
+            self.get_logger().info(f"[Phase 3] Waiting for action stabilization... ({elapsed_delay:.1f}s / {wait_m:.1f}s)", throttle_duration_sec=0.5)
+
+
             if elapsed_delay >= wait_m:
+                self.get_logger().warn(f"[Phase 3] Stabilization complete. Resuming! (Action: {self.current_agent_command.name})")
                 self.pub_cmd_resume.publish(Bool(data=False))
                 self._publish_state(f"RUN ({self.current_agent_command.name} Done)")  
                 
@@ -495,19 +501,22 @@ class FleetDecisionNode(Node):
 
         # [Phase 1 & 2] Pause 진행 중
         if self.is_processing_agent_pause and self.agent_collision_status is True:
+            
             self._agent_clear_start_time = None # Early Exit 카운트 리셋
             
             if self._agent_pause_start_time is not None:
                 dt = (now - self._agent_pause_start_time).nanoseconds * 1e-9
                 if dt < self.agent_pause_timeout_sec: 
-                    self.get_logger().info(f"Agent Pause: {dt:.1f}s / {self.agent_pause_timeout_sec}s", throttle_duration_sec=2.0)
+                    self.get_logger().info(f"[Phase 1] Agent Pause: {dt:.1f}s / {self.agent_pause_timeout_sec:.1f}s (Cmd: {self.current_agent_command.name})", throttle_duration_sec=1.0)
+                    # self.get_logger().info(f"Agent Pause: {dt:.1f}s / {self.agent_pause_timeout_sec}s", throttle_duration_sec=2.0)
                 else:
-                    self.get_logger().warn(f"Agent Timeout {dt:.1f}s. Initiating Action.")
+                    self.get_logger().error(f"[Phase 2] Agent Timeout reached! ({dt:.1f}s). Initiating Action: {self.current_agent_command.name}")
+                    # self.get_logger().warn(f"Agent Timeout {dt:.1f}s. Initiating Action.")
                     if self.delay_after_agent_action == False:
                         cmd = self.current_agent_command
                         if cmd == MovingCommand.WAIT_SIMPLE_RESUME:
                             # Replan 없이 즉시 출발
-                            self.get_logger().info("Simple Resume. Releasing lock.")
+                            self.get_logger().warn("[Phase 2] Simple Resume triggered. Releasing lock immediately.")
                             self.pub_cmd_resume.publish(Bool(data=False))
                             self._publish_state("RUN (Simple Resume)")
                             # 상태 완전 초기화
@@ -518,8 +527,10 @@ class FleetDecisionNode(Node):
 
                         # Reroute 또는 Replan 실행
                         if cmd == MovingCommand.REROUTE:
+                            self.get_logger().warn(f"[Phase 2] Publishing command : {cmd}")
                             self._publish_reroute()
                         else:
+                            self.get_logger().warn(f"[Phase 2] Publishing command : {cmd}")
                             self._publish_replan()
                             
                         self.delay_after_agent_action = True
@@ -535,13 +546,16 @@ class FleetDecisionNode(Node):
         # [Phase 0 -> 조기 종료] 연속 False 판정 (Early Exit)
         if self.is_processing_agent_pause and self.agent_collision_status is False and self.delay_after_agent_action == False:
             if self._agent_clear_start_time is None:
+                self.get_logger().info("[Early Exit] Obstacle disappeared. Starting clear timer...")
                 self._agent_clear_start_time = now
             else:
                 elapsed = (now - self._agent_clear_start_time).nanoseconds * 1e-9
+                self.get_logger().info(f"[Early Exit] Clear timer: {elapsed:.1f}s / {self.agent_wait_before_resume:.1f}s", throttle_duration_sec=0.5)
                 # self.agent_wait_before_resume(3.0초) 이상 비연속 충돌일 경우
                 
                 if elapsed >= self.agent_wait_before_resume: # 3.0초 사용 
-                    self.get_logger().warn(f"Agent path clear for {elapsed:.1f}s. Early Resume after waiting {self.agent_wait_before_resume}s!")
+                    self.get_logger().error(f"[Early Exit] Agent path clear for {elapsed:.1f}s. Early Resume after waiting {self.agent_wait_before_resume}s!")
+                    # self.get_logger().warn(f"Agent path clear for {elapsed:.1f}s. Early Resume after waiting {self.agent_wait_before_resume}s!")
                     self.pub_cmd_resume.publish(Bool(data=False))
                     self._publish_state("RUN (Agent Early Resume)")  
                 
@@ -554,18 +568,21 @@ class FleetDecisionNode(Node):
         # [Phase 0 -> 신규 진입] 새로운 장애물 발견 시
         if self.agent_collision_status is True and not self.is_processing_agent_pause and self.delay_after_agent_action == False:
             # 시퀀스 진입 직전에 최신 데이터를 바탕으로 의사결정을 수행하여 변수 고정 (Locking)
-            
-            self.get_logger().warn(f"self.latest_agent_target_id : {self.latest_agent_target_id}, self.agent_collision_status : {self.agent_collision_status}, self.latest_agent_collision_xy: {self.latest_agent_collision_xy}")
+            self.get_logger().warn(f"[Phase 0] New Agent Collision Detected! target_id: {self.latest_agent_target_id}, xy: {self.latest_agent_collision_xy}")
+            # self.get_logger().warn(f"self.latest_agent_target_id : {self.latest_agent_target_id}, self.agent_collision_status : {self.agent_collision_status}, self.latest_agent_collision_xy: {self.latest_agent_collision_xy}")
             if self.latest_agent_target_id == 0:
                 
                 cmd = MovingCommand.WAIT
                 stop_type = MovingStopType.TYPE_11
-                self.get_logger().warn(f"self.latest_agent_target_id == 0 , n_check_complete : {cmd}, moving_stop_type : {stop_type}")
+                # self.get_logger().warn(f"self.latest_agent_target_id == 0 , n_check_complete : {cmd}, moving_stop_type : {stop_type}")
+                self.get_logger().warn(f"[Phase 0] target_id is 0. Fallback to WAIT (TYPE_11).")
+
             else:
                 cmd, stop_type = self._decide_obstacle_action(
                     self.latest_agent_target_id, 
                     self.latest_agent_collision_xy
                 )
+                self.get_logger().info(f"[Phase 0] Decision Maker output -> Cmd: {cmd.name}, StopType: {stop_type.name}")
 
             # 결정된 명령을 전역 변수에 고정 (시퀀스가 끝날 때까지 바뀌지 않음)
             self.current_agent_command = cmd
@@ -589,6 +606,7 @@ class FleetDecisionNode(Node):
             
             self.agent_pause_timeout_sec = n_pause
             
+            self.get_logger().error(f"[Phase 0] Sequence Locked. Starting PAUSE for {n_pause}s.")
             self._publish_pause()
             self._publish_state(f"{self.current_agent_stop_type.name}: PAUSE {n_pause}s")
 
@@ -601,6 +619,7 @@ class FleetDecisionNode(Node):
         self._last_agent_event_time = self.get_clock().now()
 
         if self.nav_stop_complete_ == False:
+            self.get_logger().info("[on_collision] Ignored: Waiting for nav_stop_complete_ to be True.", throttle_duration_sec=2.0)
             self.replan_flag_status = False
             self.is_last_goal_occupied_ = False
             self.agent_collision_status = False            
@@ -611,19 +630,25 @@ class FleetDecisionNode(Node):
         is_clear = False
         if not msg.x:
             is_clear = True
+            self.get_logger().info("[on_collision] Clear: msg.x is empty.", throttle_duration_sec=2.0)
         elif msg.note and "non_collision" in msg.note[0]:
             is_clear = True
+            self.get_logger().info("[on_collision] Clear: 'non_collision' note received.", throttle_duration_sec=2.0)
 
         if is_clear:
+            if self.agent_collision_status is True:
+                self.get_logger().info("[on_collision] Agent collision status changed to FALSE (Path Clear).")
             self.agent_collision_status = False
             return
 
         # 2. 장애물이 있을 때 (True)
-        if 0 in msg.machine_id: self.get_logger().warn(f"0 in msg.machine_id")
+        if 0 in msg.machine_id: 
+            self.get_logger().warn("[on_collision] Warning: '0' found in msg.machine_id! Treating as normal obstacle.", throttle_duration_sec=5.0)
         target_id = int(msg.machine_id[0]) if msg.machine_id else 0
         
         # 내 자신이면 무시
         if target_id == self.my_id:
+            self.get_logger().info(f"[on_collision] Ignored: Target ID ({target_id}) is myself.", throttle_duration_sec=2.0)
             self.agent_collision_status = False
             return
 
@@ -634,6 +659,11 @@ class FleetDecisionNode(Node):
         # 의사결정은 여기서 하지 않고 Raw Data만 갱신
         self.latest_agent_target_id = target_id
         self.latest_agent_collision_xy = (collision_x, collision_y)
+
+        # 상태가 False -> True로 바뀌는 순간이거나, 타겟 ID가 바뀌었을 때 로깅
+        if not self.agent_collision_status or self.latest_agent_target_id != target_id:
+            self.get_logger().warn(f"[on_collision] New Agent Collision Data Cached -> Target ID: {target_id}, XY: ({collision_x:.2f}, {collision_y:.2f})")
+
         self.agent_collision_status = True
 
 
