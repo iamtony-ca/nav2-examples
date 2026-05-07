@@ -158,13 +158,13 @@ BT::NodeStatus IsGoalsOccupiedCondition::tick()
       is_occupied = true;
 
 // 월드 좌표(x, y)와 맵 좌표(mx, my), 그리고 Cost 값을 모두 출력
-      // RCLCPP_WARN(node_->get_logger(), 
-      //   "Goal is OCCUPIED! World: (x: %.3f, y: %.3f) -> Map: (mx: %u, my: %u), Cost: %d, Threshold: %d", 
-      //   transformed_goal.pose.position.x, 
-      //   transformed_goal.pose.position.y, 
-      //   mx, my, 
-      //   static_cast<int>(cost), 
-      //   threshold);
+      RCLCPP_WARN(node_->get_logger(), 
+        "Goal is OCCUPIED! World: (x: %.3f, y: %.3f) -> Map: (mx: %u, my: %u), Cost: %d, Threshold: %d", 
+        transformed_goal.pose.position.x, 
+        transformed_goal.pose.position.y, 
+        mx, my, 
+        static_cast<int>(cost), 
+        threshold);
     }
 
     // ## 검사 결과에 따라 적절한 벡터에 추가 ##
@@ -182,14 +182,6 @@ BT::NodeStatus IsGoalsOccupiedCondition::tick()
   if (!occupied_goals.empty()) {
     // RCLCPP_INFO(node_->get_logger(), "%zu goals are occupied. %zu goals are unoccupied.",
     //   occupied_goals.size(), unoccupied_goals.size());
-
-    RCLCPP_WARN(node_->get_logger(), 
-      "Goal is OCCUPIED! World: (x: %.3f, y: %.3f) -> Map: (mx: %u, my: %u), Cost: %d, Threshold: %d", 
-      transformed_goal.pose.position.x, 
-      transformed_goal.pose.position.y, 
-      mx, my, 
-      static_cast<int>(cost), 
-      threshold);
 
     return BT::NodeStatus::SUCCESS; // 점유된 goal이 하나라도 있으면 SUCCESS
   } else {
