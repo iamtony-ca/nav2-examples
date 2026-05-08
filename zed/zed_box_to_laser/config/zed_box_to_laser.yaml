@@ -11,8 +11,10 @@ zed_box_to_laser_node:
     angle_min: -3.14159265359  # -pi
     angle_max: 3.14159265359   # pi
     angle_increment: 0.008726646 # 0.5 degrees in radians
-    range_min: 0.1
+    range_min: 0.05
     range_max: 5.0
     
     # Projection Resolution (m)
     projection_resolution: 0.02
+    close_distance_threshold : 1.5
+    fixed_footprint_size: 0.5
