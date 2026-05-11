@@ -12,6 +12,7 @@ find_package(std_msgs REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(robot_interfaces REQUIRED)  # For SmartRecoveryAction
 find_package(nav_msgs REQUIRED)
+find_package(nav2_msgs REQUIRED)
 
 find_package(nav2_behavior_tree REQUIRED)
 find_package(geometry_msgs REQUIRED)
@@ -445,6 +446,18 @@ target_include_directories(publish_remaining_goals_action PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)  
 
+# ───── Build compute_validated_path ─────
+add_library(compute_validated_path SHARED
+  src/compute_validated_path.cpp)
+
+ament_target_dependencies(compute_validated_path
+  rclcpp behaviortree_cpp pluginlib geometry_msgs nav_msgs nav2_msgs rclcpp_action)
+
+target_include_directories(compute_validated_path PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
+
 
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
@@ -482,6 +495,7 @@ install(TARGETS
   check_and_extract_spin_action
   remove_passed_goal_action
   publish_remaining_goals_action
+  compute_validated_path
 
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
