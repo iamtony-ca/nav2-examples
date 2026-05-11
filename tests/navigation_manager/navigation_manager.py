@@ -39,8 +39,8 @@ from geometry_msgs.msg import Pose, PoseStamped
 from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from std_msgs.msg import Bool, UInt8
 
-from navigation_command_msgs.msg import NavigationCommand
-from navigation_monitoring_msgs.msg import NavigationMonitoring
+from robot_interfaces.msg import NavigationCommand
+from robot_interfaces.msg import NavigationMonitoring
 
 # [주의] 커스텀 메시지 패키지 경로가 다를 경우 아래 임포트를 환경에 맞게 수정해주세요.
 from robot_interfaces.msg import PathAgentCollisionInfo, PathStaticCollisionInfo
