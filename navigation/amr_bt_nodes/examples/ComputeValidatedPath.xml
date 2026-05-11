@@ -1,0 +1,17 @@
+            <GetCurrentPose current_pose="{current_pose}"/>
+            <ComputeValidatedPath 
+                global_goals="{goals}" 
+                current_pose="{current_pose}"
+                static_planner_server="/static_nav/compute_path_through_poses"
+                dynamic_planner_server="compute_path_through_poses"
+                static_planner_id="StaticGridBased"
+                dynamic_planner_id="{selected_planner}"
+                horizon_distance="10.0"
+                max_deviation="1.0"
+                step_distance="0.2"
+                max_check_length="20.0"
+                validated_path="{path}"
+                static_path="{reference_path}"
+                static_error_code_id="{static_compute_error}"
+                dynamic_error_code_id="{compute_path_error_code}"
+                validation_error_code_id="{validation_error_code}" />
