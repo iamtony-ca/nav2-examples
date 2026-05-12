@@ -27,7 +27,7 @@ class NavSafetyManagerNode(Node):
         super().__init__('nav_safety_manager_node')
 
         # 설정 변수 (N초, M초)
-        self.declare_parameter('plc_false_duration_sec', 30.0)
+        self.declare_parameter('plc_false_duration_sec', 5.0)
         self.declare_parameter('collision_clear_duration_sec', 3.0)
         self.declare_parameter('target_polygon_name', 'PolygonSafety')
 
@@ -133,12 +133,13 @@ class NavSafetyManagerNode(Node):
                 self.handle_service_result(self.service_future)
                 self.service_future = None
             else:
+                self.get_logger().warn('Service Server Status unknown. Waiting for Service...', throttle_duration_sec=2.0)
                 return # 응답 대기 중
 
 
         # 네비게이션 상태에 따른 로직 분기
         if self.latest_nav_status is not None:
-            if self.latest_nav_status in ['IDLE', 'SUCCEEDED', 'FAILED', 'CANCELED']:
+            if self.latest_nav_status in ['IDLE', 'SUCCEEDED', 'FAILED', 'CANCELED'] and self.latest_plc_data is True:
                 # 네비게이션이 비활성 상태일 때는 PLC 모니터링만 수행
                 self.get_logger().info(f'Nav Status: {self.latest_nav_status}. Only monitoring PLC.', throttle_duration_sec=2.0)
                 self.current_phase = 0 # PLC 모니터링 단계로 리셋
@@ -176,10 +177,11 @@ class NavSafetyManagerNode(Node):
         # Phase 1: PLC가 True로 돌아왔는지 확인
         # -------------------------------------------------
         elif self.current_phase == 1:
-            if self.latest_plc_data is True:
-                self.get_logger().info('[Phase 1] PLC became True. Moving to Collision Monitoring.')
-                self.current_phase = 2
-                self.state_start_time = None
+            ## set_narrow 가 잘 적용됐는지 확인 필요. to do
+            # if self.latest_plc_data is True:
+            self.get_logger().info('[Phase 1] PLC became True. Moving to Collision Monitoring.')
+            self.current_phase = 2
+            self.state_start_time = None
 
         # -------------------------------------------------
         # Phase 2: Collision Clear 감지 (M초 유지)
