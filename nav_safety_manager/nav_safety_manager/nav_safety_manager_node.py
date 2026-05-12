@@ -92,7 +92,8 @@ class NavSafetyManagerNode(Node):
         self.latest_plc_data = None
         self.latest_collision_msg = None
         self.latest_nav_status = None
-        
+        self.narrow_status = False
+
         # 상태 머신 제어 변수
         self.current_phase = 0 
         # 0: Monitoring PLC (waiting for False)
@@ -102,6 +103,7 @@ class NavSafetyManagerNode(Node):
         # 시간 측정용 변수
         self.state_start_time = None
         self.service_future = None # 서비스 중복 호출 방지
+
 
         self.get_logger().info(f'Safety Node Started. PLC Wait: {self.N_sec}s, Col Clear: {self.M_sec}s')
 
@@ -113,6 +115,7 @@ class NavSafetyManagerNode(Node):
             self.latest_plc_data = False
         else :
             self.latest_plc_data = True
+        self.narrow_status = msg.range1
 
 
     def collision_callback(self, msg):
@@ -139,11 +142,14 @@ class NavSafetyManagerNode(Node):
 
         # 네비게이션 상태에 따른 로직 분기
         if self.latest_nav_status is not None:
-            if self.latest_nav_status in ['IDLE', 'SUCCEEDED', 'FAILED', 'CANCELED'] and self.latest_plc_data is True:
-                # 네비게이션이 비활성 상태일 때는 PLC 모니터링만 수행
-                self.get_logger().info(f'Nav Status: {self.latest_nav_status}. Only monitoring PLC.', throttle_duration_sec=2.0)
-                self.current_phase = 0 # PLC 모니터링 단계로 리셋
-                self.state_start_time = None # 타이머 초기화
+            if self.latest_nav_status in ['IDLE', 'SUCCEEDED', 'FAILED', 'CANCELED'] :
+                if self.narrow_status == True:
+                    self.send_async_request(1) # Service Request False -> large area
+                elif self.narrow_status == False :
+                    # 네비게이션이 비활성 상태일 때는 PLC 모니터링만 수행
+                    self.get_logger().info(f'Nav Status: {self.latest_nav_status}. Only monitoring PLC.', throttle_duration_sec=2.0)
+                    self.current_phase = 0 # PLC 모니터링 단계로 리셋
+                    self.state_start_time = None # 타이머 초기화
                 return
         elif self.latest_nav_status is None:
             # 네비게이션 상태 정보가 없으면 로직 진행하지 않음
