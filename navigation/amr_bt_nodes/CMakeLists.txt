@@ -469,7 +469,16 @@ target_include_directories(progress_aware_round_robin PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)  
 
+# ───── Build remove_passed_goals_custom_action ─────
+add_library(remove_passed_goals_custom_action SHARED
+  src/remove_passed_goals_custom_action.cpp)
 
+ament_target_dependencies(remove_passed_goals_custom_action
+  rclcpp behaviortree_cpp pluginlib geometry_msgs nav2_util)
+
+target_include_directories(remove_passed_goals_custom_action PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
 
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
@@ -509,6 +518,7 @@ install(TARGETS
   publish_remaining_goals_action
   compute_validated_path
   progress_aware_round_robin
+  remove_passed_goals_custom_action
 
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
