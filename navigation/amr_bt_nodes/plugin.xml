@@ -315,3 +315,13 @@
     </description>
   </class>
 </library>
+
+<library path="remove_passed_goals_custom_action">
+  <class name="amr_bt_nodes::RemovePassedGoalsCustomAction"
+         type="amr_bt_nodes::RemovePassedGoalsCustomAction"
+         base_class_type="BT::SyncActionNode">
+    <description>
+      Removes goals that have been passed by the robot and result as failure and success.
+    </description>
+  </class>
+</library>
