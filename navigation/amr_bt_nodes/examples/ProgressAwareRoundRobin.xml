@@ -1,0 +1,4 @@
+<ProgressAwareRoundRobin name="PathBlockedRecovery" reset_timeout="15.0" reset_distance="3.0">
+  <SubTree name="ClearPair" ID="ClearCostmapsPairSubtree" _autoremap="true" />
+  <SubTree name="Maneuver_PlanA" ID="ManeuverSubtree" _autoremap="true" ... />
+</ProgressAwareRoundRobin>
