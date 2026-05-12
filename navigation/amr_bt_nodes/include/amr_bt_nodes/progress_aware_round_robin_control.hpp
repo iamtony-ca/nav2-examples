@@ -1,5 +1,5 @@
-#ifndef AMR_BT_NODES__PROGRESS_AWARE_ROUND_ROBIN_HPP_
-#define AMR_BT_NODES__PROGRESS_AWARE_ROUND_ROBIN_HPP_
+#ifndef AMR_BT_NODES__PROGRESS_AWARE_ROUND_ROBIN_CONTROL_HPP_
+#define AMR_BT_NODES__PROGRESS_AWARE_ROUND_ROBIN_CONTROL_HPP_
 
 #include <string>
 #include <memory>
@@ -11,12 +11,12 @@
 namespace amr_bt_nodes
 {
 
-class ProgressAwareRoundRobin : public BT::ControlNode
+class ProgressAwareRoundRobinControl : public BT::ControlNode
 {
 public:
-  ProgressAwareRoundRobin(const std::string & name, const BT::NodeConfiguration & config);
+  ProgressAwareRoundRobinControl(const std::string & name, const BT::NodeConfiguration & config);
 
-  ~ProgressAwareRoundRobin() override = default;
+  ~ProgressAwareRoundRobinControl() override = default;
 
   static BT::PortsList providedPorts()
   {
@@ -43,4 +43,4 @@ private:
 
 }  // namespace amr_bt_nodes
 
-#endif  // AMR_BT_NODES__PROGRESS_AWARE_ROUND_ROBIN_HPP_
+#endif  // AMR_BT_NODES__PROGRESS_AWARE_ROUND_ROBIN_CONTROL_HPP_
