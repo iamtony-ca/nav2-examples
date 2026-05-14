@@ -458,14 +458,14 @@ target_include_directories(compute_validated_path PUBLIC
   $<INSTALL_INTERFACE:include>)  
 
 
-# ───── Build progress_aware_round_robin ─────
-add_library(progress_aware_round_robin SHARED
-  src/progress_aware_round_robin.cpp)
+# ───── Build progress_aware_round_robin_control ─────
+add_library(progress_aware_round_robin_control SHARED
+  src/progress_aware_round_robin_control.cpp)
 
-ament_target_dependencies(progress_aware_round_robin
+ament_target_dependencies(progress_aware_round_robin_control
   rclcpp behaviortree_cpp pluginlib geometry_msgs tf2_ros)
 
-target_include_directories(progress_aware_round_robin PUBLIC
+target_include_directories(progress_aware_round_robin_control PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)  
 
@@ -517,7 +517,7 @@ install(TARGETS
   remove_passed_goal_action
   publish_remaining_goals_action
   compute_validated_path
-  progress_aware_round_robin
+  progress_aware_round_robin_control_control
   remove_passed_goals_custom_action
 
   ARCHIVE DESTINATION lib
