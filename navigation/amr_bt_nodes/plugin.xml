@@ -306,9 +306,9 @@
 </library>
 
 
-<library path="progress_aware_round_robin">
-  <class name="amr_bt_nodes::ProgressAwareRoundRobin"
-         type="amr_bt_nodes::ProgressAwareRoundRobin"
+<library path="progress_aware_round_robin_control">
+  <class name="amr_bt_nodes::ProgressAwareRoundRobinControl"
+         type="amr_bt_nodes::ProgressAwareRoundRobinControl"
          base_class_type="BT::ControlNode">
     <description>
       ProgressAwareRoundRobin.
