@@ -325,3 +325,13 @@
     </description>
   </class>
 </library>
+
+<library path="remove_first_goals_action">
+  <class name="amr_bt_nodes::RemoveFirstGoalsAction"
+         type="amr_bt_nodes::RemoveFirstGoalsAction"
+         base_class_type="BT::SyncActionNode">
+    <description>
+      A BT node that removes first element or first and second goals if they are the same from a list of goals.
+    </description>
+  </class>
+</library>

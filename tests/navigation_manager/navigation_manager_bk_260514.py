@@ -32,14 +32,18 @@ from rclpy.callback_groups import (
 from rclpy.clock import Clock, ClockType
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, HistoryPolicy
 
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Pose, PoseStamped
 from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from std_msgs.msg import Bool, UInt8
 
-from amr_navigation_interfaces.msg import NavigationCommand
-from amr_navigation_interfaces.msg import NavigationMonitoring
+from robot_interfaces.msg import NavigationCommand
+from robot_interfaces.msg import NavigationMonitoring
+
+# [주의] 커스텀 메시지 패키지 경로가 다를 경우 아래 임포트를 환경에 맞게 수정해주세요.
+from robot_interfaces.msg import PathAgentCollisionInfo, PathStaticCollisionInfo
 
 
 # ---------------------------------------------------------------------- #
@@ -77,25 +81,6 @@ class NavigationManager(Node):
         # *also* take the lock without deadlocking.
         self._state_lock = threading.RLock()
 
-        # Three callback groups so command / action / timer callbacks
-        # can run on different executor threads.
-        #
-        # - Commands & timer: MutuallyExclusive — within each group
-        #   ordering is preserved and we never want the timer or two
-        #   user commands to interleave with themselves.
-        #
-        # - Action: Reentrant. ``rclpy.ActionClient`` internally
-        #   multiplexes several services (send_goal / cancel_goal /
-        #   get_result) and a feedback subscription. Chaining
-        #   ``add_done_callback`` on result futures from inside another
-        #   action-related callback effectively creates a hidden
-        #   callback dependency. With a MutuallyExclusive group those
-        #   hidden callbacks can sit behind a long-running feedback
-        #   handler and stall — in the worst case deadlock. Reentrant
-        #   lets the executor schedule them freely.
-        #
-        # Thread-safety of *our* shared state is guaranteed by
-        # ``self._state_lock``, not by callback-group serialization.
         self._cmd_cb_group = MutuallyExclusiveCallbackGroup()
         self._action_cb_group = ReentrantCallbackGroup()
         self._timer_cb_group = MutuallyExclusiveCallbackGroup()
@@ -105,11 +90,13 @@ class NavigationManager(Node):
         self._nav2_monitoring_data: NavigationMonitoring = NavigationMonitoring()
         self._goal_status: int = GoalStatus.STATUS_UNKNOWN
         self._goal_handle: Optional[ClientGoalHandle] = None
-        # True between a user-initiated stop and the corresponding
-        # CANCELED result. Used to publish ``nav_stop_complete`` only
-        # for stops the user actually requested (not preemption /
-        # external cancels).
+        
         self._stop_in_flight: bool = False
+
+        # 글로벌 변수 초기화 (추가된 C++ 변수들)
+        self._controller_pause_flag: bool = False
+        self._path_static_collision: bool = False
+        self._path_agent_collision: bool = False
 
         # ----- Subscriptions (Command group) -------------------------- #
         self._move_subscription = self.create_subscription(
@@ -125,9 +112,27 @@ class NavigationManager(Node):
             UInt8, 'stop_command',
             self._stop_callback, 10, callback_group=self._cmd_cb_group)
 
+        # 1) /controller_pause_flag (Bool, TRANSIENT_LOCAL)
+        qos_pause = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL
+        )
+        self._controller_pause_sub = self.create_subscription(
+            Bool, '/controller_pause_flag',
+            self._controller_pause_callback, qos_pause, callback_group=self._cmd_cb_group)
+
+        # 2) /path_agent_collision_info
+        self._agent_collision_sub = self.create_subscription(
+            PathAgentCollisionInfo, '/path_agent_collision_info',
+            self._agent_collision_callback, 10, callback_group=self._cmd_cb_group)
+
+        # 3) /path_static_collision_info (custom, VOLATILE)
+        self._static_collision_sub = self.create_subscription(
+            PathStaticCollisionInfo, '/path_static_collision_info',
+            self._static_collision_callback, 10, callback_group=self._cmd_cb_group)
+
         # ----- Action clients (Action group) -------------------------- #
-        # NavigateToPose kept for parity with the original C++ node even
-        # though the active code-path only uses NavigateThroughPoses.
         self._nav2_to_pose_client = ActionClient(
             self, NavigateToPose, 'navigate_to_pose',
             callback_group=self._action_cb_group)
@@ -140,10 +145,6 @@ class NavigationManager(Node):
             NavigationMonitoring, 'ros2_nav2_monitoring_data', 10)
         self._pause_resume_publisher = self.create_publisher(
             Bool, 'nav_pause_flag', 10)
-        # Edge-trigger published once per stop-induced cancel completion.
-        # depth=1 + transient_local would also be reasonable if late
-        # subscribers must catch the latest event; keeping depth=10 +
-        # default volatile QoS for symmetry with the other publishers.
         self._stop_complete_publisher = self.create_publisher(
             Bool, 'nav_stop_complete', 10)
 
@@ -152,9 +153,6 @@ class NavigationManager(Node):
         self._clear_nav2_monitoring_data_locked()
 
         # ----- Timer (10 Hz, system clock) ---------------------------- #
-        # SYSTEM_TIME mirrors C++ ``create_wall_timer`` semantics so the
-        # monitoring publish rate is independent of /clock and
-        # use_sim_time.
         self._timer = self.create_timer(
             0.1,
             self._timer_callback,
@@ -163,8 +161,6 @@ class NavigationManager(Node):
         )
 
         # ----- Optional: warn if Nav2 is not up yet ------------------- #
-        # Non-blocking probe — actual server availability is re-checked
-        # in ``_move_callback`` before each goal send.
         if not self._nav2_through_poses_client.wait_for_server(timeout_sec=0.0):
             self.get_logger().warn(
                 'navigate_through_poses action server not available yet; '
@@ -175,8 +171,6 @@ class NavigationManager(Node):
     def destroy_node(self) -> bool:
         """Mirror the C++ destructor's cleanup behavior."""
         with self._state_lock:
-            # Best-effort cancel of any in-flight goal so Nav2 doesn't
-            # keep driving after this node exits.
             handle = self._goal_handle
             self._clear_nav2_command_data_locked()
             self._clear_nav2_monitoring_data_locked()
@@ -184,32 +178,66 @@ class NavigationManager(Node):
             try:
                 handle.cancel_goal_async()
             except Exception as exc:  # noqa: BLE001
-                self.get_logger().warn(
-                    f'cancel on shutdown failed: {exc}')
+                self.get_logger().warn(f'cancel on shutdown failed: {exc}')
         return super().destroy_node()
 
     # ------------------------------------------------------------------ #
     # Periodic publishing
     # ------------------------------------------------------------------ #
     def _timer_callback(self) -> None:
-        # Update flags + take a deep copy under the lock, then publish
-        # OUTSIDE the lock. publish() can block on DDS internals and we
-        # don't want to stall command/action callbacks.
         with self._state_lock:
             self._update_nav2_status(self._goal_status)
+
+            # C++ 타이머 콜백 로직 통합 (파이썬의 Type Check를 위해 반드시 True/False 사용)
+            if self._controller_pause_flag or self._path_agent_collision:
+                self._nav2_monitoring_data.ros_nav_pause = True
+            else:
+                self._nav2_monitoring_data.ros_nav_pause = False
+
+            if self._path_static_collision:
+                self._nav2_monitoring_data.ros_nav_obstacle_detected = True
+            else:
+                self._nav2_monitoring_data.ros_nav_obstacle_detected = False
+
+            # Throttle log (1초 주기, 파이썬에서는 float 대신 int 캐스팅으로 0/1 출력)
+            self.get_logger().info(
+                f"{int(self._controller_pause_flag)}/{int(self._path_agent_collision)}/{int(self._path_static_collision)}",
+                throttle_duration_sec=1.0
+            )
+
             snapshot = copy.deepcopy(self._nav2_monitoring_data)
+            
         self._monitoring_publisher.publish(snapshot)
+
+    # ------------------------------------------------------------------ #
+    # New Collision / Pause Callbacks
+    # ------------------------------------------------------------------ #
+    def _controller_pause_callback(self, msg: Bool) -> None:
+        with self._state_lock:
+            self._controller_pause_flag = msg.data
+
+    def _agent_collision_callback(self, msg: PathAgentCollisionInfo) -> None:
+        with self._state_lock:
+            n = len(msg.machine_id)
+            # C++ 구현 방식과 완벽히 동일하게 작성 (배열을 순회하며 덮어쓰기)
+            for i in range(n):
+                if msg.note[i] == "non_collision":
+                    self._path_agent_collision = True
+                else:
+                    self._path_agent_collision = False
+
+    def _static_collision_callback(self, msg: PathStaticCollisionInfo) -> None:
+        with self._state_lock:
+            self._path_static_collision = msg.replan_request
 
     # ------------------------------------------------------------------ #
     # Topic callbacks (Command group)
     # ------------------------------------------------------------------ #
     def _stop_callback(self, msg: UInt8) -> None:
-        self.get_logger().info('stop_callback')
-
-        # Single critical section so the goal_handle check, state reset
-        # and status update happen atomically. The cancel RPC itself is
-        # issued OUTSIDE the lock to avoid holding it across middleware.
+        self.get_logger().info('stop_callback!')
+        self._nav2_monitoring_data.ros_nav_driving_abort = False
         with self._state_lock:
+            
             if self._goal_handle is None:
                 self.get_logger().info('not cancle goal, stop_callback')
                 return
@@ -217,10 +245,10 @@ class NavigationManager(Node):
             self._clear_nav2_command_data_locked()
             self._nav2_cmd_data.cmd_seq_num = msg.data
             self._goal_status = GoalStatus.STATUS_CANCELED
-            # Mark this cancel as user-initiated so the result callback
-            # knows to fire ``nav_stop_complete`` once Nav2 actually
-            # finishes terminating the goal.
             self._stop_in_flight = True
+            self._controller_pause_flag = False
+            self._path_static_collision = False
+            self._path_agent_collision = False
 
         handle.cancel_goal_async()
         self.get_logger().info('cancle goal, stop_callback')
@@ -232,8 +260,6 @@ class NavigationManager(Node):
             self.get_logger().warn('Received empty multi goal list')
             return
 
-        # Defensive length validation — the C++ original would crash on
-        # mismatched lengths; we'd rather log and bail.
         if not (len(msg.goal_poses) == msg.goal_cnt
                 == len(msg.from_node_id) == len(msg.to_node_id)):
             self.get_logger().error(
@@ -244,7 +270,6 @@ class NavigationManager(Node):
                 f'to_node_id={len(msg.to_node_id)}')
             return
 
-        # Build the action goal in a local variable first.
         goal_msg = NavigateThroughPoses.Goal()
         goal_msg.poses = []
 
@@ -256,7 +281,6 @@ class NavigationManager(Node):
             for i in range(msg.goal_cnt):
                 pose_stamped = PoseStamped()
                 pose_stamped.header.frame_id = 'map'
-                # Stamp per iteration to mirror C++ ``this->now()`` exactly.
                 pose_stamped.header.stamp = self.get_clock().now().to_msg()
                 pose_stamped.pose = msg.goal_poses[i]
                 goal_msg.poses.append(pose_stamped)
@@ -272,7 +296,6 @@ class NavigationManager(Node):
                     f'{msg.goal_poses[i].position.y:.4f}/'
                     f'{msg.goal_poses[i].position.z:.4f}]')
 
-        # Server availability check + send_goal_async OUTSIDE the lock.
         if not self._nav2_through_poses_client.wait_for_server(timeout_sec=2.0):
             self.get_logger().error(
                 'navigate_through_poses action server not available!')
@@ -286,7 +309,6 @@ class NavigationManager(Node):
     def _pause_callback(self, msg: UInt8) -> None:
         self.get_logger().info('pause_callback')
 
-        # Read+update under lock; publish outside.
         with self._state_lock:
             if self._goal_handle is None:
                 self.get_logger().warn('not cancle goal, pause_callback')
@@ -294,10 +316,6 @@ class NavigationManager(Node):
             self._nav2_cmd_data.cmd_seq_num = msg.data
             self._nav2_monitoring_data.ros_nav_cmd_seq_num = msg.data
 
-        # NOTE: do NOT cancel the action goal here. The custom BT node
-        # consuming ``nav_pause_flag`` only cancels the FollowPath child,
-        # so the parent goal stays alive and ``resume`` can continue
-        # without re-issuing it.
         pause_msg = Bool()
         pause_msg.data = True
         self._pause_resume_publisher.publish(pause_msg)
@@ -317,7 +335,6 @@ class NavigationManager(Node):
     # Action callbacks (Action group)
     # ------------------------------------------------------------------ #
     def _move_response_callback(self, future) -> None:
-        """Fired when the action server accepts/rejects the goal."""
         goal_handle: Optional[ClientGoalHandle] = future.result()
 
         with self._state_lock:
@@ -333,20 +350,15 @@ class NavigationManager(Node):
                 self._nav2_cmd_data.cmd_seq_num
 
         self.get_logger().info('Accepted goal')
-        # Chain the result future OUTSIDE the lock.
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(self._move_result_callback)
 
     def _move_feedback_callback(self, feedback_msg) -> None:
-        """Fired for each NavigateThroughPoses feedback message."""
         feedback = feedback_msg.feedback
         number_of_poses_remaining = int(feedback.number_of_poses_remaining)
         distance_remaining = float(feedback.distance_remaining)
 
         with self._state_lock:
-            # Reentrant action group means a late feedback can race the
-            # result callback. Don't downgrade a terminal status back
-            # to EXECUTING.
             if self._goal_status in (
                 GoalStatus.STATUS_SUCCEEDED,
                 GoalStatus.STATUS_ABORTED,
@@ -366,8 +378,6 @@ class NavigationManager(Node):
                     self._nav2_monitoring_data.ros_nav_next_node_id = \
                         self._nav2_cmd_data.to_node_id[current_id_index]
                 elif current_id_index == self._nav2_cmd_data.goal_cnt:
-                    # Final node — handled in the result callback's
-                    # SUCCEEDED branch, no-op here.
                     pass
                 else:
                     self.get_logger().warn(
@@ -383,7 +393,6 @@ class NavigationManager(Node):
             current_id = self._nav2_monitoring_data.ros_nav_current_node_id
             next_id = self._nav2_monitoring_data.ros_nav_next_node_id
 
-        # Throttled to ~1 Hz, matching RCLCPP_INFO_THROTTLE(1000).
         self.get_logger().info(
             f'Distance_remaining: {distance_remaining:.2f} m, '
             f'Goal: {number_of_poses_remaining}, '
@@ -391,11 +400,10 @@ class NavigationManager(Node):
             throttle_duration_sec=1.0)
 
     def _move_result_callback(self, future) -> None:
-        """Fired once the action terminates (success/abort/cancel)."""
         result = future.result()
         status = result.status
 
-        # Captured under lock, used outside.
+
         publish_stop_complete = False
 
         with self._state_lock:
@@ -418,8 +426,7 @@ class NavigationManager(Node):
                 self._nav2_monitoring_data.ros_nav_cmd_seq_num = \
                     self._nav2_cmd_data.cmd_seq_num
                 self.get_logger().warn('CANCELED')
-                # Only fire nav_stop_complete for a user-initiated stop;
-                # consume the flag so duplicate publishes can't happen.
+                self._nav2_monitoring_data.ros_nav_driving_abort = True
                 if self._stop_in_flight:
                     publish_stop_complete = True
                     self._stop_in_flight = False
@@ -429,13 +436,9 @@ class NavigationManager(Node):
                 self.get_logger().error(f'Unknown result status: {status}')
 
             self._goal_handle = None
-            # If termination wasn't a CANCELED (e.g. SUCCEEDED arrived
-            # before our cancel could take effect), drop the flag so a
-            # later unrelated cancel doesn't accidentally publish.
             if status != GoalStatus.STATUS_CANCELED:
                 self._stop_in_flight = False
 
-        # Publish OUTSIDE the lock — DDS publish can briefly block.
         if publish_stop_complete:
             done_msg = Bool()
             done_msg.data = True
@@ -453,24 +456,17 @@ class NavigationManager(Node):
         self._nav2_monitoring_data = NavigationMonitoring()
         self.get_logger().debug('clear_nav2_monitoring_data')
 
-
-
     def _update_nav2_status(self, status: int) -> None:
-        """Map action GoalStatus -> monitoring flags.
-
-        Caller must hold ``self._state_lock``. Default-False block first,
-        then per-status overrides — keeps the table compact without
-        changing the truth-table from the C++ original.
-        """
+        """Map action GoalStatus -> monitoring flags."""
         m = self._nav2_monitoring_data
         
-        # rclpy strict type checking을 위해 0 대신 False 사용
+        # NOTE: ros_nav_pause와 ros_nav_obstacle_detected는
+        # 이제 타이머 콜백에서 직접 제어하므로 이곳에서 False로 강제 초기화하지 않습니다.
         m.ros_nav_driving = False
         m.ros_nav_acvtivation = False
         m.ros_nav_is_destination_reached = False
-        m.ros_nav_pause = False
         m.ros_nav_path_search = False
-        m.ros_nav_driving_abort = False
+        # m.ros_nav_driving_abort = False
 
         match status:
             case GoalStatus.STATUS_SUCCEEDED:
@@ -482,9 +478,9 @@ class NavigationManager(Node):
             case GoalStatus.STATUS_EXECUTING:
                 m.ros_nav_driving = True
                 m.ros_nav_acvtivation = True
+            # case GoalStatus.STATUS_CANCELED:
+                # m.ros_nav_driving_abort = True
             case _:
-                # STATUS_CANCELED, STATUS_CANCELING, STATUS_UNKNOWN, ...
-                # all leave the default-False block intact.
                 pass
 
 
@@ -497,7 +493,7 @@ def main(args=None) -> None:
 
     # 4 threads = 3 callback groups + headroom for action client
     # internals. Increase if you add more groups.
-    executor = MultiThreadedExecutor(num_threads=4)
+    executor = MultiThreadedExecutor(num_threads=6)
     executor.add_node(node)
 
     try:

@@ -480,6 +480,22 @@ target_include_directories(remove_passed_goals_custom_action PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)  
 
+
+
+# ───── Build remove_first_goals_action ─────
+add_library(remove_first_goals_action SHARED
+  src/remove_first_goals_action.cpp)
+
+ament_target_dependencies(remove_first_goals_action
+  rclcpp geometry_msgs behaviortree_cpp pluginlib)
+
+target_include_directories(remove_first_goals_action PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
+
+
+
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
 
@@ -519,6 +535,7 @@ install(TARGETS
   compute_validated_path
   progress_aware_round_robin_control_control
   remove_passed_goals_custom_action
+  remove_first_goals_action
 
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib

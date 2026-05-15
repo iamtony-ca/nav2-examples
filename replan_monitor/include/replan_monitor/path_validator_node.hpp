@@ -212,6 +212,7 @@ private:
   mutable std::mutex agents_mutex_;
 
   std::atomic<bool> is_robot_in_driving_state_{false};
+  std::atomic<bool> is_robot_in_ready_state_{false};
   rclcpp::Time last_replan_time_;        // replan 쿨다운 기준
   rclcpp::Time last_agent_block_time_;   // 에이전트 홀드 기준
 

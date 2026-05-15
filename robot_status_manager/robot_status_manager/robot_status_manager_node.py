@@ -26,6 +26,7 @@ from unique_identifier_msgs.msg import UUID
 # 1. 로봇 상태 목록
 class RobotStatus:
     IDLE = "IDLE"
+    READY = "READY"
     RECEIVED_GOAL = "RECEIVED_GOAL"
     PLANNING = "PLANNING"
     DRIVING = "DRIVING"
@@ -53,7 +54,7 @@ class RobotStatusManagerNode(Node):
         self.idle_timeout_sec = self.get_parameter('idle_timeout_sec').get_parameter_value().double_value
         
         # 0.5초 발행 주기
-        self.publish_period = 50000.0
+        self.publish_period = 1.0
 
         # --- 스레드 안전성 ---
         self.state_lock = threading.RLock()
@@ -114,6 +115,20 @@ class RobotStatusManagerNode(Node):
         """
         # if "realglobalplanning" in [event.node_name for event in msg.event_log]:
         for event in msg.event_log:
+            # if event.current_status == RobotStatus.CANCELED:
+            #     self.get_logger().info(f"{event.node_name} 노드 prev 상태: {event.previous_status}, curr 상태: {event.current_status} ")
+
+            if event.node_name == "NavigationManagerReady":
+                self.get_logger().info(f"{event.node_name} 노드 prev 상태: {event.previous_status}, curr 상태: {event.current_status} ")
+                if event.current_status == "RUNNING" :
+                    self.curr_status_ = RobotStatus.READY                    
+                elif event.current_status in ["SUCCESS", "FAILURE", "IDLE"]:
+                    self.curr_status_ = RobotStatus.IDLE
+                if self.prev_status_ != self.curr_status_:
+                    self.get_logger().info(f"###### 로봇 상태가 {self.prev_status_} --> {self.curr_status_}으로 변경.")
+                    self.status_publisher.publish(String(data=self.curr_status_))
+                    self.prev_status_ = self.curr_status_
+            
             if event.node_name == "NavigateRecovery":
                 self.get_logger().info(f"{event.node_name} 노드 prev 상태: {event.previous_status}, curr 상태: {event.current_status} ")
                 if event.current_status == "RUNNING" and event.previous_status != "RUNNING":
@@ -128,7 +143,7 @@ class RobotStatusManagerNode(Node):
                     self.prev_status_ = self.curr_status_
 
 
-            if event.node_name == "globalplanning":
+            if event.node_name == "ComputePathThroughPoses_Main":
                 self.get_logger().info(f"{event.node_name} 노드 prev 상태: {event.previous_status}, curr 상태: {event.current_status} ")
                 if event.current_status == "RUNNING":
                     self.curr_status_ = RobotStatus.PLANNING
@@ -138,7 +153,7 @@ class RobotStatusManagerNode(Node):
                     self.prev_status_ = self.curr_status_
 
 
-            if event.node_name == "localplanning":
+            if event.node_name == "FollowPath_Main":
                 self.get_logger().info(f"{event.node_name} 노드 prev 상태: {event.previous_status}, curr 상태: {event.current_status} ")
                 if event.current_status == "RUNNING":
                     self.curr_status_ = RobotStatus.DRIVING
@@ -147,7 +162,17 @@ class RobotStatusManagerNode(Node):
                     self.status_publisher.publish(String(data=self.curr_status_))
                     self.prev_status_ = self.curr_status_
 
-            if event.node_name == "RecoveryActionsSequence":
+            if event.node_name == "WaitUntilUnpausedAndClear":
+                self.get_logger().info(f"{event.node_name} 노드 prev 상태: {event.previous_status}, curr 상태: {event.current_status} ")
+                if event.current_status == "RUNNING":
+                    self.curr_status_ = RobotStatus.PAUSED
+                if self.prev_status_ != self.curr_status_:
+                    self.get_logger().info(f"###### 로봇 상태가 {self.prev_status_} --> {self.curr_status_}으로 변경.")
+                    self.status_publisher.publish(String(data=self.curr_status_))
+                    self.prev_status_ = self.curr_status_
+
+
+            if event.node_name == "IntelligentRecovery":
                 self.get_logger().info(f"{event.node_name} 노드 prev 상태: {event.previous_status}, curr 상태: {event.current_status} ")
                 if event.current_status == "RUNNING":
                     self.curr_status_ = RobotStatus.RECOVERY_RUNNING
@@ -160,23 +185,6 @@ class RobotStatusManagerNode(Node):
                     self.status_publisher.publish(String(data=self.curr_status_))
                     self.prev_status_ = self.curr_status_                    
 
-
-
-        # with self.state_lock:
-        #     self.last_log_time = Time.from_msg(msg.timestamp)
-            
-        #     for event in msg.event_log:
-        #         if event.current_status == "RUNNING":
-        #             self.bt_running_nodes.add(event.node_name)
-        #             if event.node_name in self.bt_terminal_nodes:
-        #                 del self.bt_terminal_nodes[event.node_name]
-        #         elif event.current_status in ["SUCCESS", "FAILURE", "IDLE"]:
-        #             self.bt_terminal_nodes[event.node_name] = event.current_status
-        #             if event.node_name in self.bt_running_nodes:
-        #                 self.bt_running_nodes.remove(event.node_name)
-            
-        #     # [즉시 발행] BT 이벤트로 인한 상태 변경을 즉시 평가하고 게시
-        #     self._evaluate_and_publish_if_changed(reason="BT Log Event")
 
 
     def action_status_callback(self, msg: GoalStatusArray):
@@ -218,6 +226,7 @@ class RobotStatusManagerNode(Node):
             else:
                 # 내 액션이 상태 리스트에서 갑자기 사라진 경우 (Nav2 재시작 등) 안전하게 리셋
                 self.active_goal_id = None
+
 
 
 
@@ -313,7 +322,7 @@ class RobotStatusManagerNode(Node):
         status_msg = String()
         status_msg.data = self.curr_status_
         self.status_publisher.publish(status_msg)
-        self.get_logger().info(f"주기적 상태 발행: {self.curr_status_}")
+        self.get_logger().info(f"주기적 상태 발행: {self.curr_status_}", throttle_duration_sec=1.0)
 
         # with self.state_lock:
         #     # 1. 타임아웃 (IDLE) 등 시간 기반 변경 사항을 평가
