@@ -1,5 +1,5 @@
-#ifndef AMR_BT_NODES__COMPUTE_VALIDATED_PATH_HPP_
-#define AMR_BT_NODES__COMPUTE_VALIDATED_PATH_HPP_
+#ifndef AMR_BT_NODES__COMPUTE_VALIDATED_PATH_SYNC_ACTION_HPP_
+#define AMR_BT_NODES__COMPUTE_VALIDATED_PATH_SYNC_ACTION_HPP_
 
 #include <string>
 #include <vector>
@@ -19,13 +19,13 @@
 namespace amr_bt_nodes
 {
 
-class ComputeValidatedPath : public BT::StatefulActionNode
+class ComputeValidatedPathSyncAction : public BT::StatefulActionNode
 {
 public:
   using ActionType = nav2_msgs::action::ComputePathThroughPoses;
   using GoalHandle = rclcpp_action::ClientGoalHandle<ActionType>;
 
-  ComputeValidatedPath(
+  ComputeValidatedPathSyncAction(
     const std::string & xml_tag_name,
     const BT::NodeConfiguration & conf);
 
@@ -36,7 +36,7 @@ public:
   void onHalted() override;
 
 private:
-  bool initialize();
+  void initialize();
   bool performValidation();
   void truncatePathByEuclidean(nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & start, double dist_limit);
   void truncatePathToGoal(nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & target);
@@ -44,7 +44,7 @@ private:
   double pointToLineSegmentDistance(const geometry_msgs::msg::Point & p, const geometry_msgs::msg::Point & a, const geometry_msgs::msg::Point & b);
 
   rclcpp::Node::SharedPtr node_;
-  rclcpp::Logger logger_{rclcpp::get_logger("ComputeValidatedPath")};
+  rclcpp::Logger logger_{rclcpp::get_logger("ComputeValidatedPathSyncAction")};
   bool initialized_;
 
   // [핵심 추가] 독립 콜백 그룹과 실행기 (Deadlock 방지)
@@ -71,11 +71,22 @@ private:
   double max_dev_;
   double step_dist_;
   double max_check_length_;
+
+  // [추가] 순차적 실행을 위한 상태 머신 Enum
+  enum class PlanningState {
+    IDLE,
+    WAITING_FOR_STATIC,
+    WAITING_FOR_DYNAMIC,
+    VALIDATING
+  };
+
+  PlanningState current_state_; // 현재 상태 저장 변수
+
 };
 
 }  // namespace amr_bt_nodes
 
-#endif  // AMR_BT_NODES__COMPUTE_VALIDATED_PATH_HPP_
+#endif  // AMR_BT_NODES__COMPUTE_VALIDATED_PATH_SYNC_ACTION_HPP_
 
 
 
@@ -93,8 +104,8 @@ private:
 
 
 
-// #ifndef AMR_BT_NODES__COMPUTE_VALIDATED_PATH_HPP_
-// #define AMR_BT_NODES__COMPUTE_VALIDATED_PATH_HPP_
+// #ifndef AMR_BT_NODES__COMPUTE_VALIDATED_PATH_SYNC_ACTION_HPP_
+// #define AMR_BT_NODES__COMPUTE_VALIDATED_PATH_SYNC_ACTION_HPP_
 
 // #include <string>
 // #include <vector>
@@ -112,13 +123,13 @@ private:
 // namespace amr_bt_nodes
 // {
 
-// class ComputeValidatedPath : public BT::StatefulActionNode
+// class ComputeValidatedPathSyncAction : public BT::StatefulActionNode
 // {
 // public:
 //   using ActionType = nav2_msgs::action::ComputePathThroughPoses;
 //   using GoalHandle = rclcpp_action::ClientGoalHandle<ActionType>;
 
-//   ComputeValidatedPath(
+//   ComputeValidatedPathSyncAction(
 //     const std::string & xml_tag_name,
 //     const BT::NodeConfiguration & conf);
 
@@ -138,7 +149,7 @@ private:
 
 //   // 캐싱 및 초기화 관련 멤버
 //   rclcpp::Node::SharedPtr node_;
-//   rclcpp::Logger logger_{rclcpp::get_logger("ComputeValidatedPath")};
+//   rclcpp::Logger logger_{rclcpp::get_logger("ComputeValidatedPathSyncAction")};
 //   bool initialized_;
 
 //   // ROS 2 Action 관련 멤버
@@ -169,4 +180,4 @@ private:
 
 // }  // namespace amr_bt_nodes
 
-// #endif  // AMR_BT_NODES__COMPUTE_VALIDATED_PATH_HPP_
+// #endif  // AMR_BT_NODES__COMPUTE_VALIDATED_PATH_SYNC_ACTION_HPP_

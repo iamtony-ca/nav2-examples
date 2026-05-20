@@ -335,3 +335,13 @@
     </description>
   </class>
 </library>
+
+<library path="compute_validated_path_sync_action">
+  <class name="amr_bt_nodes::ComputeValidatedPathSyncAction"
+         type="amr_bt_nodes::ComputeValidatedPathSyncAction"
+         base_class_type="BT::StatefulActionNode">
+    <description>
+      compute and validate global path squencially.
+    </description>
+  </class>
+</library>

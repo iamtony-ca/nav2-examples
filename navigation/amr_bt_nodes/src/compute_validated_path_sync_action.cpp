@@ -1,4 +1,4 @@
-#include "amr_bt_nodes/compute_validated_path.hpp"
+#include "amr_bt_nodes/compute_validated_path_sync_action.hpp"
 #include <cmath>
 #include <algorithm>
 #include <stdexcept>
@@ -6,7 +6,7 @@
 namespace amr_bt_nodes
 {
 
-ComputeValidatedPath::ComputeValidatedPath(
+ComputeValidatedPathSyncAction::ComputeValidatedPathSyncAction(
   const std::string & xml_tag_name,
   const BT::NodeConfiguration & conf)
 : BT::StatefulActionNode(xml_tag_name, conf),
@@ -18,15 +18,11 @@ ComputeValidatedPath::ComputeValidatedPath(
 {
 }
 
-
-
-// 1. initialize() 함수의 타입을 bool로 변경하고 throw 대신 false 반환
-bool ComputeValidatedPath::initialize()
+void ComputeValidatedPathSyncAction::initialize()
 {
   node_ = config().blackboard->get<rclcpp::Node::SharedPtr>("node");
   if (!node_) {
-    RCLCPP_ERROR(logger_, "[ComputeValidatedPath] Failed to get 'node' from blackboard.");
-    return false; // throw 대신 false 반환
+    throw std::runtime_error("Failed to get 'node' from blackboard in ComputeValidatedPathSyncAction");
   }
 
   logger_ = node_->get_logger();
@@ -35,29 +31,26 @@ bool ComputeValidatedPath::initialize()
   getInput("static_planner_server", static_server);
   getInput("dynamic_planner_server", dynamic_server);
 
-  // 전용 콜백 그룹 생성
+  // [핵심 추가] 메인 스레드와 분리된 전용 콜백 그룹 생성
   callback_group_ = node_->create_callback_group(
-    rclcpp::CallbackGroupType::MutuallyExclusive, false);
+    rclcpp::CallbackGroupType::MutuallyExclusive,
+    false);
   callback_group_executor_.add_callback_group(callback_group_, node_->get_node_base_interface());
 
+  // 콜백 그룹을 할당하여 Action Client 생성
   static_client_ = rclcpp_action::create_client<ActionType>(node_, static_server, callback_group_);
   dynamic_client_ = rclcpp_action::create_client<ActionType>(node_, dynamic_server, callback_group_);
 
-  // [수정] 2초 대기(Blocking)를 없애고, 0초 타임아웃으로 현재 서버 생존 여부만 즉시 확인 (Non-blocking)
-  if (!static_client_->action_server_is_ready() || !dynamic_client_->action_server_is_ready()) {
-    RCLCPP_WARN(logger_, "[ComputeValidatedPath] Planner action servers are not ready yet.");
-    return false; // 서버가 죽어있으면 뻗지 말고 우아하게 실패 반환
+  if (!static_client_->wait_for_action_server(std::chrono::seconds(2)) ||
+      !dynamic_client_->wait_for_action_server(std::chrono::seconds(2))) {
+    throw std::runtime_error("Planner action servers not available in ComputeValidatedPathSyncAction");
   }
 
   initialized_ = true;
-  RCLCPP_INFO(logger_, "[ComputeValidatedPath] Initialized successfully.");
-  return true;
+  RCLCPP_INFO(logger_, "[ComputeValidatedPathSyncAction] Initialized successfully. Connected to action servers.");
 }
 
-
-
-
-BT::PortsList ComputeValidatedPath::providedPorts()
+BT::PortsList ComputeValidatedPathSyncAction::providedPorts()
 {
   return {
     BT::InputPort<std::vector<geometry_msgs::msg::PoseStamped>>("global_goals", "Destinations to plan through"),
@@ -78,11 +71,10 @@ BT::PortsList ComputeValidatedPath::providedPorts()
   };
 }
 
-BT::NodeStatus ComputeValidatedPath::onStart()
+BT::NodeStatus ComputeValidatedPathSyncAction::onStart()
 {
-if (!initialized_) {
+  if (!initialized_) {
     if (!initialize()) {
-      // 서버가 없거나 노드를 못 찾으면 Crash 대신 정중하게 FAILURE 처리
       setOutput("validation_error_code_id", static_cast<uint16_t>(308));
       return BT::NodeStatus::FAILURE; 
     }
@@ -94,7 +86,7 @@ if (!initialized_) {
 
   if (!getInput("global_goals", global_goals) || global_goals.empty() || 
       !getInput("current_pose", current_pose)) {
-    RCLCPP_ERROR(logger_, "[ComputeValidatedPath] Missing required inputs.");
+    RCLCPP_ERROR(logger_, "[ComputeValidatedPathSyncAction] Missing required inputs.");
     return BT::NodeStatus::FAILURE;
   }
 
@@ -105,6 +97,7 @@ if (!initialized_) {
   getInput("step_distance", step_dist_);
   getInput("max_check_length", max_check_length_);
 
+  // Local Goals 추출 (Rolling Horizon)
   int max_valid_idx = -1;
   const auto & robot_pos = current_pose.pose.position;
   for (int i = static_cast<int>(global_goals.size()) - 1; i >= 0; --i) {
@@ -120,6 +113,7 @@ if (!initialized_) {
   local_goals_ = std::vector<geometry_msgs::msg::PoseStamped>(
     global_goals.begin(), global_goals.begin() + max_valid_idx + 1);
 
+  // 변수 초기화
   static_done_ = false;
   dynamic_done_ = false;
   static_error_code_ = 0;
@@ -129,15 +123,14 @@ if (!initialized_) {
   static_path_ = nav_msgs::msg::Path();
   actual_path_ = nav_msgs::msg::Path();
 
+  // [수정 핵심 1] 상태 머신 초기화
+  current_state_ = PlanningState::WAITING_FOR_STATIC;
+
+  // [수정 핵심 2] Static Goal만 먼저 전송
   auto static_goal_msg = ActionType::Goal();
   static_goal_msg.goals = local_goals_;
   static_goal_msg.planner_id = static_planner_id;
   static_goal_msg.use_start = false;
-
-  auto dynamic_goal_msg = ActionType::Goal();
-  dynamic_goal_msg.goals = global_goals;
-  dynamic_goal_msg.planner_id = dynamic_planner_id;
-  dynamic_goal_msg.use_start = false;
 
   auto send_opts_static = rclcpp_action::Client<ActionType>::SendGoalOptions();
   send_opts_static.goal_response_callback = [this](auto handle) { static_goal_handle_ = handle; };
@@ -152,73 +145,140 @@ if (!initialized_) {
     static_done_ = true;
   };
 
-  auto send_opts_dynamic = rclcpp_action::Client<ActionType>::SendGoalOptions();
-  send_opts_dynamic.goal_response_callback = [this](auto handle) { dynamic_goal_handle_ = handle; };
-  send_opts_dynamic.result_callback = [this](const GoalHandle::WrappedResult & result) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (result.code == rclcpp_action::ResultCode::SUCCEEDED) {
-      actual_path_ = result.result->path;
-      dynamic_error_code_ = 0;
-    } else {
-      dynamic_error_code_ = result.result ? result.result->error_code : 308; 
-    }
-    dynamic_done_ = true;
-  };
-
-  RCLCPP_DEBUG(logger_, "[ComputeValidatedPath] Sending async goals to both planners.");
+  RCLCPP_DEBUG(logger_, "[ComputeValidatedPathSyncAction] Step 1: Sending async goal to STATIC planner.");
   static_client_->async_send_goal(static_goal_msg, send_opts_static);
-  dynamic_client_->async_send_goal(dynamic_goal_msg, send_opts_dynamic);
 
-  // [핵심 추가] 비동기 네트워크 요청을 즉시 처리하도록 강제 스핀
+  // 콜백 처리용 스핀
   callback_group_executor_.spin_some();
 
   return BT::NodeStatus::RUNNING;
 }
 
-BT::NodeStatus ComputeValidatedPath::onRunning()
-{
-  // [핵심 추가] 멈춰있던 콜백(서버 응답)들을 처리하기 위해 스핀을 돌림
-  callback_group_executor_.spin_some();
 
-  if (!static_done_ || !dynamic_done_) {
-    return BT::NodeStatus::RUNNING;
-  }
+
+BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
+{
+  // 멈춰있던 콜백 처리
+  callback_group_executor_.spin_some();
 
   std::lock_guard<std::mutex> lock(mutex_);
 
-  setOutput("static_error_code_id", static_cast<uint16_t>(static_error_code_.load()));
-  setOutput("dynamic_error_code_id", static_cast<uint16_t>(dynamic_error_code_.load()));
+  switch (current_state_) {
+    
+    // ==========================================
+    // 상태 1: Static 플래너 응답 대기 중
+    // ==========================================
+    case PlanningState::WAITING_FOR_STATIC:
+    {
+      if (!static_done_) {
+        return BT::NodeStatus::RUNNING; // 아직 안 왔으면 계속 대기
+      }
 
-  if (!static_path_.poses.empty()) {
-    setOutput("static_path", static_path_);
-  } else {
-    setOutput("static_path", nav_msgs::msg::Path());
-  }
+      setOutput("static_error_code_id", static_cast<uint16_t>(static_error_code_.load()));
+      
+      if (!static_path_.poses.empty()) {
+        setOutput("static_path", static_path_);
+      } else {
+        setOutput("static_path", nav_msgs::msg::Path());
+      }
 
-  if (static_error_code_ != 0 || dynamic_error_code_ != 0) {
-    nav_msgs::msg::Path empty_path;
-    setOutput("validated_path", empty_path);
-    setOutput("validation_error_code_id", static_cast<uint16_t>(308)); 
-    RCLCPP_WARN(logger_, "[ComputeValidatedPath] Planner action failed. Static Err: %d, Dynamic Err: %d", 
-                static_error_code_.load(), dynamic_error_code_.load());
-    return BT::NodeStatus::FAILURE;
-  }
+      // Static이 실패했다면 Dynamic은 돌려볼 필요도 없이 즉시 실패 반환 (옵션 A 정책)
+      if (static_error_code_ != 0) {
+        RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Static planner failed (Err: %d). Aborting.", static_error_code_.load());
+        nav_msgs::msg::Path empty_path;
+        setOutput("validated_path", empty_path);
+        setOutput("validation_error_code_id", static_cast<uint16_t>(308));
+        return BT::NodeStatus::FAILURE;
+      }
 
-  if (performValidation()) {
-    setOutput("validated_path", actual_path_); 
-    setOutput("validation_error_code_id", static_cast<uint16_t>(0));
-    RCLCPP_DEBUG(logger_, "[ComputeValidatedPath] Path validation passed.");
-    return BT::NodeStatus::SUCCESS;
-  } else {
-    RCLCPP_WARN(logger_, "[ComputeValidatedPath] Detour deviation > %.2f detected!", max_dev_);
-    nav_msgs::msg::Path empty_path;
-    setOutput("validated_path", empty_path);
-    setOutput("validation_error_code_id", static_cast<uint16_t>(308)); 
-    return BT::NodeStatus::FAILURE;
+      // Static이 성공했다면, 이제 Dynamic Goal 전송!
+      std::vector<geometry_msgs::msg::PoseStamped> global_goals;
+      std::string dynamic_planner_id;
+      getInput("global_goals", global_goals);
+      getInput("dynamic_planner_id", dynamic_planner_id);
+
+      auto dynamic_goal_msg = ActionType::Goal();
+      dynamic_goal_msg.goals = global_goals;
+      dynamic_goal_msg.planner_id = dynamic_planner_id;
+      dynamic_goal_msg.use_start = false;
+
+      auto send_opts_dynamic = rclcpp_action::Client<ActionType>::SendGoalOptions();
+      send_opts_dynamic.goal_response_callback = [this](auto handle) { dynamic_goal_handle_ = handle; };
+      send_opts_dynamic.result_callback = [this](const GoalHandle::WrappedResult & result) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (result.code == rclcpp_action::ResultCode::SUCCEEDED) {
+          actual_path_ = result.result->path;
+          dynamic_error_code_ = 0;
+        } else {
+          dynamic_error_code_ = result.result ? result.result->error_code : 308; 
+        }
+        dynamic_done_ = true;
+      };
+
+      RCLCPP_DEBUG(logger_, "[ComputeValidatedPathSyncAction] Step 2: Static done. Sending async goal to DYNAMIC planner.");
+      dynamic_client_->async_send_goal(dynamic_goal_msg, send_opts_dynamic);
+      
+      // 다음 상태로 전환
+      current_state_ = PlanningState::WAITING_FOR_DYNAMIC;
+      return BT::NodeStatus::RUNNING;
+    }
+
+    // ==========================================
+    // 상태 2: Dynamic 플래너 응답 대기 중
+    // ==========================================
+    case PlanningState::WAITING_FOR_DYNAMIC:
+    {
+      if (!dynamic_done_) {
+        return BT::NodeStatus::RUNNING; // 아직 안 왔으면 계속 대기
+      }
+
+      setOutput("dynamic_error_code_id", static_cast<uint16_t>(dynamic_error_code_.load()));
+
+      // Dynamic 실패 처리
+      if (dynamic_error_code_ != 0) {
+        RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Dynamic planner failed (Err: %d).", dynamic_error_code_.load());
+        nav_msgs::msg::Path empty_path;
+        setOutput("validated_path", empty_path);
+        setOutput("validation_error_code_id", static_cast<uint16_t>(308)); 
+        return BT::NodeStatus::FAILURE;
+      }
+
+      // 둘 다 성공했으므로 다음 상태로 전환
+      current_state_ = PlanningState::VALIDATING;
+      // break 없이 바로 다음 case로 흘러가도록(fall-through) 하거나 명시적 호출
+    }
+
+    // ==========================================
+    // 상태 3: 검증 (Validation)
+    // ==========================================
+    case PlanningState::VALIDATING:
+    {
+      if (performValidation()) {
+        setOutput("validated_path", actual_path_); 
+        setOutput("validation_error_code_id", static_cast<uint16_t>(0));
+        RCLCPP_DEBUG(logger_, "[ComputeValidatedPathSyncAction] Step 3: Path validation passed.");
+        current_state_ = PlanningState::IDLE;
+        return BT::NodeStatus::SUCCESS;
+      } else {
+        RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Step 3: Detour deviation > %.2f detected!", max_dev_);
+        nav_msgs::msg::Path empty_path;
+        setOutput("validated_path", empty_path);
+        setOutput("validation_error_code_id", static_cast<uint16_t>(308)); 
+        current_state_ = PlanningState::IDLE;
+        return BT::NodeStatus::FAILURE;
+      }
+    }
+    
+    default:
+      return BT::NodeStatus::FAILURE;
   }
 }
 
-void ComputeValidatedPath::onHalted()
+
+
+
+
+void ComputeValidatedPathSyncAction::onHalted()
 {
   if (!static_done_ && static_goal_handle_) {
     static_client_->async_cancel_goal(static_goal_handle_);
@@ -226,15 +286,12 @@ void ComputeValidatedPath::onHalted()
   if (!dynamic_done_ && dynamic_goal_handle_) {
     dynamic_client_->async_cancel_goal(dynamic_goal_handle_);
   }
-  RCLCPP_INFO(logger_, "[ComputeValidatedPath] Node halted. Action goals cancelled.");
+  RCLCPP_INFO(logger_, "[ComputeValidatedPathSyncAction] Node halted. Action goals cancelled.");
 }
 
-bool ComputeValidatedPath::performValidation()
+bool ComputeValidatedPathSyncAction::performValidation()
 {
-  if (actual_path_.poses.empty() || static_path_.poses.empty()) {
-    RCLCPP_WARN(logger_, "[ComputeValidatedPath] One of the planners returned an empty path.");
-    return false; 
-  }
+  if (actual_path_.poses.empty() || static_path_.poses.empty()) return true;
 
   nav_msgs::msg::Path trunc_ref = static_path_;
   nav_msgs::msg::Path trunc_actual = actual_path_;
@@ -274,7 +331,7 @@ bool ComputeValidatedPath::performValidation()
   return true;
 }
 
-void ComputeValidatedPath::truncatePathByEuclidean(nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & start, double dist_limit) {
+void ComputeValidatedPathSyncAction::truncatePathByEuclidean(nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & start, double dist_limit) {
   if (path.poses.empty()) return;
   auto it = std::find_if(path.poses.rbegin(), path.poses.rend(),
     [&start, dist_limit](const geometry_msgs::msg::PoseStamped & p) {
@@ -283,7 +340,7 @@ void ComputeValidatedPath::truncatePathByEuclidean(nav_msgs::msg::Path & path, c
   if (it != path.poses.rend()) path.poses.erase(it.base(), path.poses.end());
 }
 
-void ComputeValidatedPath::truncatePathToGoal(nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & target) {
+void ComputeValidatedPathSyncAction::truncatePathToGoal(nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & target) {
   if (path.poses.empty()) return;
   size_t closest_idx = 0; double min_dist = 1e9;
   for (size_t i = 0; i < path.poses.size(); ++i) {
@@ -293,7 +350,7 @@ void ComputeValidatedPath::truncatePathToGoal(nav_msgs::msg::Path & path, const 
   path.poses.resize(closest_idx + 1);
 }
 
-bool ComputeValidatedPath::isPoseWithinDeviation(const geometry_msgs::msg::Point & p, const nav_msgs::msg::Path & ref_path, double max_dev) {
+bool ComputeValidatedPathSyncAction::isPoseWithinDeviation(const geometry_msgs::msg::Point & p, const nav_msgs::msg::Path & ref_path, double max_dev) {
   if (ref_path.poses.empty()) return false;
   if (ref_path.poses.size() == 1) return std::hypot(p.x - ref_path.poses[0].pose.position.x, p.y - ref_path.poses[0].pose.position.y) <= max_dev;
   double min_dist = 1e9;
@@ -304,7 +361,7 @@ bool ComputeValidatedPath::isPoseWithinDeviation(const geometry_msgs::msg::Point
   return min_dist <= max_dev;
 }
 
-double ComputeValidatedPath::pointToLineSegmentDistance(const geometry_msgs::msg::Point & p, const geometry_msgs::msg::Point & a, const geometry_msgs::msg::Point & b) {
+double ComputeValidatedPathSyncAction::pointToLineSegmentDistance(const geometry_msgs::msg::Point & p, const geometry_msgs::msg::Point & a, const geometry_msgs::msg::Point & b) {
   double ab_x = b.x - a.x; double ab_y = b.y - a.y;
   double ap_x = p.x - a.x; double ap_y = p.y - a.y;
   double ab_len_sq = ab_x * ab_x + ab_y * ab_y;
@@ -319,5 +376,5 @@ double ComputeValidatedPath::pointToLineSegmentDistance(const geometry_msgs::msg
 
 extern "C" void BT_RegisterNodesFromPlugin(BT::BehaviorTreeFactory &factory)
 {
-  factory.registerNodeType<amr_bt_nodes::ComputeValidatedPath>("ComputeValidatedPath");
+  factory.registerNodeType<amr_bt_nodes::ComputeValidatedPathSyncAction>("ComputeValidatedPathSyncAction");
 }

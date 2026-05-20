@@ -494,6 +494,17 @@ target_include_directories(remove_first_goals_action PUBLIC
   $<INSTALL_INTERFACE:include>)  
 
 
+# ───── Build compute_validated_path_sync_action ─────
+add_library(compute_validated_path_sync_action SHARED
+  src/compute_validated_path_sync_action.cpp)
+
+ament_target_dependencies(compute_validated_path_sync_action
+  rclcpp behaviortree_cpp pluginlib geometry_msgs nav_msgs nav2_msgs rclcpp_action)
+
+target_include_directories(compute_validated_path_sync_action PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
 
 
 # ───── Pluginlib Export ─────
@@ -536,6 +547,7 @@ install(TARGETS
   progress_aware_round_robin_control_control
   remove_passed_goals_custom_action
   remove_first_goals_action
+  compute_validated_path_sync_action
 
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
