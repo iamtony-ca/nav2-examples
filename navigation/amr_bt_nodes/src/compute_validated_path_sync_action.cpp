@@ -18,11 +18,14 @@ ComputeValidatedPathSyncAction::ComputeValidatedPathSyncAction(
 {
 }
 
-void ComputeValidatedPathSyncAction::initialize()
+// [수정 포인트 1] 모든 스코프를 ComputeValidatedPathSyncAction:: 으로 통일
+bool ComputeValidatedPathSyncAction::initialize()
 {
   node_ = config().blackboard->get<rclcpp::Node::SharedPtr>("node");
   if (!node_) {
-    throw std::runtime_error("Failed to get 'node' from blackboard in ComputeValidatedPathSyncAction");
+    // 초기화 중에는 logger_가 셋업 전일 수 있으므로 직접 로거 호출
+    RCLCPP_ERROR(rclcpp::get_logger("ComputeValidatedPathSyncAction"), "Failed to get 'node' from blackboard.");
+    return false;
   }
 
   logger_ = node_->get_logger();
@@ -31,23 +34,22 @@ void ComputeValidatedPathSyncAction::initialize()
   getInput("static_planner_server", static_server);
   getInput("dynamic_planner_server", dynamic_server);
 
-  // [핵심 추가] 메인 스레드와 분리된 전용 콜백 그룹 생성
   callback_group_ = node_->create_callback_group(
     rclcpp::CallbackGroupType::MutuallyExclusive,
     false);
   callback_group_executor_.add_callback_group(callback_group_, node_->get_node_base_interface());
 
-  // 콜백 그룹을 할당하여 Action Client 생성
   static_client_ = rclcpp_action::create_client<ActionType>(node_, static_server, callback_group_);
   dynamic_client_ = rclcpp_action::create_client<ActionType>(node_, dynamic_server, callback_group_);
 
-  if (!static_client_->wait_for_action_server(std::chrono::seconds(2)) ||
-      !dynamic_client_->wait_for_action_server(std::chrono::seconds(2))) {
-    throw std::runtime_error("Planner action servers not available in ComputeValidatedPathSyncAction");
+  if (!static_client_->action_server_is_ready() || !dynamic_client_->action_server_is_ready()) {
+    RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Planner action servers are not ready yet.");
+    return false; 
   }
 
   initialized_ = true;
   RCLCPP_INFO(logger_, "[ComputeValidatedPathSyncAction] Initialized successfully. Connected to action servers.");
+  return true;
 }
 
 BT::PortsList ComputeValidatedPathSyncAction::providedPorts()
@@ -100,7 +102,6 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onStart()
   int target_idx = -1;
   const auto & robot_pos = current_pose.pose.position;
   
-  // 뒤에서부터 검사하여 10m 이내에 들어오는 가장 먼(최초의) 목표점 찾기
   for (int i = static_cast<int>(global_goals.size()) - 1; i >= 0; --i) {
     double dist = std::hypot(global_goals[i].pose.position.x - robot_pos.x,
                              global_goals[i].pose.position.y - robot_pos.y);
@@ -110,19 +111,14 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onStart()
     }
   }
 
-  // [핵심 로직 1] 다음 목표(N+1)까지 포함하여 마진 확보
   if (target_idx == -1) {
-    // 10m 이내에 목표가 아예 없으면 0번째 목표(가장 가까운 목표)까지만 던짐
     local_goals_ = std::vector<geometry_msgs::msg::PoseStamped>(global_goals.begin(), global_goals.begin() + 1);
   } else if (target_idx + 1 < static_cast<int>(global_goals.size())) {
-    // 10m 이내 목표(N) 다음 목표(N+1)까지 던짐 (50m 밖이더라도)
     local_goals_ = std::vector<geometry_msgs::msg::PoseStamped>(global_goals.begin(), global_goals.begin() + target_idx + 2);
   } else {
-    // 이미 마지막 목표라면 전체 던짐
     local_goals_ = global_goals;
   }
 
-  // 변수 초기화
   static_done_ = false;
   dynamic_done_ = false;
   static_error_code_ = 0;
@@ -132,10 +128,8 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onStart()
   static_path_ = nav_msgs::msg::Path();
   actual_path_ = nav_msgs::msg::Path();
 
-  // [수정 핵심 1] 상태 머신 초기화
   current_state_ = PlanningState::WAITING_FOR_STATIC;
 
-  // [수정 핵심 2] Static Goal만 먼저 전송
   auto static_goal_msg = ActionType::Goal();
   static_goal_msg.goals = local_goals_;
   static_goal_msg.planner_id = static_planner_id;
@@ -154,46 +148,34 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onStart()
     static_done_ = true;
   };
 
-  // onStart() 하단부, async_send_goal 바로 직전에 추가
   start_time_ = node_->now();
   
   RCLCPP_DEBUG(logger_, "[ComputeValidatedPathSyncAction] Step 1: Sending async goal to STATIC planner.");
   static_client_->async_send_goal(static_goal_msg, send_opts_static);
 
-  // 콜백 처리용 스핀
   callback_group_executor_.spin_some();
 
   return BT::NodeStatus::RUNNING;
 }
 
-
-
 BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
 {
-
-  // [강력한 타임아웃 안전장치]
   if ((node_->now() - start_time_).seconds() > 10.0) {
-    RCLCPP_ERROR(logger_, "[ComputeValidatedPath] Planning Timeout! Exceeded 10s.");
-    onHalted(); // 안전하게 진행 중인 액션 취소
+    RCLCPP_ERROR(logger_, "[ComputeValidatedPathSyncAction] Planning Timeout! Exceeded 10s.");
+    onHalted(); 
     setOutput("validation_error_code_id", static_cast<uint16_t>(308)); 
     return BT::NodeStatus::FAILURE;
   }
   
-  // 멈춰있던 콜백 처리
   callback_group_executor_.spin_some();
 
   std::lock_guard<std::mutex> lock(mutex_);
 
   switch (current_state_) {
     
-    // ==========================================
-    // 상태 1: Static 플래너 응답 대기 중
-    // ==========================================
     case PlanningState::WAITING_FOR_STATIC:
     {
-      if (!static_done_) {
-        return BT::NodeStatus::RUNNING; // 아직 안 왔으면 계속 대기
-      }
+      if (!static_done_) return BT::NodeStatus::RUNNING;
 
       setOutput("static_error_code_id", static_cast<uint16_t>(static_error_code_.load()));
       
@@ -203,7 +185,6 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
         setOutput("static_path", nav_msgs::msg::Path());
       }
 
-      // Static이 실패했다면 Dynamic은 돌려볼 필요도 없이 즉시 실패 반환 (옵션 A 정책)
       if (static_error_code_ != 0) {
         RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Static planner failed (Err: %d). Aborting.", static_error_code_.load());
         nav_msgs::msg::Path empty_path;
@@ -212,7 +193,6 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
         return BT::NodeStatus::FAILURE;
       }
 
-      // Static이 성공했다면, 이제 Dynamic Goal 전송!
       std::vector<geometry_msgs::msg::PoseStamped> global_goals;
       std::string dynamic_planner_id;
       getInput("global_goals", global_goals);
@@ -239,23 +219,16 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
       RCLCPP_DEBUG(logger_, "[ComputeValidatedPathSyncAction] Step 2: Static done. Sending async goal to DYNAMIC planner.");
       dynamic_client_->async_send_goal(dynamic_goal_msg, send_opts_dynamic);
       
-      // 다음 상태로 전환
       current_state_ = PlanningState::WAITING_FOR_DYNAMIC;
       return BT::NodeStatus::RUNNING;
     }
 
-    // ==========================================
-    // 상태 2: Dynamic 플래너 응답 대기 중
-    // ==========================================
     case PlanningState::WAITING_FOR_DYNAMIC:
     {
-      if (!dynamic_done_) {
-        return BT::NodeStatus::RUNNING; // 아직 안 왔으면 계속 대기
-      }
+      if (!dynamic_done_) return BT::NodeStatus::RUNNING;
 
       setOutput("dynamic_error_code_id", static_cast<uint16_t>(dynamic_error_code_.load()));
 
-      // Dynamic 실패 처리
       if (dynamic_error_code_ != 0) {
         RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Dynamic planner failed (Err: %d).", dynamic_error_code_.load());
         nav_msgs::msg::Path empty_path;
@@ -264,14 +237,10 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
         return BT::NodeStatus::FAILURE;
       }
 
-      // 둘 다 성공했으므로 다음 상태로 전환
       current_state_ = PlanningState::VALIDATING;
-      // break 없이 바로 다음 case로 흘러가도록(fall-through) 하거나 명시적 호출
+      // break 없이 바로 다음 상태 검증으로 넘어갑니다. (Fall-through)
     }
 
-    // ==========================================
-    // 상태 3: 검증 (Validation)
-    // ==========================================
     case PlanningState::VALIDATING:
     {
       if (performValidation()) {
@@ -295,10 +264,6 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
   }
 }
 
-
-
-
-
 void ComputeValidatedPathSyncAction::onHalted()
 {
   if (!static_done_ && static_goal_handle_) {
@@ -310,33 +275,31 @@ void ComputeValidatedPathSyncAction::onHalted()
   RCLCPP_INFO(logger_, "[ComputeValidatedPathSyncAction] Node halted. Action goals cancelled.");
 }
 
-
-
 bool ComputeValidatedPathSyncAction::performValidation()
 {
   if (actual_path_.poses.empty() || static_path_.poses.empty()) {
-    RCLCPP_WARN(logger_, "[ComputeValidatedPath] One of the planners returned an empty path.");
+    RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] One of the planners returned an empty path.");
     return false;
   }
 
   nav_msgs::msg::Path trunc_ref = static_path_;
   nav_msgs::msg::Path trunc_actual = actual_path_;
-  auto start_pos = current_pose_.pose.position; // 로봇의 실제 현재 위치 기준
+  
+  geometry_msgs::msg::PoseStamped current_pose;
+  getInput("current_pose", current_pose);
+  auto start_pos = current_pose.pose.position; 
 
-  // [핵심 로직 2] 정적 경로(trunc_ref)를 로봇 현재 위치 기준 10m(horizon_) 지점에서 정확히 자름
   truncatePathByEuclidean(trunc_ref, start_pos, horizon_);
 
   if (trunc_ref.poses.empty()) {
-    RCLCPP_WARN(logger_, "[ComputeValidatedPath] Truncated reference path is empty.");
+    RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Truncated reference path is empty.");
     return false;
   }
 
-  // [핵심 로직 3] 동적 경로 동기화 및 도달 검증 (Fail-fast)
-  auto target_pos = trunc_ref.poses.back().pose.position; // 정적 경로의 끝점을 목표(Target)로 설정
+  auto target_pos = trunc_ref.poses.back().pose.position; 
   size_t closest_idx = 0;
   double min_dist = 1e9;
 
-  // 동적 경로에서 Target과 가장 가까운 점 찾기
   for (size_t i = 0; i < trunc_actual.poses.size(); ++i) {
     double dist = std::hypot(trunc_actual.poses[i].pose.position.x - target_pos.x,
                              trunc_actual.poses[i].pose.position.y - target_pos.y);
@@ -346,24 +309,17 @@ bool ComputeValidatedPathSyncAction::performValidation()
     }
   }
 
-  // 도달 검증: 동적 경로가 정적 경로의 끝점 근처(허용 오차 내)까지 가지 못했다면 즉시 실패!
-  // 예: 동적 경로가 장애물에 막혀 도중에 끊겼거나 엉뚱한 곳으로 간 경우
   if (min_dist > max_dev_) {
-    RCLCPP_WARN(logger_, "[ComputeValidatedPath] Dynamic path failed to reach the static path's end point. Min dist: %.2f > Max Dev: %.2f", min_dist, max_dev_);
+    RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Dynamic path failed to reach the static path's end point. Min dist: %.2f > Max Dev: %.2f", min_dist, max_dev_);
     return false; 
   }
 
-  // 동기화 완료: 동적 경로를 가장 가까운 점까지만 싹둑 자름
   trunc_actual.poses.resize(closest_idx + 1);
 
-  // -------------------------------------------------------------
-  // [핵심 로직 4] 본격적인 편차 검사 수행
-  // -------------------------------------------------------------
   double accumulated_length = 0.0;          
   double dist_since_last = 0.0;       
   auto prev_pos = trunc_actual.poses.front().pose.position;
 
-  // 시작점 편차 검사
   if (!isPoseWithinDeviation(prev_pos, trunc_ref, max_dev_)) return false;
 
   for (size_t i = 1; i < trunc_actual.poses.size(); ++i) {
@@ -372,13 +328,11 @@ bool ComputeValidatedPathSyncAction::performValidation()
     accumulated_length += step;
     dist_since_last += step;
 
-    // 너무 길게 검사하지 않도록 제한
     if (accumulated_length > max_check_length_) break;
 
-    // 일정 간격(step_dist_)마다 편차 검사
     if (dist_since_last >= step_dist_ || i == trunc_actual.poses.size() - 1) {
       if (!isPoseWithinDeviation(curr_pos, trunc_ref, max_dev_)) {
-        RCLCPP_WARN(logger_, "[ComputeValidatedPath] Detour detected at dist %.2f. Deviation exceeds %.2f", accumulated_length, max_dev_);
+        RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Detour detected at dist %.2f. Deviation exceeds %.2f", accumulated_length, max_dev_);
         return false; 
       }
       dist_since_last = 0.0;
@@ -386,25 +340,29 @@ bool ComputeValidatedPathSyncAction::performValidation()
     prev_pos = curr_pos; 
   }
 
-  return true; // 모든 깐깐한 검사를 통과함!
+  return true; 
 }
 
-
+// [수정 포인트 3] 10m 안으로 들어오는 최초 지점을 찾아 '그 뒷부분'을 잘라냄
 void ComputeValidatedPathSyncAction::truncatePathByEuclidean(nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & start, double dist_limit) {
   if (path.poses.empty()) return;
+  
   auto it = std::find_if(path.poses.rbegin(), path.poses.rend(),
     [&start, dist_limit](const geometry_msgs::msg::PoseStamped & p) {
       return std::hypot(p.pose.position.x - start.x, p.pose.position.y - start.y) <= dist_limit;
     });
-  if (it != path.poses.rend()) path.poses.erase(it.base(), path.poses.end());
+    
+  if (it != path.poses.rend()) {
+    // it.base()는 10m 이내로 들어온 점의 "다음 점(더 먼 점)"을 가리킵니다.
+    // 즉, 10m 바깥에 있는 꼬리 부분을 모두 지웁니다.
+    path.poses.erase(it.base(), path.poses.end());
+  }
 }
 
 void ComputeValidatedPathSyncAction::truncatePathToGoal(nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & target) 
 {
   if (path.poses.empty()) return;
 
-  // [고도화] 뒤에서부터(rbegin) 조사하여 타겟과 가장 가까운 지점 찾기
-  // 이렇게 하면 원형 루프나 꼬인 경로에서도 목적지 근처의 정확한 끝점을 찾습니다.
   auto it = std::min_element(path.poses.rbegin(), path.poses.rend(),
     [&target](const geometry_msgs::msg::PoseStamped & a, const geometry_msgs::msg::PoseStamped & b) {
       double dist_a = std::hypot(a.pose.position.x - target.x, a.pose.position.y - target.y);
@@ -412,7 +370,7 @@ void ComputeValidatedPathSyncAction::truncatePathToGoal(nav_msgs::msg::Path & pa
       return dist_a < dist_b;
     });
 
-  // 찾은 위치(it.base())까지 경로를 잘라냄
+  // 타겟과 가장 가까운 점(it.base()) 이후의 모든 점을 지워 동기화
   path.poses.erase(it.base(), path.poses.end());
 }
 
