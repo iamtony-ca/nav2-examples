@@ -43,6 +43,8 @@ private:
   bool isPoseWithinDeviation(const geometry_msgs::msg::Point & p, const nav_msgs::msg::Path & ref_path, double max_dev);
   double pointToLineSegmentDistance(const geometry_msgs::msg::Point & p, const geometry_msgs::msg::Point & a, const geometry_msgs::msg::Point & b);
 
+  // private 멤버에 추가
+  rclcpp::Time start_time_;
   rclcpp::Node::SharedPtr node_;
   rclcpp::Logger logger_{rclcpp::get_logger("ComputeValidatedPathSyncAction")};
   bool initialized_;
