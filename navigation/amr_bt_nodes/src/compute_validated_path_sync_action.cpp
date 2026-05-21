@@ -97,21 +97,30 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onStart()
   getInput("step_distance", step_dist_);
   getInput("max_check_length", max_check_length_);
 
-  // Local Goals 추출 (Rolling Horizon)
-  int max_valid_idx = -1;
+  int target_idx = -1;
   const auto & robot_pos = current_pose.pose.position;
+  
+  // 뒤에서부터 검사하여 10m 이내에 들어오는 가장 먼(최초의) 목표점 찾기
   for (int i = static_cast<int>(global_goals.size()) - 1; i >= 0; --i) {
     double dist = std::hypot(global_goals[i].pose.position.x - robot_pos.x,
                              global_goals[i].pose.position.y - robot_pos.y);
     if (dist <= horizon_) {
-      max_valid_idx = i;
+      target_idx = i;
       break;
     }
   }
-  if (max_valid_idx == -1) max_valid_idx = 0;
-  
-  local_goals_ = std::vector<geometry_msgs::msg::PoseStamped>(
-    global_goals.begin(), global_goals.begin() + max_valid_idx + 1);
+
+  // [핵심 로직 1] 다음 목표(N+1)까지 포함하여 마진 확보
+  if (target_idx == -1) {
+    // 10m 이내에 목표가 아예 없으면 0번째 목표(가장 가까운 목표)까지만 던짐
+    local_goals_ = std::vector<geometry_msgs::msg::PoseStamped>(global_goals.begin(), global_goals.begin() + 1);
+  } else if (target_idx + 1 < static_cast<int>(global_goals.size())) {
+    // 10m 이내 목표(N) 다음 목표(N+1)까지 던짐 (50m 밖이더라도)
+    local_goals_ = std::vector<geometry_msgs::msg::PoseStamped>(global_goals.begin(), global_goals.begin() + target_idx + 2);
+  } else {
+    // 이미 마지막 목표라면 전체 던짐
+    local_goals_ = global_goals;
+  }
 
   // 변수 초기화
   static_done_ = false;
@@ -145,6 +154,9 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onStart()
     static_done_ = true;
   };
 
+  // onStart() 하단부, async_send_goal 바로 직전에 추가
+  start_time_ = node_->now();
+  
   RCLCPP_DEBUG(logger_, "[ComputeValidatedPathSyncAction] Step 1: Sending async goal to STATIC planner.");
   static_client_->async_send_goal(static_goal_msg, send_opts_static);
 
@@ -158,6 +170,15 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onStart()
 
 BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
 {
+
+  // [강력한 타임아웃 안전장치]
+  if ((node_->now() - start_time_).seconds() > 10.0) {
+    RCLCPP_ERROR(logger_, "[ComputeValidatedPath] Planning Timeout! Exceeded 10s.");
+    onHalted(); // 안전하게 진행 중인 액션 취소
+    setOutput("validation_error_code_id", static_cast<uint16_t>(308)); 
+    return BT::NodeStatus::FAILURE;
+  }
+  
   // 멈춰있던 콜백 처리
   callback_group_executor_.spin_some();
 
@@ -289,27 +310,60 @@ void ComputeValidatedPathSyncAction::onHalted()
   RCLCPP_INFO(logger_, "[ComputeValidatedPathSyncAction] Node halted. Action goals cancelled.");
 }
 
+
+
 bool ComputeValidatedPathSyncAction::performValidation()
 {
-  if (actual_path_.poses.empty() || static_path_.poses.empty()) return true;
+  if (actual_path_.poses.empty() || static_path_.poses.empty()) {
+    RCLCPP_WARN(logger_, "[ComputeValidatedPath] One of the planners returned an empty path.");
+    return false;
+  }
 
   nav_msgs::msg::Path trunc_ref = static_path_;
   nav_msgs::msg::Path trunc_actual = actual_path_;
-  auto start_pos = actual_path_.poses.front().pose.position;
+  auto start_pos = current_pose_.pose.position; // 로봇의 실제 현재 위치 기준
 
-  if (local_goals_.size() == 1) {
-    truncatePathByEuclidean(trunc_ref, start_pos, horizon_);
-    truncatePathByEuclidean(trunc_actual, start_pos, horizon_);
-  } else {
-    truncatePathToGoal(trunc_actual, local_goals_.back().pose.position);
+  // [핵심 로직 2] 정적 경로(trunc_ref)를 로봇 현재 위치 기준 10m(horizon_) 지점에서 정확히 자름
+  truncatePathByEuclidean(trunc_ref, start_pos, horizon_);
+
+  if (trunc_ref.poses.empty()) {
+    RCLCPP_WARN(logger_, "[ComputeValidatedPath] Truncated reference path is empty.");
+    return false;
   }
 
-  if (trunc_actual.poses.empty() || trunc_ref.poses.empty()) return true;
+  // [핵심 로직 3] 동적 경로 동기화 및 도달 검증 (Fail-fast)
+  auto target_pos = trunc_ref.poses.back().pose.position; // 정적 경로의 끝점을 목표(Target)로 설정
+  size_t closest_idx = 0;
+  double min_dist = 1e9;
 
+  // 동적 경로에서 Target과 가장 가까운 점 찾기
+  for (size_t i = 0; i < trunc_actual.poses.size(); ++i) {
+    double dist = std::hypot(trunc_actual.poses[i].pose.position.x - target_pos.x,
+                             trunc_actual.poses[i].pose.position.y - target_pos.y);
+    if (dist < min_dist) { 
+      min_dist = dist; 
+      closest_idx = i; 
+    }
+  }
+
+  // 도달 검증: 동적 경로가 정적 경로의 끝점 근처(허용 오차 내)까지 가지 못했다면 즉시 실패!
+  // 예: 동적 경로가 장애물에 막혀 도중에 끊겼거나 엉뚱한 곳으로 간 경우
+  if (min_dist > max_dev_) {
+    RCLCPP_WARN(logger_, "[ComputeValidatedPath] Dynamic path failed to reach the static path's end point. Min dist: %.2f > Max Dev: %.2f", min_dist, max_dev_);
+    return false; 
+  }
+
+  // 동기화 완료: 동적 경로를 가장 가까운 점까지만 싹둑 자름
+  trunc_actual.poses.resize(closest_idx + 1);
+
+  // -------------------------------------------------------------
+  // [핵심 로직 4] 본격적인 편차 검사 수행
+  // -------------------------------------------------------------
   double accumulated_length = 0.0;          
   double dist_since_last = 0.0;       
-  auto prev_pos = trunc_actual.poses[0].pose.position;
+  auto prev_pos = trunc_actual.poses.front().pose.position;
 
+  // 시작점 편차 검사
   if (!isPoseWithinDeviation(prev_pos, trunc_ref, max_dev_)) return false;
 
   for (size_t i = 1; i < trunc_actual.poses.size(); ++i) {
@@ -318,18 +372,23 @@ bool ComputeValidatedPathSyncAction::performValidation()
     accumulated_length += step;
     dist_since_last += step;
 
+    // 너무 길게 검사하지 않도록 제한
     if (accumulated_length > max_check_length_) break;
 
+    // 일정 간격(step_dist_)마다 편차 검사
     if (dist_since_last >= step_dist_ || i == trunc_actual.poses.size() - 1) {
       if (!isPoseWithinDeviation(curr_pos, trunc_ref, max_dev_)) {
+        RCLCPP_WARN(logger_, "[ComputeValidatedPath] Detour detected at dist %.2f. Deviation exceeds %.2f", accumulated_length, max_dev_);
         return false; 
       }
       dist_since_last = 0.0;
     }
     prev_pos = curr_pos; 
   }
-  return true;
+
+  return true; // 모든 깐깐한 검사를 통과함!
 }
+
 
 void ComputeValidatedPathSyncAction::truncatePathByEuclidean(nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & start, double dist_limit) {
   if (path.poses.empty()) return;
@@ -340,14 +399,21 @@ void ComputeValidatedPathSyncAction::truncatePathByEuclidean(nav_msgs::msg::Path
   if (it != path.poses.rend()) path.poses.erase(it.base(), path.poses.end());
 }
 
-void ComputeValidatedPathSyncAction::truncatePathToGoal(nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & target) {
+void ComputeValidatedPathSyncAction::truncatePathToGoal(nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & target) 
+{
   if (path.poses.empty()) return;
-  size_t closest_idx = 0; double min_dist = 1e9;
-  for (size_t i = 0; i < path.poses.size(); ++i) {
-    double dist = std::hypot(path.poses[i].pose.position.x - target.x, path.poses[i].pose.position.y - target.y);
-    if (dist < min_dist) { min_dist = dist; closest_idx = i; }
-  }
-  path.poses.resize(closest_idx + 1);
+
+  // [고도화] 뒤에서부터(rbegin) 조사하여 타겟과 가장 가까운 지점 찾기
+  // 이렇게 하면 원형 루프나 꼬인 경로에서도 목적지 근처의 정확한 끝점을 찾습니다.
+  auto it = std::min_element(path.poses.rbegin(), path.poses.rend(),
+    [&target](const geometry_msgs::msg::PoseStamped & a, const geometry_msgs::msg::PoseStamped & b) {
+      double dist_a = std::hypot(a.pose.position.x - target.x, a.pose.position.y - target.y);
+      double dist_b = std::hypot(b.pose.position.x - target.x, b.pose.position.y - target.y);
+      return dist_a < dist_b;
+    });
+
+  // 찾은 위치(it.base())까지 경로를 잘라냄
+  path.poses.erase(it.base(), path.poses.end());
 }
 
 bool ComputeValidatedPathSyncAction::isPoseWithinDeviation(const geometry_msgs::msg::Point & p, const nav_msgs::msg::Path & ref_path, double max_dev) {
