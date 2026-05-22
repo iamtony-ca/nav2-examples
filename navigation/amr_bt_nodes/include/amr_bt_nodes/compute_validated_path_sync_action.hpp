@@ -36,7 +36,7 @@ public:
   void onHalted() override;
 
 private:
-  void initialize();
+  bool initialize();
   bool performValidation();
   void truncatePathByEuclidean(nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & start, double dist_limit);
   void truncatePathToGoal(nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & target);
