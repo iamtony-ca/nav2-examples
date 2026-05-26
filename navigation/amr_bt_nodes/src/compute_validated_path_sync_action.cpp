@@ -77,7 +77,7 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onStart()
 {
   if (!initialized_) {
     if (!initialize()) {
-      setOutput("validation_error_code_id", static_cast<uint16_t>(308));
+      setOutput("validation_error_code_id", static_cast<uint16_t>(404)); // Not Initialized
       return BT::NodeStatus::FAILURE; 
     }
   }
@@ -163,7 +163,7 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
   if ((node_->now() - start_time_).seconds() > 10.0) {
     RCLCPP_ERROR(logger_, "[ComputeValidatedPathSyncAction] Planning Timeout! Exceeded 10s.");
     onHalted(); 
-    setOutput("validation_error_code_id", static_cast<uint16_t>(308)); 
+    setOutput("validation_error_code_id", static_cast<uint16_t>(404)); // Timeout
     return BT::NodeStatus::FAILURE;
   }
   
@@ -189,7 +189,7 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
         RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Static planner failed (Err: %d). Aborting.", static_error_code_.load());
         nav_msgs::msg::Path empty_path;
         setOutput("validated_path", empty_path);
-        setOutput("validation_error_code_id", static_cast<uint16_t>(308));
+        setOutput("validation_error_code_id", static_cast<uint16_t>(401)); // Static Planner Failure
         return BT::NodeStatus::FAILURE;
       }
 
@@ -233,7 +233,7 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
         RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Dynamic planner failed (Err: %d).", dynamic_error_code_.load());
         nav_msgs::msg::Path empty_path;
         setOutput("validated_path", empty_path);
-        setOutput("validation_error_code_id", static_cast<uint16_t>(308)); 
+        setOutput("validation_error_code_id", static_cast<uint16_t>(402)); // Dynamic Planner Failure
         return BT::NodeStatus::FAILURE;
       }
 
@@ -253,7 +253,7 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
         RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Step 3: Detour deviation > %.2f detected!", max_dev_);
         nav_msgs::msg::Path empty_path;
         setOutput("validated_path", empty_path);
-        setOutput("validation_error_code_id", static_cast<uint16_t>(308)); 
+        setOutput("validation_error_code_id", static_cast<uint16_t>(403)); // Validation Failure - Detour
         current_state_ = PlanningState::IDLE;
         return BT::NodeStatus::FAILURE;
       }

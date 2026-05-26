@@ -1,0 +1,5 @@
+<Uint8TopicPublisherAction
+    topic_name="/stop_cmd"
+    value="{active_stop_code}"
+    num_publishes="1"
+    node="{ros_node}" />

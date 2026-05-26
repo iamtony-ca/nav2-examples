@@ -345,3 +345,14 @@
     </description>
   </class>
 </library>
+
+
+
+
+<library path="uint8_topic_publisher_action">
+  <class name="amr_bt_nodes::Uint8TopicPublisherAction" type="amr_bt_nodes::Uint8TopicPublisherAction" base_class_type="BT::SyncActionNode">
+    <description>
+      Publishes a uint8 message to a specified topic.
+    </description>
+  </class>
+</library>

@@ -507,6 +507,19 @@ target_include_directories(compute_validated_path_sync_action PUBLIC
 
 
 
+# ───── Build uint8_topic_publisher_action ─────
+add_library(uint8_topic_publisher_action SHARED
+  src/uint8_topic_publisher_action.cpp)
+
+ament_target_dependencies(uint8_topic_publisher_action
+  rclcpp std_msgs behaviortree_cpp pluginlib)
+
+target_include_directories(uint8_topic_publisher_action PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)  
+
+
+
 # ───── Pluginlib Export ─────
 pluginlib_export_plugin_description_file(behaviortree_cpp plugin.xml)
 
@@ -548,7 +561,8 @@ install(TARGETS
   remove_passed_goals_custom_action
   remove_first_goals_action
   compute_validated_path_sync_action
-
+  uint8_topic_publisher_action
+  
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
