@@ -133,6 +133,9 @@ private:
 
   bool ignore_higher_machine_id_path_{true};
 
+  double load_rear_smear_m_{0.4};   // [NEW] LOADING/UNLOADING 시 rear 확장량
+
+
   // TF 시간차 캐시
   std::vector<robot_interfaces::msg::MultiAgentInfo> transformed_agents_;
 
@@ -168,6 +171,7 @@ private:
                        const geometry_msgs::msg::Pose & pose,
                        double extra_dilation_m,
                        double forward_len_m,
+                       double rear_len_m,                  // [NEW]
                        nav2_costmap_2d::Costmap2D * grid,
                        unsigned char cost,
                        std::vector<std::pair<unsigned int,unsigned int>> * meta_hits = nullptr);
@@ -176,6 +180,9 @@ private:
                              double x, double y);
 
   double computeDilation(const robot_interfaces::msg::MultiAgentInfo & a) const;
+
+  double computeRearSmear(const robot_interfaces::msg::MultiAgentInfo & a) const;
+
 
   unsigned char computeCost(const robot_interfaces::msg::MultiAgentInfo & a) const;
 

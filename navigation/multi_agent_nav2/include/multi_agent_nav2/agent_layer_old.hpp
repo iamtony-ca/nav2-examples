@@ -15,7 +15,6 @@
 #include <nav2_costmap_2d/layer.hpp>
 #include <nav2_costmap_2d/layered_costmap.hpp>
 #include <nav2_costmap_2d/costmap_2d.hpp>
-// [NEW] 시각화 토픽 발행을 위해 추가
 #include <nav2_costmap_2d/costmap_2d_publisher.hpp> 
 
 #include <geometry_msgs/msg/point.hpp>
@@ -41,7 +40,7 @@ public:
   void onInitialize() override;
   void activate() override;
   void deactivate() override;
-//reset()을 아래와 같이 수정
+
   void reset() override { 
     current_ = true; 
     last_touched_ = false; 
@@ -65,7 +64,7 @@ private:
   rclcpp::Subscription<multi_agent_msgs::msg::MultiAgentInfoArray>::SharedPtr sub_;
   rclcpp::Publisher<multi_agent_msgs::msg::AgentLayerMetaArray>::SharedPtr meta_pub_;
 
-  // [NEW] 시각화 전용: 마스터 그리드와 별개로 Agent만 그릴 캔버스 및 발행기
+  // 시각화 전용
   nav2_costmap_2d::Costmap2D viz_costmap_;
   std::unique_ptr<nav2_costmap_2d::Costmap2DPublisher> costmap_pub_;
 
@@ -91,6 +90,14 @@ private:
   double      forward_smear_m_{0.25};     
   double      sigma_k_{2.0};              
 
+  // ========================================================
+  // [NEW] 경로(Path) 전용 파라미터 추가
+  // ========================================================
+  double      path_dilation_m_{-0.1}; // 본체와 분리된 경로 전용 팽창값 (음수 허용)
+  int         path_base_cost_{200};   // 로봇 바로 앞 경로 코스트
+  int         path_end_cost_{50};     // 멀어질수록 도달하는 끝점 코스트
+  // ========================================================
+
   bool        publish_meta_{true};
   int         meta_stride_{3};
   int         freshness_timeout_ms_{800};
@@ -101,18 +108,19 @@ private:
   double touch_min_x_{0.0}, touch_min_y_{0.0}, touch_max_x_{0.0}, touch_max_y_{0.0};
   bool   touched_{false};
 
-// [추가된 부분] 이전 사이클의 Bounds (잔상을 지우기 위한 캐시)
+  // 이전 사이클의 Bounds (잔상 지우기용)
   double last_min_x_{1e9}, last_min_y_{1e9}, last_max_x_{-1e9}, last_max_y_{-1e9};
   bool   last_touched_{false};
 
-  // Cached robot pose for updateCosts
+  // Cached robot pose
   double cached_robot_x_{0.0};
   double cached_robot_y_{0.0};
 
-// [1] TF 시간차 방지를 위한 캐시 컨테이너
+  bool ignore_higher_machine_id_path_{true};
+
+  // TF 시간차 캐시
   std::vector<multi_agent_msgs::msg::MultiAgentInfo> transformed_agents_;
 
-  // Map to store footprint data from YAML
   struct AgentFootprintData
   {
     std::vector<geometry_msgs::msg::Point32> points;

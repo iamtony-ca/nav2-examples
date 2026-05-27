@@ -5,8 +5,8 @@
 #include <nav2_costmap_2d/footprint.hpp>
 #include <geometry_msgs/msg/point32.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-#include <multi_agent_msgs/msg/agent_status.hpp>
-#include <multi_agent_msgs/msg/agent_layer_cell_meta.hpp>
+#include <robot_interfaces/msg/agent_status.hpp>
+#include <robot_interfaces/msg/agent_layer_cell_meta.hpp>
 #include "tf2_ros/buffer.h"
 #include <cstring> 
 
@@ -29,7 +29,7 @@ std::vector<geometry_msgs::msg::Point32> AgentLayer::toPoint32(
 }
 
 geometry_msgs::msg::PolygonStamped 
-AgentLayer::getFootprintForAgent(const multi_agent_msgs::msg::MultiAgentInfo & a)
+AgentLayer::getFootprintForAgent(const robot_interfaces::msg::MultiAgentInfo & a)
 {
     geometry_msgs::msg::PolygonStamped fp_stamped;
     
@@ -57,8 +57,8 @@ AgentLayer::getFootprintForAgent(const multi_agent_msgs::msg::MultiAgentInfo & a
 }
 
 bool AgentLayer::transformAgentInfo(
-    const multi_agent_msgs::msg::MultiAgentInfo & agent_in_map,
-    multi_agent_msgs::msg::MultiAgentInfo & agent_in_costmap_frame,
+    const robot_interfaces::msg::MultiAgentInfo & agent_in_map,
+    robot_interfaces::msg::MultiAgentInfo & agent_in_costmap_frame,
     const std::string & costmap_frame) const
 {
   const std::string& map_frame = last_infos_->header.frame_id;
@@ -138,7 +138,7 @@ void AgentLayer::onInitialize()
   declareParameter("qos_reliable", rclcpp::ParameterValue(true));
 
   // ========================================================
-  // [NEW] 경로용 파라미터 등록 (파라미터가 없으면 기본값 사용)
+  // 경로용 파라미터 등록
   // ========================================================
   declareParameter("path_dilation_m", rclcpp::ParameterValue(-0.01));
   declareParameter("path_base_cost", rclcpp::ParameterValue(254));
@@ -167,7 +167,6 @@ void AgentLayer::onInitialize()
   node_shared_->get_parameter(name_ + "." + "forward_smear_m", forward_smear_m_);
   node_shared_->get_parameter(name_ + "." + "sigma_k", sigma_k_);
 
-  // 파라미터 값 가져오기
   node_shared_->get_parameter(name_ + "." + "path_dilation_m", path_dilation_m_);
   node_shared_->get_parameter(name_ + "." + "path_base_cost", path_base_cost_);
   node_shared_->get_parameter(name_ + "." + "path_end_cost", path_end_cost_);
@@ -231,6 +230,11 @@ void AgentLayer::onInitialize()
       node_shared_, &viz_costmap_, layered_costmap_->getGlobalFrameID(), 
       name_ + "/raw_costmap", true);
 
+  // ====== [NEW] Dynamic parameter callback 등록 ======
+  dyn_params_handler_ = node_shared_->add_on_set_parameters_callback(
+      std::bind(&AgentLayer::dynamicParametersCallback, this, std::placeholders::_1));
+  // ===================================================
+
   current_ = true;
   matchSize();
 }
@@ -240,11 +244,11 @@ void AgentLayer::activate()
   auto qos = rclcpp::QoS(rclcpp::KeepLast(10));
   if (qos_reliable_) qos.reliable(); else qos.best_effort();
 
-  sub_ = node_shared_->create_subscription<multi_agent_msgs::msg::MultiAgentInfoArray>(
+  sub_ = node_shared_->create_subscription<robot_interfaces::msg::MultiAgentInfoArray>(
       topic_, qos, std::bind(&AgentLayer::infosCallback, this, std::placeholders::_1));
 
   if (publish_meta_) {
-    meta_pub_ = node_shared_->create_publisher<multi_agent_msgs::msg::AgentLayerMetaArray>(
+    meta_pub_ = node_shared_->create_publisher<robot_interfaces::msg::AgentLayerMetaArray>(
         "agent_layer_meta", rclcpp::QoS(1).reliable().transient_local());
   }
 
@@ -253,12 +257,21 @@ void AgentLayer::activate()
 
 void AgentLayer::deactivate()
 {
+  // ====== [NEW] Callback handle 해제 ======
+  // node가 살아있을 때 안전하게 해제
+  auto node = node_shared_;
+  if (node && dyn_params_handler_) {
+    node->remove_on_set_parameters_callback(dyn_params_handler_.get());
+  }
+  dyn_params_handler_.reset();
+  // =========================================
+
   sub_.reset();
   meta_pub_.reset();
   if (costmap_pub_) costmap_pub_->on_deactivate();
 }
 
-void AgentLayer::infosCallback(const multi_agent_msgs::msg::MultiAgentInfoArray::SharedPtr msg)
+void AgentLayer::infosCallback(const robot_interfaces::msg::MultiAgentInfoArray::SharedPtr msg)
 {
   std::lock_guard<std::mutex> lk(data_mtx_);
   last_infos_ = msg;
@@ -271,14 +284,14 @@ bool AgentLayer::stale(const rclcpp::Time & stamp) const
          rclcpp::Duration::from_nanoseconds(static_cast<int64_t>(freshness_timeout_ms_) * 1000000LL);
 }
 
-bool AgentLayer::isSelf(const multi_agent_msgs::msg::MultiAgentInfo & a) const
+bool AgentLayer::isSelf(const robot_interfaces::msg::MultiAgentInfo & a) const
 {
   return (a.machine_id == self_machine_id_) && (a.type_id == self_type_id_);
 }
 
-unsigned char AgentLayer::computeCost(const multi_agent_msgs::msg::MultiAgentInfo & a) const
+unsigned char AgentLayer::computeCost(const robot_interfaces::msg::MultiAgentInfo & a) const
 {
-  using S = multi_agent_msgs::msg::AgentStatus;
+  using S = robot_interfaces::msg::AgentStatus;
   const uint8_t p = a.status.phase;
   const bool is_moving = (p == S::STATUS_MOVING) || (p == S::STATUS_PATH_SEARCHING);
 
@@ -290,9 +303,9 @@ unsigned char AgentLayer::computeCost(const multi_agent_msgs::msg::MultiAgentInf
   return base;
 }
 
-double AgentLayer::computeDilation(const multi_agent_msgs::msg::MultiAgentInfo & a) const
+double AgentLayer::computeDilation(const robot_interfaces::msg::MultiAgentInfo & a) const
 {
-  using S = multi_agent_msgs::msg::AgentStatus;
+  using S = robot_interfaces::msg::AgentStatus;
   const uint8_t phase = a.status.phase;
   double r = dilation_m_;
 
@@ -327,6 +340,9 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
 {
   if (!enabled_) return;
 
+  // [NEW] 파라미터 변경 race 방지
+  std::lock_guard<std::mutex> param_lock(param_mtx_);
+
   transformed_agents_.clear();
   cached_robot_x_ = robot_x;
   cached_robot_y_ = robot_y;
@@ -342,7 +358,7 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
   touch_min_x_ =  1e9; touch_min_y_ =  1e9;
   touch_max_x_ = -1e9; touch_max_y_ = -1e9;
 
-  std::vector<multi_agent_msgs::msg::MultiAgentInfo> infos;
+  std::vector<robot_interfaces::msg::MultiAgentInfo> infos;
   {
     std::lock_guard<std::mutex> lk(data_mtx_);
     if (!last_infos_ || stale(last_stamp_)) return;
@@ -354,7 +370,7 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
   for (const auto & a_map : infos) { 
     if (isSelf(a_map)) continue;
 
-    multi_agent_msgs::msg::MultiAgentInfo a; 
+    robot_interfaces::msg::MultiAgentInfo a; 
     if (!transformAgentInfo(a_map, a, costmap_frame)) continue; 
 
     const double dx = a.current_pose.pose.position.x - robot_x;
@@ -369,12 +385,11 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
         base_radius = it->second.radius;
     }
 
-    // [수정] 본체(body)와 경로(path)의 bounding box 확장 반경을 서로 분리합니다.
+    // 본체(body)와 경로(path)의 bounding box 확장 반경을 서로 분리
     double actual_body_dilation = computeDilation(a);
     double actual_smear = isMovingPhase(a.status.phase) ? forward_smear_m_ : 0.0;
     
     double body_extent = base_radius + actual_body_dilation + actual_smear + 0.1;
-    // 음수 path_dilation은 Bounding Box를 키우지 않으므로 양수일 때만 더해줍니다.
     double path_extent = base_radius + std::max(0.0, path_dilation_m_) + 0.1;
 
     // 본체 Bounds
@@ -416,14 +431,14 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
 }
 
 // ========================================================================
-// [핵심 변경 사항 1] 다각형 꼬임(Bow-tie) 방지를 위한 안전한 음수 팽창 로직
+// 다각형 꼬임(Bow-tie) 방지를 위한 안전한 음수 팽창 로직
 // ========================================================================
 static inline std::vector<geometry_msgs::msg::Point>
 dilateFootprintDirectional(const std::vector<geometry_msgs::msg::Point32> & in,
                            double iso_dilate_m,
                            double forward_len_m,
                            rclcpp::Logger logger,
-                           rclcpp::Clock::SharedPtr clock) // 에러 로깅을 위해 추가
+                           rclcpp::Clock::SharedPtr clock)
 {
   std::vector<geometry_msgs::msg::Point> out; out.reserve(in.size());
   if (in.empty()) return out;
@@ -442,7 +457,6 @@ dilateFootprintDirectional(const std::vector<geometry_msgs::msg::Point32> & in,
   // 사용자의 파라미터 에러 방어 (너무 큰 음수값 제한)
   double applied_dilate = iso_dilate_m;
   if (applied_dilate < 0.0 && std::abs(applied_dilate) >= min_dist) {
-// [수정] 전달받은 *clock 을 사용하도록 변경
       RCLCPP_WARN_THROTTLE(logger, *clock, 2000,
           "[AgentLayer] Negative dilation (%.2f) exceeds min radius (%.2f). Clamping to safe boundary to prevent bow-tie effect.",
           iso_dilate_m, min_dist);
@@ -468,7 +482,6 @@ dilateFootprintDirectional(const std::vector<geometry_msgs::msg::Point32> & in,
   return out;
 }
 
-// logger 인자 추가
 void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
                                  const geometry_msgs::msg::Pose & pose,
                                  double extra_dilation_m,
@@ -543,10 +556,10 @@ void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
 }
 
 // ========================================================================
-// [핵심 변경 사항 2, 3] 본체와 경로 팽창 분리 및 경로 선형 코스트 감소
+// 본체와 경로 팽창 분리 및 경로 선형 코스트 감소
 // ========================================================================
 void AgentLayer::rasterizeAgentPath(
-  const multi_agent_msgs::msg::MultiAgentInfo & a,
+  const robot_interfaces::msg::MultiAgentInfo & a,
   nav2_costmap_2d::Costmap2D * grid,
   std::vector<std::pair<unsigned int,unsigned int>> & meta_hits)
 {
@@ -559,40 +572,30 @@ void AgentLayer::rasterizeAgentPath(
   const double body_iso_extra = computeDilation(a);
   const double forward_len = isMovingPhase(a.status.phase) ? forward_smear_m_ : 0.0;
 
-  // 1. 에이전트 본체 그리기 (기존 로직: 동적 팽창 + 전방 스미어 적용)
+  // 1. 에이전트 본체 그리기
   fillFootprintAt(fp, a.current_pose.pose, body_iso_extra, forward_len, grid, cost_now, &meta_hits);
-
 
   // =========================================================================
   // 우선순위(ID 비교) 기반 경로 반영 로직
-  // 규칙: 내 ID가 상대방 ID보다 작으면(우선순위가 높으면) 상대방의 경로는 무시함.
-  // (원하는 정책에 따라 부등호 < 또는 > 방향을 바꾸시면 됨)
   // =========================================================================
   if ((self_machine_id_ < a.machine_id) && ignore_higher_machine_id_path_) {
-     return;  // 여기서 함수를 종료하여 아래의 "경로 그리기" 루프를 실행하지 않음!
+     return;
   }
-
-
 
   // 2. 미래 경로 그리기 (경로 전용 파라미터 적용)
   const int limit = std::min<int>(a.truncated_path.poses.size(), max_poses_);
   for (int i = 0; i < limit; ++i) {
     auto ps = a.truncated_path.poses[i].pose;
-    // (선택) 경로가 대각선일 때 찌그러짐을 방지하기 위해, 각도를 로봇 본체와 맞춰줌
     ps.orientation = a.current_pose.pose.orientation;
 
-    // [기능 3] 선형적인 코스트 감소(Linear Cost Decay)
-    // i가 0이면 path_base_cost_, i가 limit-1이면 path_end_cost_에 도달함
+    // 선형적인 코스트 감소(Linear Cost Decay)
     double ratio = (limit > 1) ? static_cast<double>(i) / (limit - 1) : 0.0;
     int decayed_cost_int = path_base_cost_ - static_cast<int>((path_base_cost_ - path_end_cost_) * ratio);
     
-    // 0~255 안전 클램핑
     unsigned char decay_cost = static_cast<unsigned char>(std::clamp(decayed_cost_int, 0, 255));
 
-    // 코스트가 0(Free) 이하로 떨어졌다면 그릴 필요 없으므로 최적화를 위해 건너뜀
     if (decay_cost == 0) continue;
 
-    // [기능 2] 경로에는 path_dilation_m_ 값을 팽창/수축값으로 고정 사용하여 그리기
     fillFootprintAt(fp, ps, path_dilation_m_, 0.0, grid, decay_cost, &meta_hits);
   }
 }
@@ -601,6 +604,9 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
                              int /*min_i*/, int /*min_j*/, int /*max_i*/, int /*max_j*/)
 {
   if (!enabled_) return;
+
+  // [NEW] 파라미터 변경 race 방지
+  std::lock_guard<std::mutex> param_lock(param_mtx_);
 
   {
       std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(viz_costmap_.getMutex()));
@@ -640,14 +646,14 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
   }
 
   if (publish_meta_ && meta_pub_) {
-    multi_agent_msgs::msg::AgentLayerMetaArray arr;
+    robot_interfaces::msg::AgentLayerMetaArray arr;
     arr.header.frame_id = layered_costmap_->getGlobalFrameID();
     arr.header.stamp = node_shared_->now();
 
     for (size_t k = 0; k < meta_hits.size(); k += std::max(1, meta_stride_)) {
       auto [mx, my] = meta_hits[k];
       double wx, wy; master_grid.mapToWorld(mx, my, wx, wy);
-      multi_agent_msgs::msg::AgentLayerCellMeta cm;
+      robot_interfaces::msg::AgentLayerCellMeta cm;
       cm.header = arr.header;
       cm.machine_id = 0;
       cm.position.x = wx; cm.position.y = wy; cm.position.z = 0.0;
@@ -656,6 +662,120 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
     }
     meta_pub_->publish(std::move(arr));
   }
+}
+
+// ========================================================================
+// [NEW] Dynamic parameter callback 구현
+// ========================================================================
+rcl_interfaces::msg::SetParametersResult
+AgentLayer::dynamicParametersCallback(std::vector<rclcpp::Parameter> parameters)
+{
+  rcl_interfaces::msg::SetParametersResult result;
+  result.successful = true;
+
+  // updateBounds / updateCosts 와의 race 방지
+  std::lock_guard<std::mutex> lock(param_mtx_);
+
+  for (const auto & param : parameters) {
+    const auto & full_name = param.get_name();
+    const auto type = param.get_type();
+
+    // 우리 layer 의 파라미터만 처리 (이름 prefix 확인: "<name_>.")
+    const std::string prefix = name_ + ".";
+    if (full_name.rfind(prefix, 0) != 0) {
+      continue;  // 다른 layer/노드 파라미터는 패스
+    }
+    const std::string key = full_name.substr(prefix.size());
+
+    try {
+      if (type == rclcpp::ParameterType::PARAMETER_BOOL) {
+        if (key == "enabled") {
+          enabled_ = param.as_bool();
+          current_ = false;  // 다음 cycle에서 재계산 트리거
+        } else if (key == "use_path_header_frame") {
+          use_path_header_frame_ = param.as_bool();
+        } else if (key == "publish_meta") {
+          publish_meta_ = param.as_bool();
+        } else if (key == "qos_reliable") {
+          // QoS는 subscription 재생성이 필요하므로 경고만
+          RCLCPP_WARN(logger_,
+            "qos_reliable is set, but it requires re-activation to take effect.");
+          qos_reliable_ = param.as_bool();
+        } else if (key == "ignore_higher_machine_id_path") {
+          ignore_higher_machine_id_path_ = param.as_bool();
+        }
+      }
+      else if (type == rclcpp::ParameterType::PARAMETER_DOUBLE) {
+        if (key == "roi_range_m") {
+          if (param.as_double() < 0.0) {
+            result.successful = false;
+            result.reason = "roi_range_m must be >= 0";
+            return result;
+          }
+          roi_range_m_ = param.as_double();
+        } else if (key == "time_decay_sec") {
+          time_decay_sec_ = param.as_double();
+        } else if (key == "dilation_m") {
+          dilation_m_ = param.as_double();
+        } else if (key == "forward_smear_m") {
+          forward_smear_m_ = std::max(0.0, param.as_double());
+        } else if (key == "sigma_k") {
+          sigma_k_ = param.as_double();
+        } else if (key == "path_dilation_m") {
+          path_dilation_m_ = param.as_double();
+        }
+      }
+      else if (type == rclcpp::ParameterType::PARAMETER_INTEGER) {
+        const int v = static_cast<int>(param.as_int());
+
+        if (key == "self_machine_id") {
+          if (v < 0 || v > 65535) {
+            result.successful = false;
+            result.reason = "self_machine_id out of uint16 range";
+            return result;
+          }
+          self_machine_id_ = static_cast<uint16_t>(v);
+        } else if (key == "lethal_cost") {
+          lethal_cost_ = static_cast<unsigned char>(std::clamp(v, 0, 254));
+        } else if (key == "moving_cost") {
+          moving_cost_ = static_cast<unsigned char>(std::clamp(v, 0, 254));
+        } else if (key == "waiting_cost") {
+          waiting_cost_ = static_cast<unsigned char>(std::clamp(v, 0, 254));
+        } else if (key == "manual_cost_bias") {
+          manual_cost_bias_ = v;
+        } else if (key == "path_base_cost") {
+          path_base_cost_ = std::clamp(v, 0, 254);
+        } else if (key == "path_end_cost") {
+          path_end_cost_ = std::clamp(v, 0, 254);
+        } else if (key == "meta_stride") {
+          meta_stride_ = std::max(1, v);
+        } else if (key == "freshness_timeout_ms") {
+          freshness_timeout_ms_ = std::max(0, v);
+        } else if (key == "max_poses") {
+          max_poses_ = std::max(0, v);
+        }
+      }
+      else if (type == rclcpp::ParameterType::PARAMETER_STRING) {
+        if (key == "self_type_id") {
+          self_type_id_ = param.as_string();
+        } else if (key == "topic") {
+          // topic도 subscription 재생성이 필요
+          RCLCPP_WARN(logger_,
+            "topic change requires re-activation to take effect.");
+          topic_ = param.as_string();
+        }
+      }
+
+      RCLCPP_INFO(logger_, "[AgentLayer] Param updated: %s", full_name.c_str());
+    }
+    catch (const std::exception & e) {
+      result.successful = false;
+      result.reason = std::string("Exception while setting param: ") + e.what();
+      return result;
+    }
+  }
+
+  return result;
 }
 
 } // namespace multi_agent_nav2

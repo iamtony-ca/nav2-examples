@@ -133,6 +133,9 @@ private:
 
   bool ignore_higher_machine_id_path_{true};
 
+  double load_rear_smear_m_{0.4};   // [NEW] LOADING/UNLOADING 시 rear 확장량
+
+
   // TF 시간차 캐시
   std::vector<robot_interfaces::msg::MultiAgentInfo> transformed_agents_;
 
@@ -168,6 +171,7 @@ private:
                        const geometry_msgs::msg::Pose & pose,
                        double extra_dilation_m,
                        double forward_len_m,
+                       double rear_len_m,                  // [NEW]
                        nav2_costmap_2d::Costmap2D * grid,
                        unsigned char cost,
                        std::vector<std::pair<unsigned int,unsigned int>> * meta_hits = nullptr);
@@ -177,6 +181,9 @@ private:
 
   double computeDilation(const robot_interfaces::msg::MultiAgentInfo & a) const;
 
+  double computeRearSmear(const robot_interfaces::msg::MultiAgentInfo & a) const;
+
+
   unsigned char computeCost(const robot_interfaces::msg::MultiAgentInfo & a) const;
 
   static inline bool isMovingPhase(uint8_t phase)
@@ -184,6 +191,15 @@ private:
     using S = robot_interfaces::msg::AgentStatus;
     return phase == S::STATUS_MOVING || phase == S::STATUS_PATH_SEARCHING;
   }
+
+  inline bool inRoi(double wx, double wy) const
+  {
+    const double dx = wx - cached_robot_x_;
+    const double dy = wy - cached_robot_y_;
+    return std::hypot(dx, dy) <= roi_range_m_;
+  }
+
+
 };
 
 } // namespace multi_agent_nav2
