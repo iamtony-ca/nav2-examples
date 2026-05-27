@@ -27,7 +27,7 @@ Uint8TopicPublisherAction::Uint8TopicPublisherAction(
   rclcpp::QoS qos_profile(10);
   qos_profile.reliable();
 
-  publisher = node_->create_publisher<std_msgs::msg::UInt8>(topic_name, qos_profile);
+  publisher_ = node_->create_publisher<std_msgs::msg::UInt8>(topic_name, qos_profile);
 
   RCLCPP_INFO(
     node_->get_logger(),
