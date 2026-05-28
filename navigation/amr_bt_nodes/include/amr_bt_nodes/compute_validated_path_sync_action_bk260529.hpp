@@ -43,10 +43,6 @@ private:
   bool isPoseWithinDeviation(const geometry_msgs::msg::Point & p, const nav_msgs::msg::Path & ref_path, double max_dev);
   double pointToLineSegmentDistance(const geometry_msgs::msg::Point & p, const geometry_msgs::msg::Point & a, const geometry_msgs::msg::Point & b);
 
-  std::string count_key_; // 블랙보드에서 쓸 변수 이름 캐싱용
-  int max_403_retries_;          // 허용되는 최대 403 횟수
-
-
   // private 멤버에 추가
   rclcpp::Time start_time_;
   rclcpp::Node::SharedPtr node_;

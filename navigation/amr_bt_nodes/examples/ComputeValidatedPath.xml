@@ -15,3 +15,92 @@
                 static_error_code_id="{static_compute_error}"
                 dynamic_error_code_id="{compute_path_error_code}"
                 validation_error_code_id="{validation_error_code}" />
+
+
+
+<ComputeValidatedPathSyncAction 
+    global_goals="{goals}" 
+    current_pose="{current_pose}"
+    static_planner_server="/static_nav/compute_path_through_poses"
+    dynamic_planner_server="compute_path_through_poses"
+    static_planner_id="StaticGridBased"
+    dynamic_planner_id="{selected_planner}"
+    horizon_distance="10.0"
+    max_deviation="1.0"
+    step_distance="0.2"
+    max_check_length="20.0"
+    
+    // [핵심 추가] 수동 조작용 카운터 방 분리 및 3회 지정
+    count_key="manual_403_count"
+    max_403_retries="3"
+    
+    validated_path="{path}"
+    static_path="{reference_path}"
+    static_error_code_id="{static_compute_error}"
+    dynamic_error_code_id="{compute_path_error_code}"
+    validation_error_code_id="{validation_error_code}" />
+
+
+
+
+        <Sequence name="PlannerEscalate">
+            <Precondition if="validation_error_code == 405" else="SUCCESS">
+              <LogTextAction message="[ALERT!!!] 403 Detour Error occurred 5 times during replanning ping-pong! Still attempting recovery..." interval_s="0.0" />
+            </Precondition>
+
+            <LogTextAction name="PlannerCriticalLog"
+              message="[CRITICAL] Planner unrecoverable error: {compute_path_error_code}. Triggering recovery." />
+            <ErrorCodePublisherAction name="PubPlannerError" topic_name="/bt_error_code"
+              error_code="{compute_path_error_code}" node="{node}" />
+            <ErrorCodePublisherAction name="PubFollowError" topic_name="/bt_error_code"
+              error_code="{follow_path_error_code}" node="{node}" />
+
+            <Wait name="CooldownBeforeRecovery" wait_duration="0.5" />              
+            <AlwaysFailure name="ForceFailure_Planner" />
+          </Sequence>    
+
+
+
+
+
+
+                        <Sequence name="PlannerEscalate_pause">
+                          <Precondition if="validation_error_code == 405" else="SUCCESS">
+                            <LogTextAction message="[MANUAL ALERT] Manual goal removal failed to find a valid path 3 times in a row within deviation!" interval_s="0.0" />
+                          </Precondition>
+
+                          <LogTextAction name="PlannerCriticalLog"
+                            message="[CRITICAL] Planner unrecoverable error: {compute_path_error_code}. Triggering recovery." />
+                          <Wait name="CooldownBeforeRecovery" wait_duration="0.2" />              
+                        </Sequence>          
+
+
+
+
+        <RunNTimesDecorator num_ticks="1" name="Initilizing...">
+          <Sequence>
+            <Sequence name="InitSequence">
+              <LogTextAction name="InitLog" message="Initializing..." interval_s="0.0" />
+              <ForceSuccess>
+                 <SubTree name="ClearPairInit" ID="ClearCostmapsPairSubtree" _autoremap="true" />
+              </ForceSuccess>  
+              
+              <!-- 기존 청소 포트들 -->
+              <UnsetBlackboard name="Unset_path" key="path" />
+              <UnsetBlackboard name="Unset_pruned_path" key="pruned_path" />
+              <UnsetBlackboard name="Unset_compute_path_error_code" key="compute_path_error_code" />
+              <UnsetBlackboard name="Unset_follow_path_error_code" key="follow_path_error_code" />
+              <UnsetBlackboard name="Unset_obstructed_goals" key="obstructed_goals" />
+              <UnsetBlackboard name="Unset_unoccupied_goals" key="unoccupied_goals" />
+              
+              <!-- ★ [핵심 추가] 기존에 누적되어 있던 403 에러 스택을 완전히 세탁 -->
+              <UnsetBlackboard name="Unset_drive_403_count" key="drive_403_count" />
+              <UnsetBlackboard name="Unset_manual_403_count" key="manual_403_count" />
+              
+              <!-- Defensive clear for any leftover private temps from prior runs -->
+              <UnsetBlackboard name="Unset_priv_truncated_short" key="truncated_short_path" />
+              <UnsetBlackboard name="Unset_priv_few_goals" key="few_goals" />
+              <UnsetBlackboard name="Unset_priv_alt_path" key="alt_path" />
+              <UnsetBlackboard name="Unset_priv_short_path" key="short_path" />
+              <UnsetBlackboard name="Unset_priv_alt_goal" key="alt_goal" />
+            </Sequence>                        

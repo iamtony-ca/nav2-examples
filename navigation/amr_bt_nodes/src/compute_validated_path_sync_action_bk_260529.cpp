@@ -14,8 +14,7 @@ ComputeValidatedPathSyncAction::ComputeValidatedPathSyncAction(
   static_done_(false),
   dynamic_done_(false),
   static_error_code_(0),
-  dynamic_error_code_(0),
-  max_403_retries_(3)
+  dynamic_error_code_(0)
 {
 }
 
@@ -66,9 +65,6 @@ BT::PortsList ComputeValidatedPathSyncAction::providedPorts()
     BT::InputPort<double>("max_deviation", 2.0, "Max allowed deviation (m)"),
     BT::InputPort<double>("step_distance", 0.3, "Distance interval to check deviation (m)"),
     BT::InputPort<double>("max_check_length", 20.0, "Max accumulated length to check (m)"),
-    BT::InputPort<std::string>("count_key", "consecutive_403_count", "Blackboard key for 403 failure counter"),
-    BT::InputPort<int>("max_403_retries", 5, "Number of consecutive 403 errors before triggering alert"), 
-
     BT::OutputPort<nav_msgs::msg::Path>("validated_path", "Final validated path for controller"),
     BT::OutputPort<nav_msgs::msg::Path>("static_path", "Reference path from static planner (for debug/viz)"),
     BT::OutputPort<uint16_t>("static_error_code_id", "Error code from static planner"),
@@ -102,8 +98,7 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onStart()
   getInput("max_deviation", max_dev_);
   getInput("step_distance", step_dist_);
   getInput("max_check_length", max_check_length_);
-  getInput("count_key", count_key_);
-  getInput("max_403_retries", max_403_retries_);
+
   int target_idx = -1;
   const auto & robot_pos = current_pose.pose.position;
   
@@ -248,48 +243,17 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
 
     case PlanningState::VALIDATING:
     {
-      // 블랙보드에서 현재 누적된 403 에러 횟수 읽어오기 (없으면 0으로 시작)
-      int current_failures = 0;
-      config().blackboard->get(count_key_, current_failures);
-
       if (performValidation()) {
-        // [성공 시] 누가 성공했든 간에 공유 카운터를 0으로 완벽히 리셋!
-        // [기존 코드] 자신에게 할당된 방만 초기화함
-        // config().blackboard->set(count_key_, 0); 
-
-        // [변경 핵심] 어떤 노드가 성공했든 간에, 주행용/수동용 403 카운터를 통째로 전면 리셋!
-        config().blackboard->set("drive_403_count", 0);
-        config().blackboard->set("manual_403_count", 0);  
-        
         setOutput("validated_path", actual_path_); 
         setOutput("validation_error_code_id", static_cast<uint16_t>(0));
         RCLCPP_DEBUG(logger_, "[ComputeValidatedPathSyncAction] Step 3: Path validation passed.");
         current_state_ = PlanningState::IDLE;
         return BT::NodeStatus::SUCCESS;
-
       } else {
-        // ==============================================================
-        // 플래닝 및 편차 검증 실패 시 (기존 로직 100% 동일 유지)
-        // ==============================================================        
         RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Step 3: Detour deviation > %.2f detected!", max_dev_);
-        
-        
         nav_msgs::msg::Path empty_path;
         setOutput("validated_path", empty_path);
         setOutput("validation_error_code_id", static_cast<uint16_t>(403)); // Validation Failure - Detour
-        
-        // [실패 시] 공유 카운터 1 증가
-        current_failures++;
-        // 임계치 도달 여부 검사
-        if (current_failures >= max_403_retries_) {
-          RCLCPP_ERROR(logger_, "[ComputeValidatedPathSyncAction] Max 403 retries exceeded! Emitting error 405.");
-          setOutput("validation_error_code_id", static_cast<uint16_t>(405));
-          config().blackboard->set(count_key_, 0); // 알람 나갔으므로 리셋
-        } else {
-          setOutput("validation_error_code_id", static_cast<uint16_t>(403)); 
-          config().blackboard->set(count_key_, current_failures); // 증가된 값 블랙보드에 저장
-        }
-
         current_state_ = PlanningState::IDLE;
         return BT::NodeStatus::FAILURE;
       }
@@ -311,7 +275,6 @@ void ComputeValidatedPathSyncAction::onHalted()
   RCLCPP_INFO(logger_, "[ComputeValidatedPathSyncAction] Node halted. Action goals cancelled.");
 }
 
-
 bool ComputeValidatedPathSyncAction::performValidation()
 {
   if (actual_path_.poses.empty() || static_path_.poses.empty()) {
@@ -326,7 +289,6 @@ bool ComputeValidatedPathSyncAction::performValidation()
   getInput("current_pose", current_pose);
   auto start_pos = current_pose.pose.position; 
 
-  // 1. 정적 경로(trunc_ref)를 로봇 위치 기준 10m 지점에서 절삭
   truncatePathByEuclidean(trunc_ref, start_pos, horizon_);
 
   if (trunc_ref.poses.empty()) {
@@ -334,28 +296,26 @@ bool ComputeValidatedPathSyncAction::performValidation()
     return false;
   }
 
-  // 2. 잘려나간 정적 경로의 최종 끝점(Target) 확보
   auto target_pos = trunc_ref.poses.back().pose.position; 
+  size_t closest_idx = 0;
+  double min_dist = 1e9;
 
-  // [교정 핵심] 기존의 정방향 하드코딩 루프를 지우고, 
-  // 이미 완벽하게 구현해 두신 역방향 타겟 추적 함수(truncatePathToGoal)를 호출하여 동기화합니다.
-  truncatePathToGoal(trunc_actual, target_pos);
-
-  if (trunc_actual.poses.empty()) {
-    RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Dynamic path sync failed. Path is empty after truncation.");
-    return false;
+  for (size_t i = 0; i < trunc_actual.poses.size(); ++i) {
+    double dist = std::hypot(trunc_actual.poses[i].pose.position.x - target_pos.x,
+                             trunc_actual.poses[i].pose.position.y - target_pos.y);
+    if (dist < min_dist) { 
+      min_dist = dist; 
+      closest_idx = i; 
+    }
   }
-
-  // 3. 도달 검증 (Fail-fast): 뒤에서 자른 실제 경로의 끝점이 정적 끝점과 허용 범위 내에 있는지 검사
-  auto dynamic_end_pos = trunc_actual.poses.back().pose.position;
-  double min_dist = std::hypot(dynamic_end_pos.x - target_pos.x, dynamic_end_pos.y - target_pos.y);
 
   if (min_dist > max_dev_) {
     RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Dynamic path failed to reach the static path's end point. Min dist: %.2f > Max Dev: %.2f", min_dist, max_dev_);
     return false; 
   }
 
-  // 4. 본격적인 선분 기반 촘촘한 편차 검사 수행
+  trunc_actual.poses.resize(closest_idx + 1);
+
   double accumulated_length = 0.0;          
   double dist_since_last = 0.0;       
   auto prev_pos = trunc_actual.poses.front().pose.position;
@@ -382,76 +342,6 @@ bool ComputeValidatedPathSyncAction::performValidation()
 
   return true; 
 }
-
-
-
-// bool ComputeValidatedPathSyncAction::performValidation()
-// {
-//   if (actual_path_.poses.empty() || static_path_.poses.empty()) {
-//     RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] One of the planners returned an empty path.");
-//     return false;
-//   }
-
-//   nav_msgs::msg::Path trunc_ref = static_path_;
-//   nav_msgs::msg::Path trunc_actual = actual_path_;
-  
-//   geometry_msgs::msg::PoseStamped current_pose;
-//   getInput("current_pose", current_pose);
-//   auto start_pos = current_pose.pose.position; 
-
-//   truncatePathByEuclidean(trunc_ref, start_pos, horizon_);
-
-//   if (trunc_ref.poses.empty()) {
-//     RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Truncated reference path is empty.");
-//     return false;
-//   }
-
-//   auto target_pos = trunc_ref.poses.back().pose.position; 
-//   size_t closest_idx = 0;
-//   double min_dist = 1e9;
-
-//   for (size_t i = 0; i < trunc_actual.poses.size(); ++i) {
-//     double dist = std::hypot(trunc_actual.poses[i].pose.position.x - target_pos.x,
-//                              trunc_actual.poses[i].pose.position.y - target_pos.y);
-//     if (dist < min_dist) { 
-//       min_dist = dist; 
-//       closest_idx = i; 
-//     }
-//   }
-
-//   if (min_dist > max_dev_) {
-//     RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Dynamic path failed to reach the static path's end point. Min dist: %.2f > Max Dev: %.2f", min_dist, max_dev_);
-//     return false; 
-//   }
-
-//   trunc_actual.poses.resize(closest_idx + 1);
-
-//   double accumulated_length = 0.0;          
-//   double dist_since_last = 0.0;       
-//   auto prev_pos = trunc_actual.poses.front().pose.position;
-
-//   if (!isPoseWithinDeviation(prev_pos, trunc_ref, max_dev_)) return false;
-
-//   for (size_t i = 1; i < trunc_actual.poses.size(); ++i) {
-//     const auto & curr_pos = trunc_actual.poses[i].pose.position;
-//     double step = std::hypot(curr_pos.x - prev_pos.x, curr_pos.y - prev_pos.y);
-//     accumulated_length += step;
-//     dist_since_last += step;
-
-//     if (accumulated_length > max_check_length_) break;
-
-//     if (dist_since_last >= step_dist_ || i == trunc_actual.poses.size() - 1) {
-//       if (!isPoseWithinDeviation(curr_pos, trunc_ref, max_dev_)) {
-//         RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Detour detected at dist %.2f. Deviation exceeds %.2f", accumulated_length, max_dev_);
-//         return false; 
-//       }
-//       dist_since_last = 0.0;
-//     }
-//     prev_pos = curr_pos; 
-//   }
-
-//   return true; 
-// }
 
 // [수정 포인트 3] 10m 안으로 들어오는 최초 지점을 찾아 '그 뒷부분'을 잘라냄
 void ComputeValidatedPathSyncAction::truncatePathByEuclidean(nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & start, double dist_limit) {
