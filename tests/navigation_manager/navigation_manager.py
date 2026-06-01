@@ -37,8 +37,8 @@ from nav2_msgs.srv import ClearEntireCostmap
 # Path 메시지 임포트
 from nav_msgs.msg import Path
 
-from robot_interfaces.msg import NavigationCommand
-from robot_interfaces.msg import NavigationMonitoring
+from navigation_command_msgs.msg import NavigationCommand
+from navigation_monitoring_msgs.msg import NavigationMonitoring
 
 # [주의] 커스텀 메시지 패키지 경로
 from robot_interfaces.msg import PathAgentCollisionInfo, PathStaticCollisionInfo
@@ -287,6 +287,7 @@ class NavigationManager(Node):
 
     def _move_callback(self, msg: NavigationCommand) -> None:
         self.get_logger().info('move_callback')
+        self._stop_in_flight = False
 
         self.clear_both_costmaps()
 
