@@ -220,7 +220,7 @@ class NavigationManager(Node):
                 self._nav2_monitoring_data.ros_nav_obstacle_detected = False
 
             self.get_logger().info(
-                f"{int(self._controller_pause_flag)}/{int(self._path_agent_collision)}/{int(self._path_static_collision)}",
+                f"int(self._controller_pause_flag)/int(self._path_agent_collision)/int(self._path_static_collision): {int(self._controller_pause_flag)}/{int(self._path_agent_collision)}/{int(self._path_static_collision)}",
                 throttle_duration_sec=1.0
             )
             snapshot = copy.deepcopy(self._nav2_monitoring_data)
@@ -381,6 +381,11 @@ class NavigationManager(Node):
             else:
                 elapsed_total = (self.get_clock().now() - loop_start_time).nanoseconds / 1e9
                 
+                if elapsed_total > 3.0:
+                    self.get_logger().warn(
+                            f'waiting time: {elapsed_total:.2f} / {MAX_WAIT_TIMEOUT} sec bcs goals are occupied!', 
+                            throttle_duration_sec=5.0)
+
                 # 타임아웃 체크
                 if elapsed_total > MAX_WAIT_TIMEOUT:
                     self.get_logger().error(f'Timeout ({MAX_WAIT_TIMEOUT}s) reached! Clearing goals and publishing IDLE for {TIMEOUT_PUB_N_SEC}s.')
@@ -628,32 +633,64 @@ class NavigationManager(Node):
 
 
 
-    def clear_both_costmaps(self):
+    def _call_clear_costmap(self, client, name: str) -> bool:
+        """단일 costmap clear 서비스를 호출하고 응답까지 안전하게 대기."""
+        req = ClearEntireCostmap.Request()
+        future = client.call_async(req)
+
+        # 다른 콜백 그룹(_srv_cb_group)의 스레드가 응답을 처리하므로
+        # 여기서는 spin 없이 Event 로 대기 가능.
+        done_event = threading.Event()
+        future.add_done_callback(lambda _f: done_event.set())
+
+        if not done_event.wait(timeout=5.0):
+            self.get_logger().error(f'Timed out clearing {name} costmap.')
+            return False
+
+        if future.exception() is not None:
+            self.get_logger().error(
+                f'Failed to clear {name} costmap: {future.exception()}')
+            return False
+
+        # ClearEntireCostmap.Response 는 빈 메시지지만, 성공 시 None 이 아님.
+        self.get_logger().info(f'Successfully cleared {name} costmap.')
+        return True
+
+
+    def clear_both_costmaps(self) -> None:
         """두 Costmap을 모두 초기화합니다."""
         if not self.wait_for_services():
             return
+        self._call_clear_costmap(self.client_local, 'local')
+        self._call_clear_costmap(self.client_global, 'global')
 
-        req = ClearEntireCostmap.Request()
 
-        # Local Costmap 초기화 요청
-        future_local = self.client_local.call_async(req)
-        # rclpy.spin_until_future_complete(self, future_local)  <-- 삭제
-        result_local = future_local.result()  # <-- 추가: MultiThread 환경에서 안전한 블로킹 대기
+    # def clear_both_costmaps(self):
+    #     """두 Costmap을 모두 초기화합니다."""
+    #     if not self.wait_for_services():
+    #         return
+
+    #     req = ClearEntireCostmap.Request()
+
+    #     # Local Costmap 초기화 요청
+    #     future_local = self.client_local.call_async(req)
+    #     # rclpy.spin_until_future_complete(self, future_local)  <-- 삭제
+    #     result_local = future_local.result()  # <-- 추가: MultiThread 환경에서 안전한 블로킹 대기
         
-        if result_local is not None:
-            self.get_logger().info('Successfully cleared Local Costmap.')
-        else:
-            self.get_logger().error('Failed to clear Local Costmap.')
+    #     if result_local is not None:
+    #         self.get_logger().info('Successfully cleared Local Costmap.')
+    #     else:
+    #         self.get_logger().error('Failed to clear Local Costmap.')
 
-        # Global Costmap 초기화 요청
-        future_global = self.client_global.call_async(req)
-        # rclpy.spin_until_future_complete(self, future_global) <-- 삭제
-        result_global = future_global.result() # <-- 추가
+    #     # Global Costmap 초기화 요청
+    #     future_global = self.client_global.call_async(req)
+    #     # rclpy.spin_until_future_complete(self, future_global) <-- 삭제
+    #     result_global = future_global.result() # <-- 추가
         
-        if result_global is not None:
-            self.get_logger().info('Successfully cleared Global Costmap.')
-        else:
-            self.get_logger().error('Failed to clear Global Costmap.')
+    #     if result_global is not None:
+    #         self.get_logger().info('Successfully cleared Global Costmap.')
+    #     else:
+    #         self.get_logger().error('Failed to clear Global Costmap.')
 
 
 # ---------------------------------------------------------------------- #
