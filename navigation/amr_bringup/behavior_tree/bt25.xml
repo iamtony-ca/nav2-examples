@@ -112,7 +112,7 @@
                 static_planner_id="StaticGridBased"
                 dynamic_planner_id="{selected_planner}"
                 horizon_distance="10.0"
-                max_deviation="1.0"
+                max_deviation="1.6"
                 step_distance="0.2"
                 max_check_length="20.0"
                 
@@ -151,7 +151,7 @@
                 <LogTextAction message="[ALERT!!!] 403 Detour Error occurred N times during replanning ping-pong! Still attempting recovery..." interval_s="0.0" />
                 <Uint8TopicPublisherAction
                     topic_name="/stop_command"
-                    value="1"
+                    value="2"
                     num_publishes="1"
                     node="{node}" />
               </Sequence>
@@ -209,7 +209,7 @@
                 static_planner_id="StaticGridBased"
                 dynamic_planner_id="{selected_planner}"
                 horizon_distance="10.0"
-                max_deviation="1.0"
+                max_deviation="1.6"
                 step_distance="0.2"
                 max_check_length="20.0"
                 
@@ -237,7 +237,7 @@
                 <LogTextAction message="[ALERT!!!] 403 Detour Error occurred N times during replanning ping-pong! Still attempting recovery..." interval_s="0.0" />
                 <Uint8TopicPublisherAction
                     topic_name="/stop_command"
-                    value="1"
+                    value="2"
                     num_publishes="1"
                     node="{node}" />
               </Sequence>
@@ -294,7 +294,7 @@
                 static_planner_id="StaticGridBased"
                 dynamic_planner_id="{selected_planner}"
                 horizon_distance="10.0"
-                max_deviation="1.0"
+                max_deviation="1.6"
                 step_distance="0.2"
                 max_check_length="20.0"
                 
@@ -322,7 +322,7 @@
                 <LogTextAction message="[ALERT!!!] 403 Detour Error occurred N times during replanning ping-pong! Still attempting recovery..." interval_s="0.0" />
                 <Uint8TopicPublisherAction
                     topic_name="/stop_command"
-                    value="1"
+                    value="2"
                     num_publishes="1"
                     node="{node}" />
               </Sequence>
@@ -442,7 +442,7 @@
                               static_planner_id="StaticGridBased"
                               dynamic_planner_id="{selected_planner}"
                               horizon_distance="10.0"
-                              max_deviation="1.0"
+                              max_deviation="1.6"
                               step_distance="0.2"
                               max_check_length="20.0"
                               
@@ -474,7 +474,7 @@
                               <LogTextAction message="[ALERT!!!] 403 Detour Error occurred N times during replanning ping-pong! Still attempting recovery..." interval_s="0.0" />
                               <Uint8TopicPublisherAction
                                   topic_name="/stop_command"
-                                  value="1"
+                                  value="2"
                                   num_publishes="1"
                                   node="{node}" />
                             </Sequence>
@@ -515,7 +515,7 @@
                               static_planner_id="StaticGridBased"
                               dynamic_planner_id="{selected_planner}"
                               horizon_distance="10.0"
-                              max_deviation="1.0"
+                              max_deviation="1.6"
                               step_distance="0.2"
                               max_check_length="20.0"
                               
@@ -547,7 +547,7 @@
                               <LogTextAction message="[ALERT!!!] 403 Detour Error occurred N times during replanning ping-pong! Still attempting recovery..." interval_s="0.0" />
                               <Uint8TopicPublisherAction
                                   topic_name="/stop_command"
-                                  value="1"
+                                  value="2"
                                   num_publishes="1"
                                   node="{node}" />
                             </Sequence>
