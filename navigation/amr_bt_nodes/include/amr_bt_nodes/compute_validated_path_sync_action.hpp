@@ -43,6 +43,11 @@ private:
   bool isPoseWithinDeviation(const geometry_msgs::msg::Point & p, const nav_msgs::msg::Path & ref_path, double max_dev);
   double pointToLineSegmentDistance(const geometry_msgs::msg::Point & p, const geometry_msgs::msg::Point & a, const geometry_msgs::msg::Point & b);
 
+  void publishDebugPath(
+    const rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr & pub,
+    const nav_msgs::msg::Path & path,
+    const std::string & fallback_frame = "map");
+
   std::string count_key_; // 블랙보드에서 쓸 변수 이름 캐싱용
   int max_403_retries_;          // 허용되는 최대 403 횟수
 
@@ -62,6 +67,11 @@ private:
   GoalHandle::SharedPtr static_goal_handle_;
   GoalHandle::SharedPtr dynamic_goal_handle_;
 
+
+  // [디버그] 검증에 실제로 쓰인 절삭 경로 시각화용 퍼블리셔
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr trunc_ref_pub_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr trunc_actual_pub_;
+
   std::mutex mutex_;
   std::atomic<bool> static_done_;
   std::atomic<bool> dynamic_done_;
@@ -72,6 +82,9 @@ private:
   nav_msgs::msg::Path static_path_;
   nav_msgs::msg::Path actual_path_;
   std::vector<geometry_msgs::msg::PoseStamped> local_goals_;
+
+
+
 
   double horizon_;
   double max_dev_;
