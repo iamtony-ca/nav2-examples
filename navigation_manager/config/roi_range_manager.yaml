@@ -1,0 +1,3 @@
+roi_range_manager_node:
+  ros__parameters:
+    target_node: "/global_costmap/global_costmap"
