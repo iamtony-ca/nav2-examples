@@ -188,7 +188,7 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onStart()
 BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
 {
   if ((node_->now() - start_time_).seconds() > 20.0) {
-    RCLCPP_ERROR(logger_, "[ComputeValidatedPathSyncAction] Planning Timeout! Exceeded 10s.");
+    RCLCPP_ERROR(logger_, "[ComputeValidatedPathSyncAction] Planning Timeout! Exceeded 20s.");
     onHalted(); 
     setOutput("validation_error_code_id", static_cast<uint16_t>(404)); // Timeout
     RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Planner Timeout. validation_error_code_id : 404");
@@ -237,11 +237,21 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
       send_opts_dynamic.goal_response_callback = [this](auto handle) { dynamic_goal_handle_ = handle; };
       send_opts_dynamic.result_callback = [this](const GoalHandle::WrappedResult & result) {
         std::lock_guard<std::mutex> lock(mutex_);
+        RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction][dyn cb] code=%d err=%u msg='%s' poses=%zu",
+          (int)result.code,
+          result.result ? result.result->error_code : 9999,
+          result.result ? result.result->error_msg.c_str() : "null",
+          result.result ? result.result->path.poses.size() : 0);
+
+
+
         if (result.code == rclcpp_action::ResultCode::SUCCEEDED) {
           actual_path_ = result.result->path;
           dynamic_error_code_ = 0;
+          RCLCPP_INFO(logger_, "[ComputeValidatedPathSyncAction] (result.code == rclcpp_action::ResultCode::SUCCEEDED)");
         } else {
           dynamic_error_code_ = result.result ? result.result->error_code : 308; 
+          RCLCPP_INFO(logger_, "[ComputeValidatedPathSyncAction] (result.code != rclcpp_action::ResultCode::SUCCEEDED)");
         }
         dynamic_done_ = true;
       };
@@ -295,6 +305,16 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
         return BT::NodeStatus::SUCCESS;
 
       } else {
+
+        if (flag_path_empty == true) {
+          nav_msgs::msg::Path empty_path;
+          setOutput("validated_path", empty_path);
+          setOutput("validation_error_code_id", static_cast<uint16_t>(406));
+          RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] empty path. validation_error_code_id : 406");
+          return BT::NodeStatus::FAILURE;
+        }
+
+
         // ==============================================================
         // 플래닝 및 편차 검증 실패 시 (기존 로직 100% 동일 유지)
         // ==============================================================        
@@ -349,13 +369,13 @@ bool ComputeValidatedPathSyncAction::performValidation()
     RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] One of the planners returned an empty path.");
     RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction][Validate] empty path: static=%zu, actual=%zu",
        static_path_.poses.size(), actual_path_.poses.size());
-    setOutput("validation_error_code_id", static_cast<uint16_t>(406));   
+    // setOutput("validation_error_code_id", static_cast<uint16_t>(406));   
     RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] empty path. validation_error_code_id : 406");
-
-    
+    flag_path_empty = true;
     return false;
   }
 
+  flag_path_empty = false;
   nav_msgs::msg::Path trunc_ref = static_path_;
   nav_msgs::msg::Path trunc_actual = actual_path_;
   
@@ -426,6 +446,74 @@ bool ComputeValidatedPathSyncAction::performValidation()
 }
 
 
+
+// bool ComputeValidatedPathSyncAction::performValidation()
+// {
+//   if (actual_path_.poses.empty() || static_path_.poses.empty()) {
+//     RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] One of the planners returned an empty path.");
+//     return false;
+//   }
+
+//   nav_msgs::msg::Path trunc_ref = static_path_;
+//   nav_msgs::msg::Path trunc_actual = actual_path_;
+  
+//   geometry_msgs::msg::PoseStamped current_pose;
+//   getInput("current_pose", current_pose);
+//   auto start_pos = current_pose.pose.position; 
+
+//   truncatePathByEuclidean(trunc_ref, start_pos, horizon_);
+
+//   if (trunc_ref.poses.empty()) {
+//     RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Truncated reference path is empty.");
+//     return false;
+//   }
+
+//   auto target_pos = trunc_ref.poses.back().pose.position; 
+//   size_t closest_idx = 0;
+//   double min_dist = 1e9;
+
+//   for (size_t i = 0; i < trunc_actual.poses.size(); ++i) {
+//     double dist = std::hypot(trunc_actual.poses[i].pose.position.x - target_pos.x,
+//                              trunc_actual.poses[i].pose.position.y - target_pos.y);
+//     if (dist < min_dist) { 
+//       min_dist = dist; 
+//       closest_idx = i; 
+//     }
+//   }
+
+//   if (min_dist > max_dev_) {
+//     RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Dynamic path failed to reach the static path's end point. Min dist: %.2f > Max Dev: %.2f", min_dist, max_dev_);
+//     return false; 
+//   }
+
+//   trunc_actual.poses.resize(closest_idx + 1);
+
+//   double accumulated_length = 0.0;          
+//   double dist_since_last = 0.0;       
+//   auto prev_pos = trunc_actual.poses.front().pose.position;
+
+//   if (!isPoseWithinDeviation(prev_pos, trunc_ref, max_dev_)) return false;
+
+//   for (size_t i = 1; i < trunc_actual.poses.size(); ++i) {
+//     const auto & curr_pos = trunc_actual.poses[i].pose.position;
+//     double step = std::hypot(curr_pos.x - prev_pos.x, curr_pos.y - prev_pos.y);
+//     accumulated_length += step;
+//     dist_since_last += step;
+
+//     if (accumulated_length > max_check_length_) break;
+
+//     if (dist_since_last >= step_dist_ || i == trunc_actual.poses.size() - 1) {
+//       if (!isPoseWithinDeviation(curr_pos, trunc_ref, max_dev_)) {
+//         RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Detour detected at dist %.2f. Deviation exceeds %.2f", accumulated_length, max_dev_);
+//         return false; 
+//       }
+//       dist_since_last = 0.0;
+//     }
+//     prev_pos = curr_pos; 
+//   }
+
+//   return true; 
+// }
 
 
 
