@@ -11,7 +11,7 @@ class LidarRegionMonitor(Node):
         super().__init__('lidar_region_monitor')
         
         # 파라미터 선언 (런타임에 모니터링할 좌표와 토픽 변경 가능)
-        self.declare_parameter('topic_name', '/scan_matched_points2')  # 실제 사용하는 토픽명으로 변경
+        self.declare_parameter('topic_name', '/scan')  # 실제 사용하는 토픽명으로 변경
         self.declare_parameter('target_x', 3.8854)                # 확인할 map 기준 x 좌표
         self.declare_parameter('target_y', -6.7145)                # 확인할 map 기준 y 좌표
         self.declare_parameter('tolerance', 0.3)               # 검색 반경 (m)
