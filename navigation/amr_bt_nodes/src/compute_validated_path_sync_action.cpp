@@ -352,8 +352,8 @@ bool ComputeValidatedPathSyncAction::performValidation()
     setOutput("validation_error_code_id", static_cast<uint16_t>(406));   
     RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] empty path. validation_error_code_id : 406");
 
-    return BT::NodeStatus::FAILURE;
-    // return false;
+    
+    return false;
   }
 
   nav_msgs::msg::Path trunc_ref = static_path_;
