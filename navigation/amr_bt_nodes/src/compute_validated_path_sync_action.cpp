@@ -48,6 +48,21 @@ bool ComputeValidatedPathSyncAction::initialize()
     return false; 
   }
 
+
+  std::string ref_viz_topic = "/validation/trunc_ref";
+  std::string actual_viz_topic = "/validation/trunc_actual";
+  getInput("debug_ref_topic", ref_viz_topic);
+  getInput("debug_actual_topic", actual_viz_topic);
+
+  // 기존 PathPublisherAction과 동일하게 depth-1(reliable, volatile).
+  // RViz가 늦게 붙어도 마지막 경로를 보고 싶으면 rclcpp::QoS(1).transient_local() 로 교체.
+  trunc_ref_pub_    = node_->create_publisher<nav_msgs::msg::Path>(ref_viz_topic, 1);
+  trunc_actual_pub_ = node_->create_publisher<nav_msgs::msg::Path>(actual_viz_topic, 1);
+
+  RCLCPP_INFO(logger_, "[ComputeValidatedPathSyncAction] Debug path viz on '%s', '%s'.",
+    ref_viz_topic.c_str(), actual_viz_topic.c_str());
+
+
   initialized_ = true;
   RCLCPP_INFO(logger_, "[ComputeValidatedPathSyncAction] Initialized successfully. Connected to action servers.");
   return true;
@@ -69,6 +84,12 @@ BT::PortsList ComputeValidatedPathSyncAction::providedPorts()
     BT::InputPort<std::string>("count_key", "consecutive_403_count", "Blackboard key for 403 failure counter"),
     BT::InputPort<int>("max_403_retries", 5, "Number of consecutive 403 errors before triggering alert"), 
 
+    BT::InputPort<std::string>("debug_ref_topic", "/validation/trunc_ref",
+      "Debug: truncated reference(static) path used in validation"),
+    BT::InputPort<std::string>("debug_actual_topic", "/validation/trunc_actual",
+      "Debug: truncated actual(dynamic) path used in validation"),
+
+
     BT::OutputPort<nav_msgs::msg::Path>("validated_path", "Final validated path for controller"),
     BT::OutputPort<nav_msgs::msg::Path>("static_path", "Reference path from static planner (for debug/viz)"),
     BT::OutputPort<uint16_t>("static_error_code_id", "Error code from static planner"),
@@ -82,6 +103,7 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onStart()
   if (!initialized_) {
     if (!initialize()) {
       setOutput("validation_error_code_id", static_cast<uint16_t>(404)); // Not Initialized
+      RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Not Initialized. validation_error_code_id : 404");
       return BT::NodeStatus::FAILURE; 
     }
   }
@@ -165,10 +187,11 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onStart()
 
 BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
 {
-  if ((node_->now() - start_time_).seconds() > 10.0) {
+  if ((node_->now() - start_time_).seconds() > 20.0) {
     RCLCPP_ERROR(logger_, "[ComputeValidatedPathSyncAction] Planning Timeout! Exceeded 10s.");
     onHalted(); 
     setOutput("validation_error_code_id", static_cast<uint16_t>(404)); // Timeout
+    RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Planner Timeout. validation_error_code_id : 404");
     return BT::NodeStatus::FAILURE;
   }
   
@@ -190,11 +213,13 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
         setOutput("static_path", nav_msgs::msg::Path());
       }
 
-      if (static_error_code_ != 0) {
+      // if (static_error_code_ != 0) {
+      if (static_error_code_ != 0 || static_path_.poses.empty()) {
         RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Static planner failed (Err: %d). Aborting.", static_error_code_.load());
         nav_msgs::msg::Path empty_path;
         setOutput("validated_path", empty_path);
         setOutput("validation_error_code_id", static_cast<uint16_t>(401)); // Static Planner Failure
+        RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Static Planner Failure. validation_error_code_id : 401");
         return BT::NodeStatus::FAILURE;
       }
 
@@ -234,11 +259,13 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
 
       setOutput("dynamic_error_code_id", static_cast<uint16_t>(dynamic_error_code_.load()));
 
-      if (dynamic_error_code_ != 0) {
+      // if (dynamic_error_code_ != 0) {
+      if (dynamic_error_code_ != 0 || actual_path_.poses.empty()) {
         RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Dynamic planner failed (Err: %d).", dynamic_error_code_.load());
         nav_msgs::msg::Path empty_path;
         setOutput("validated_path", empty_path);
         setOutput("validation_error_code_id", static_cast<uint16_t>(402)); // Dynamic Planner Failure
+        RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Dynamic Planner Failure. validation_error_code_id : 402");
         return BT::NodeStatus::FAILURE;
       }
 
@@ -285,10 +312,14 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
           RCLCPP_ERROR(logger_, "[ComputeValidatedPathSyncAction] Max 403 retries exceeded! Emitting error 405.");
           setOutput("validation_error_code_id", static_cast<uint16_t>(405));
           config().blackboard->set(count_key_, 0); // 알람 나갔으므로 리셋
+          
         } else {
           setOutput("validation_error_code_id", static_cast<uint16_t>(403)); 
           config().blackboard->set(count_key_, current_failures); // 증가된 값 블랙보드에 저장
+          RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Planner Validation Failure(Detour). validation_error_code_id : 403, Count %d", current_failures);
         }
+
+
 
         current_state_ = PlanningState::IDLE;
         return BT::NodeStatus::FAILURE;
@@ -316,7 +347,13 @@ bool ComputeValidatedPathSyncAction::performValidation()
 {
   if (actual_path_.poses.empty() || static_path_.poses.empty()) {
     RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] One of the planners returned an empty path.");
-    return false;
+    RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction][Validate] empty path: static=%zu, actual=%zu",
+       static_path_.poses.size(), actual_path_.poses.size());
+    setOutput("validation_error_code_id", static_cast<uint16_t>(406));   
+    RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] empty path. validation_error_code_id : 406");
+
+    return BT::NodeStatus::FAILURE;
+    // return false;
   }
 
   nav_msgs::msg::Path trunc_ref = static_path_;
@@ -334,6 +371,9 @@ bool ComputeValidatedPathSyncAction::performValidation()
     return false;
   }
 
+  publishDebugPath(trunc_ref_pub_, trunc_ref); // publishDebugPath(trunc_ref_pub_, trunc_ref, start_pos_frame_or_map(current_pose));
+
+
   // 2. 잘려나간 정적 경로의 최종 끝점(Target) 확보
   auto target_pos = trunc_ref.poses.back().pose.position; 
 
@@ -345,6 +385,8 @@ bool ComputeValidatedPathSyncAction::performValidation()
     RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction] Dynamic path sync failed. Path is empty after truncation.");
     return false;
   }
+
+  publishDebugPath(trunc_actual_pub_, trunc_actual);
 
   // 3. 도달 검증 (Fail-fast): 뒤에서 자른 실제 경로의 끝점이 정적 끝점과 허용 범위 내에 있는지 검사
   auto dynamic_end_pos = trunc_actual.poses.back().pose.position;
@@ -452,6 +494,25 @@ bool ComputeValidatedPathSyncAction::performValidation()
 
 //   return true; 
 // }
+
+
+
+void ComputeValidatedPathSyncAction::publishDebugPath(
+  const rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr & pub,
+  const nav_msgs::msg::Path & path,
+  const std::string & fallback_frame)
+{
+  if (!pub) {
+    return;
+  }
+  nav_msgs::msg::Path msg = path;  // header(frame_id) + poses 복사
+  if (msg.header.frame_id.empty()) {
+    msg.header.frame_id = fallback_frame;
+  }
+  msg.header.stamp = node_->now();  // RViz 표시 신선도용
+  pub->publish(msg);
+}
+
 
 // [수정 포인트 3] 10m 안으로 들어오는 최초 지점을 찾아 '그 뒷부분'을 잘라냄
 void ComputeValidatedPathSyncAction::truncatePathByEuclidean(nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & start, double dist_limit) {
