@@ -35,6 +35,10 @@ class RoiRangeManagerNode(Node):
         'CANCELED': 3.0,
     }
 
+    # footprint_padding 을 축소할 상태 (그 외 전부 normal)
+    RECOVERY_STATES = {'RECOVERY_RUNNING', 'RECOVERY_SUCCESS', 'RECOVERY_FAILURE'}
+
+
     def __init__(self) -> None:
         super().__init__('roi_range_manager_node')
 
@@ -46,6 +50,17 @@ class RoiRangeManagerNode(Node):
         self.target_node_ = self.get_parameter('target_node').value
         self.param_name_ = self.get_parameter('param_name').value
         status_topic = self.get_parameter('status_topic').value
+
+
+        # footprint_padding 토글용
+        self.declare_parameter('local_costmap_node', '/local_costmap/local_costmap')
+        self.declare_parameter('recovery_footprint_padding', 0.005)  # RECOVERY 시
+        self.declare_parameter('normal_footprint_padding', 0.01)     # 그 외
+
+        self.local_costmap_node_ = self.get_parameter('local_costmap_node').value
+        self.recovery_padding_ = self.get_parameter('recovery_footprint_padding').value
+        self.normal_padding_ = self.get_parameter('normal_footprint_padding').value
+
 
         # 같은 콜백 그룹에서 sub callback과 service call이 동시에 가능하도록
         # ReentrantCallbackGroup 사용 (MultiThreadedExecutor와 함께)
@@ -60,6 +75,14 @@ class RoiRangeManagerNode(Node):
             callback_group=self.cb_group_,
         )
 
+
+        # footprint_padding 용 SetParameters client (local_costmap, ROI와 별개 노드)
+        self.padding_cli_ = self.create_client(
+            SetParameters,
+            f'{self.local_costmap_node_}/set_parameters',
+            callback_group=self.cb_group_,
+        )
+
         # robot_status 구독
         self.sub_ = self.create_subscription(
             String,
@@ -71,16 +94,22 @@ class RoiRangeManagerNode(Node):
 
         # 같은 값 중복 set 방지를 위한 캐시
         self.last_value_: float | None = None
+        self.last_padding_: float | None = None
 
         self.get_logger().info(
             f'RoiRangeSetter started. '
-            f'target={self.target_node_}, param={self.param_name_}, '
-            f'topic={status_topic}'
+            f'target={self.target_node_}, param={self.param_name_}, topic={status_topic} | '
+            f'padding_node={self.local_costmap_node_}, '
+            f'recovery_padding={self.recovery_padding_}, normal_padding={self.normal_padding_}'
         )
 
     def status_callback(self, msg: String) -> None:
         """robot_status 메시지 수신 시 호출."""
         status = msg.data.strip()
+
+
+        # --- footprint_padding 은 모든 상태에서 평가 (ROI 필터보다 먼저) ---
+        self.update_footprint_padding(status)
 
         if status not in self.STATUS_TO_ROI:
             # 매핑되지 않는 상태는 무시 (필요시 다른 정책으로 변경)
@@ -95,6 +124,69 @@ class RoiRangeManagerNode(Node):
             return
 
         self.set_roi_range(target_value, status)
+
+
+    def update_footprint_padding(self, status: str) -> None:
+        target = self.recovery_padding_ if status in self.RECOVERY_STATES \
+            else self.normal_padding_
+
+        if self.last_padding_ is not None and \
+                abs(self.last_padding_ - target) < 1e-9:
+            return
+
+        self.last_padding_ = target          # <-- 낙관적 갱신: 호출 직전에 미리 캐시
+        self.set_local_padding(target, status)
+
+
+
+    def set_local_padding(self, value: float, reason: str) -> None:
+        if not self.padding_cli_.wait_for_service(timeout_sec=1.0):
+            self.get_logger().warn('local_costmap set_parameters not available yet.')
+            return
+
+        param = Parameter(
+            name='footprint_padding',     # local_costmap 의 top-level param
+            type_=Parameter.Type.DOUBLE,
+            value=float(value),
+        )
+        request = SetParameters.Request()
+        request.parameters = [param.to_parameter_msg()]
+
+        future = self.padding_cli_.call_async(request)
+        future.add_done_callback(
+            lambda f: self._on_padding_done(f, value, reason)
+        )
+
+
+    def _on_padding_done(self, future, value: float, reason: str) -> None:
+        try:
+            response = future.result()
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().error(f'footprint_padding set failed: {e}')
+            self.last_padding_ = None        # 실패 → 캐시 무효화 (재시도 허용)
+            return
+
+        if response.results and response.results[0].successful:
+            self.get_logger().info(f'[{reason}] footprint_padding -> {value:.3f}')
+        else:
+            txt = response.results[0].reason if response.results else 'empty response'
+            self.get_logger().error(f'Failed to set footprint_padding: {txt}')
+            self.last_padding_ = None        # 실패 → 캐시 무효화
+
+    # def _on_padding_done(self, future, value: float, reason: str) -> None:
+    #     try:
+    #         response = future.result()
+    #     except Exception as e:  # noqa: BLE001
+    #         self.get_logger().error(f'footprint_padding set failed: {e}')
+    #         return
+
+    #     if response.results and response.results[0].successful:
+    #         self.last_padding_ = value
+    #         self.get_logger().info(f'[{reason}] footprint_padding -> {value:.3f}')
+    #     else:
+    #         txt = response.results[0].reason if response.results else 'empty response'
+    #         self.get_logger().error(f'Failed to set footprint_padding: {txt}')
+
 
     def set_roi_range(self, value: float, reason: str) -> None:
         """SetParameters 서비스 호출."""
