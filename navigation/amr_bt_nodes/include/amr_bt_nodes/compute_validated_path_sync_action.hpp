@@ -51,6 +51,7 @@ private:
   std::string count_key_; // 블랙보드에서 쓸 변수 이름 캐싱용
   int max_403_retries_;          // 허용되는 최대 403 횟수
 
+  std::atomic<uint64_t> cycle_id_{0};   // 콜백을 사이클에 묶기 위한 토큰
 
   // private 멤버에 추가
   rclcpp::Time start_time_;
