@@ -1,44 +1,107 @@
+
 path_validator_node:
   ros__parameters:
     self_machine_id: 1
-    
-    # Frames
-    global_frame: "map"
+
+    # --- 좌표계 / TF ---
+    global_frame: "map" #"map"
     base_frame: "base_link"
 
-    # Event pulse / cooldown
-    cooldown_sec: 0.2 #1.0         ## replan_flag/충돌 감지 후 다음 감지까지 최소 대기 시간
-    publish_false_pulse: false #true
-    flag_pulse_ms: 120
 
-    # Obstacle persistence & thresholds
-    obstacle_persistence_sec: 0.5
-    cost_threshold: 200.0         # 보수적으로 높게 시작 (inflated 영역 기준)
+    kernel_half_size: 1  #2 ## footprint방식이면 안쓰는 파라미터
+    consecutive_threshold: 2 #4 #2 #3           # 연속 차단 포인트 개수 임계값
+    # --- 검사 방식 전환(포인트 vs 로봇 footprint) ---
+    use_footprint_check: true         # true면 footprint 방식, false면 점방식
+    footprint_step_m: 0.15 #0.25 #0.15             # footprint 방식에서 경로 샘플 간격(m)
 
-    # Detection ROI / DB
-    max_speed: 0.5
-    lookahead_time_sec: 15.0
-    min_lookahead_m: 2.0
-    db_update_frequency: 5.0      # Hz
-    obstacle_prune_timeout_sec: 3.0
-    db_stride: 2                  # 1이면 모든 셀 검사, 2 이상이면 샘플링
-    cone_angle_deg: 100.0         # 전방 부채꼴 각도
-    kernel_half_size: 1           # 1 => 3x3 커널로 블록 검사
-    ignore_unknown: true          # Unknown(255) 제외 (권장)
 
-    # Path validation
-    consecutive_threshold: 3      # 연속 K 포인트 이상 차단되면 리플랜
-    path_check_distance_m: 6.0    # 경로 검사 상한 거리(가까운 구간만)
+    # --- 리플랜 트리거 일반 조건 ---
+    cooldown_sec: 1.0                 # 리플랜 트리거 쿨다운(초)
+    obstacle_persistence_sec: 1.5 #0.5      # 차단 셀의 지속 시간 요구치(초) 즉, 해당 시간동안 plan 위에 감지되어야 비로소 replan.
+    max_speed: 0.5                     # 로봇 속도 상한(lookahead 계산용)
+    lookahead_time_sec: 15.0           # 속도 기반 lookahead 시간(초)
+    min_lookahead_m: 0.8 #2.0               # lookahead 최소 거리(m)
+    cost_threshold: 254.0              # 마스터 코스트맵 차단 임계(권장: 200~254)
+    ignore_unknown: true               # NO_INFORMATION(255) 무시 여부
 
-    # Typical sim param
-    use_sim_time: false
+    # --- 차단 후보 DB(ROI 스캔) ---
+    db_update_frequency: 5.0           # DB 갱신 주기(Hz)
+    obstacle_prune_timeout_sec: 3.0    # DB에서 관측 끊긴 셀 제거 시간(초)
+    db_stride: 1 #2                       # ROI 스캔 격자 스텝(1=전셀, 2=샘플링)
+    cone_angle_deg: 170.0 # 100.0              # 전방 부채꼴 각도(도)
 
+
+    # --- 경로 검사 범위 ---
+    path_check_distance_m: 8.0 #6.0         # 경로 따라 검사하는 최대 거리(m)
+
+    # --- 리플랜 플래그 퍼블리시 ---
+    publish_false_pulse: false #true          # true 펄스 후 false로 클리어할지  testing..
+    flag_pulse_ms: 120                 # false 펄스 지연(ms)
+
+
+
+    # --- 에이전트 마스크(AgentLayer 코스트맵) 비교 ---
+    compare_agent_mask: true
+    agent_mask_topic: "/global_costmap/agent_layer/raw_costmap_raw"  # AgentLayer가 퍼블리시하는 마스크 토픽
+    agent_cost_threshold: 254.0 # 254.0        # 에이전트 마스크에서 차단으로 간주하는 임계
+    agent_mask_manhattan_buffer: 5 #200 #100 # 5 #200 #100 #1     # 맨해튼 반경(셀) 내에 마스크가 있으면 히트로 간주
+
+
+    # --- 충돌 메타 퍼블리시(커스텀 메시지) ---
+    publish_agent_collision: true
+    agent_collision_topic: "/path_agent_collision_info"
+
+
+    # --- MultiAgentInfoArray 연동(가해자 식별용) ---
+    agents_topic: "/multi_agent_infos" # MultiAgentInfoArray 토픽
+    agents_freshness_timeout_ms: 800   # 최신 에이전트 정보 허용 지연(ms)
+    agent_match_dilate_m: 0.001 #0.15 #2.0 # 1.0 # 0.15 #0.05         # 가해자 매칭 시 footprint 소확장(m)
+
+
+
+    # --- Nav2 footprint/radius (둘 중 하나만 실사용) ---
+    # footprint 가 유효한 다각형 문자열이면 그것을 사용,
+    # 아니면 robot_radius 를 원형 발자국으로 사용
+    footprint: "[[0.30,0.30],[0.30,-0.30],[-0.30,-0.30],[-0.30,0.30]]"      
+    # robot_radius: 0.30                 # footprint 미지정 시 사용되는 반지름(m)    
+
+
+    # 에이전트 홀드
+    agent_block_hold_sec: 2.0
+    agent_block_max_wait_sec: 8.0
+
+    # === NEW: 에이전트 경로 튜브 매칭 ===
+    agent_path_hit_enable: true
+    agent_path_hit_stride_m: 0.25   # 0.35 
+    agent_path_hit_dilate_m: 0.001 #0.02 
+    agent_path_hit_max_poses: 99999
 
 # [NEW] 나보다 ID가 작은(우선순위가 높은) 에이전트의 경로 튜브도 무조건 반영할지 여부
     # true: 모든 에이전트의 경로 튜브 반영 (기존 방식)
     # false: 나보다 ID가 큰 에이전트의 경로 튜브만 반영
     respect_higher_priority_path: false
 
+
     validation_frequency_hz: 5.0 # 5 Hz로 주기적 경로 검증 (충돌 감지 시 즉시 리플랜 신호 발행, false pulse 포함 여부는 publish_false_pulse에 따름)
+
     goal_doorstep_static_m: 0.1 # 목표 지점 주변의 정적 장애물 허용 반경 (미터 단위)
     goal_doorstep_agent_m: 0.05  # 목표 지점 주변의 에이전트 허용 반경 (미터 단위, 일반적으로 static보다 작게 설정)
+
+
+
+    robot_ids: ["robot_001"]
+
+    # 2. 각 로봇 ID를 네임스페이스(키)로 사용하여 상세 파라미터를 정의합니다.
+
+
+    # --- 로봇 1 (원형) ---
+    robot_001:
+      type_id: "TYPE_A_TURTLE"
+      machine_id: 11
+      # Nav2 등에서 footprint가 비어있으면 robot_radius를 사용합니다.
+      robot_radius: 0.0
+      # footprint를 문자열 "[]" 로 지정하거나 아예 생략합니다.
+      footprint: "[[0.3, 0.3], [0.3, -0.3], [-0.3, -0.3], [-0.3, 0.3]]"
+
+
+    
