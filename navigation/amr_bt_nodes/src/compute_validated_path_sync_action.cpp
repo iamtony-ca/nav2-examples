@@ -146,6 +146,10 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onStart()
     local_goals_ = global_goals;
   }
 
+
+// 새 사이클 시작: 이 시점 이후 도착하는 '이전 사이클' 콜백은 전부 무효화됨
+  const uint64_t my_cycle = ++cycle_id_;
+
   static_done_ = false;
   dynamic_done_ = false;
   static_error_code_ = 0;
@@ -163,17 +167,35 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onStart()
   static_goal_msg.use_start = false;
 
   auto send_opts_static = rclcpp_action::Client<ActionType>::SendGoalOptions();
-  send_opts_static.goal_response_callback = [this](auto handle) { static_goal_handle_ = handle; };
-  send_opts_static.result_callback = [this](const GoalHandle::WrappedResult & result) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (result.code == rclcpp_action::ResultCode::SUCCEEDED) {
-      static_path_ = result.result->path;
-      static_error_code_ = 0;
-    } else {
-      static_error_code_ = result.result ? result.result->error_code : 308;
-    }
-    static_done_ = true;
-  };
+  send_opts_static.goal_response_callback =
+    [this, my_cycle](auto handle) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (my_cycle != cycle_id_.load()) return;          // stale 폐기
+      static_goal_handle_ = handle;
+    };
+  send_opts_static.result_callback =
+    [this, my_cycle](const GoalHandle::WrappedResult & result) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (my_cycle != cycle_id_.load()) {                // stale 폐기
+        RCLCPP_WARN(logger_,
+          "[ComputeValidatedPathSyncAction][static cb] STALE (cb=%lu cur=%lu) ignored.",
+          (unsigned long)my_cycle, (unsigned long)cycle_id_.load());
+        return;
+      }
+      if (result.code == rclcpp_action::ResultCode::SUCCEEDED) {
+        static_path_ = result.result->path;
+        static_error_code_ = 0;
+      } else {
+        static_error_code_ = result.result ? result.result->error_code : 308;
+      }
+      static_done_ = true;
+    };
+
+
+
+
+
+
 
   start_time_ = node_->now();
   
@@ -233,34 +255,51 @@ BT::NodeStatus ComputeValidatedPathSyncAction::onRunning()
       dynamic_goal_msg.planner_id = dynamic_planner_id;
       dynamic_goal_msg.use_start = false;
 
+
+
+
+      const uint64_t my_cycle = cycle_id_.load();   // ← 추가
+
       auto send_opts_dynamic = rclcpp_action::Client<ActionType>::SendGoalOptions();
-      send_opts_dynamic.goal_response_callback = [this](auto handle) { dynamic_goal_handle_ = handle; };
-      send_opts_dynamic.result_callback = [this](const GoalHandle::WrappedResult & result) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        RCLCPP_WARN(logger_, "[ComputeValidatedPathSyncAction][dyn cb] code=%d err=%u msg='%s' poses=%zu",
-          (int)result.code,
-          result.result ? result.result->error_code : 9999,
-          result.result ? result.result->error_msg.c_str() : "null",
-          result.result ? result.result->path.poses.size() : 0);
+      send_opts_dynamic.goal_response_callback =
+        [this, my_cycle](auto handle) {
+          std::lock_guard<std::mutex> lock(mutex_);
+          if (my_cycle != cycle_id_.load()) return;       // stale 폐기
+          dynamic_goal_handle_ = handle;
+        };
+      send_opts_dynamic.result_callback =
+        [this, my_cycle](const GoalHandle::WrappedResult & result) {
+          std::lock_guard<std::mutex> lock(mutex_);
+          if (my_cycle != cycle_id_.load()) {             // ★ stale 폐기 (핵심)
+            RCLCPP_WARN(logger_,
+              "[ComputeValidatedPathSyncAction][dyn cb] STALE (cb=%lu cur=%lu) ignored. poses=%zu",
+              (unsigned long)my_cycle, (unsigned long)cycle_id_.load(),
+              result.result ? result.result->path.poses.size() : 0);
+            return;
+          }
+          RCLCPP_WARN(logger_,
+            "[ComputeValidatedPathSyncAction][dyn cb] cycle=%lu code=%d err=%u poses=%zu",
+            (unsigned long)my_cycle, (int)result.code,
+            result.result ? result.result->error_code : 9999,
+            result.result ? result.result->path.poses.size() : 0);
 
+          if (result.code == rclcpp_action::ResultCode::SUCCEEDED) {
+            actual_path_ = result.result->path;
+            dynamic_error_code_ = 0;
+          } else {
+            dynamic_error_code_ = result.result ? result.result->error_code : 308;
+          }
+          dynamic_done_ = true;
+        };
 
-
-        if (result.code == rclcpp_action::ResultCode::SUCCEEDED) {
-          actual_path_ = result.result->path;
-          dynamic_error_code_ = 0;
-          RCLCPP_INFO(logger_, "[ComputeValidatedPathSyncAction] (result.code == rclcpp_action::ResultCode::SUCCEEDED)");
-        } else {
-          dynamic_error_code_ = result.result ? result.result->error_code : 308; 
-          RCLCPP_INFO(logger_, "[ComputeValidatedPathSyncAction] (result.code != rclcpp_action::ResultCode::SUCCEEDED)");
-        }
-        dynamic_done_ = true;
-      };
-
-      RCLCPP_DEBUG(logger_, "[ComputeValidatedPathSyncAction] Step 2: Static done. Sending async goal to DYNAMIC planner.");
+      RCLCPP_DEBUG(logger_, "[ComputeValidatedPathSyncAction] Step 2: Sending async goal to DYNAMIC planner.");
       dynamic_client_->async_send_goal(dynamic_goal_msg, send_opts_dynamic);
-      
+
       current_state_ = PlanningState::WAITING_FOR_DYNAMIC;
       return BT::NodeStatus::RUNNING;
+
+
+
     }
 
     case PlanningState::WAITING_FOR_DYNAMIC:
@@ -359,7 +398,17 @@ void ComputeValidatedPathSyncAction::onHalted()
   if (!dynamic_done_ && dynamic_goal_handle_) {
     dynamic_client_->async_cancel_goal(dynamic_goal_handle_);
   }
-  RCLCPP_INFO(logger_, "[ComputeValidatedPathSyncAction] Node halted. Action goals cancelled.");
+
+  ++cycle_id_;                       // 이 사이클의 모든 콜백을 stale로 만들어 무효화
+  static_done_ = false;
+  dynamic_done_ = false;
+  static_goal_handle_.reset();
+  dynamic_goal_handle_.reset();
+  current_state_ = PlanningState::IDLE;
+
+  RCLCPP_INFO(logger_,
+    "[ComputeValidatedPathSyncAction] Node halted. cycle invalidated -> %lu",
+    (unsigned long)cycle_id_.load());
 }
 
 
