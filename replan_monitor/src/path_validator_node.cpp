@@ -29,7 +29,7 @@ std::vector<geometry_msgs::msg::Point32> PathValidatorNode::toPoint32(
 
 // [NEW] Implementation of helper to get footprint from loaded map
 std::vector<geometry_msgs::msg::Point32> 
-PathValidatorNode::getFootprintForAgent(const multi_agent_msgs::msg::MultiAgentInfo & a) const
+PathValidatorNode::getFootprintForAgent(const robot_interfaces::msg::MultiAgentInfo & a) const
 {
     auto it = agent_footprints_.find(a.machine_id);
     if (it == agent_footprints_.end()) {
@@ -293,7 +293,7 @@ PathValidatorNode::PathValidatorNode()
         subs_options);
   }
 
-  agents_sub_ = this->create_subscription<multi_agent_msgs::msg::MultiAgentInfoArray>(
+  agents_sub_ = this->create_subscription<robot_interfaces::msg::MultiAgentInfoArray>(
       agents_topic_,
       rclcpp::QoS(10).best_effort(),
       std::bind(&PathValidatorNode::agentsCallback, this, _1),
@@ -320,11 +320,11 @@ PathValidatorNode::PathValidatorNode()
 
   // ===== Publishers =====
   {
-    static_collision_pub_ = this->create_publisher<multi_agent_msgs::msg::PathStaticCollisionInfo>(
+    static_collision_pub_ = this->create_publisher<robot_interfaces::msg::PathStaticCollisionInfo>(
         "/path_static_collision_info", rclcpp::QoS(10).reliable());
   }
   if (publish_agent_collision_) {
-    agent_collision_pub_ = this->create_publisher<multi_agent_msgs::msg::PathAgentCollisionInfo>(
+    agent_collision_pub_ = this->create_publisher<robot_interfaces::msg::PathAgentCollisionInfo>(
         agent_collision_topic_, rclcpp::QoS(10).reliable());
   }
 
@@ -466,7 +466,7 @@ void PathValidatorNode::agentMaskCallback(const nav2_msgs::msg::Costmap::SharedP
 
 // ===================== Agents handling =====================
 
-void PathValidatorNode::agentsCallback(const multi_agent_msgs::msg::MultiAgentInfoArray::SharedPtr msg)
+void PathValidatorNode::agentsCallback(const robot_interfaces::msg::MultiAgentInfoArray::SharedPtr msg)
 {
   std::lock_guard<std::mutex> lock(agents_mutex_);
   last_agents_ = msg;
@@ -597,7 +597,7 @@ void PathValidatorNode::validatePathOptimized(const std::vector<geometry_msgs::m
 
   // [NEW: Phase 2] 로봇 다각형(Footprint)을 물리적으로 확장할 여유 패딩 (m)
   // 예: 0.02 ~ 0.05를 주면 실제 로봇보다 해당 수치만큼 부풀려진 크기로 충돌을 검사합니다.
-  const double phase2_footprint_padding_m = 0.0001; //0.02; 
+  const double phase2_footprint_padding_m = 0.01; // 0.0001; //0.02; 
 
   // =========================================================
 
@@ -923,7 +923,7 @@ std::vector<PathValidatorNode::AgentHit> PathValidatorNode::findNearestAgent(
   if (!last_agents_) return out;
 
   double min_dist_overall = 1e9;
-  const multi_agent_msgs::msg::MultiAgentInfo* true_owner = nullptr;
+  const robot_interfaces::msg::MultiAgentInfo* true_owner = nullptr;
 
   for (const auto & a : last_agents_->agents) {
     if (a.machine_id == self_machine_id_) continue;
@@ -1610,7 +1610,7 @@ double PathValidatorNode::speedAlong(const geometry_msgs::msg::Twist & tw, doubl
   return v * std::cos(heading_rad);
 }
 
-bool PathValidatorNode::pathTubeCoversPoint(const multi_agent_msgs::msg::MultiAgentInfo & a,
+bool PathValidatorNode::pathTubeCoversPoint(const robot_interfaces::msg::MultiAgentInfo & a,
                                             double wx, double wy,
                                             double stride_m, double dilate_m,
                                             int max_poses, double /*frame_yaw*/,
@@ -1792,7 +1792,7 @@ void PathValidatorNode::publishAgentCollisionList(const std::vector<AgentHit> & 
 {
   if (!publish_agent_collision_ || !agent_collision_pub_) return;
 
-  multi_agent_msgs::msg::PathAgentCollisionInfo msg;
+  robot_interfaces::msg::PathAgentCollisionInfo msg;
   msg.header.stamp = this->now();
   msg.header.frame_id = global_frame_;
 
@@ -1854,7 +1854,7 @@ void PathValidatorNode::publishAgentCollisionList(const std::vector<AgentHit> & 
 
     // 배타적 퍼블리시: 에이전트가 확실하므로 일반(Static) 장애물 토픽은 False로 pub.
   if (static_collision_pub_) {
-    multi_agent_msgs::msg::PathStaticCollisionInfo static_msg;
+    robot_interfaces::msg::PathStaticCollisionInfo static_msg;
     static_msg.header.stamp = this->now();
     static_msg.header.frame_id = global_frame_;
     static_msg.replan_request = false;
@@ -1884,7 +1884,7 @@ void PathValidatorNode::triggerReplan(const std::string & reason, bool is_goal_o
   // if ((now - last_replan_time_).seconds() <= cooldown_sec_) return;
   last_replan_time_ = now;
 
-  multi_agent_msgs::msg::PathStaticCollisionInfo m;
+  robot_interfaces::msg::PathStaticCollisionInfo m;
   m.header.stamp = this->now();
   m.header.frame_id = global_frame_;
   m.replan_request = true;
@@ -1910,17 +1910,21 @@ void PathValidatorNode::triggerReplan(const std::string & reason, bool is_goal_o
   publishAgentCollisionList({}, false, false, target_goal);
 
 // [LOG 추가] 배타적 퍼블리시가 정상적으로 호출되었음을 확인하기 위한 로깅
-  RCLCPP_INFO(this->get_logger(), 
-    "[StaticCollision] Mutually exclusive trigger: Sent agent_collision=CLEAR");
-    
+  // RCLCPP_INFO(this->get_logger(), 
+  //   "[StaticCollision] Mutually exclusive trigger: Sent agent_collision=CLEAR");
+
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+        "[StaticCollision] Mutually exclusive trigger: Sent agent_collision=CLEAR");    
+
+
   // if (publish_false_pulse_ && flag_pulse_ms_ > 0) {
   //   flag_reset_timer_.reset();
-  //   auto weak_pub = std::weak_ptr<rclcpp::Publisher<multi_agent_msgs::msg::PathStaticCollisionInfo>>(static_collision_pub_);
+  //   auto weak_pub = std::weak_ptr<rclcpp::Publisher<robot_interfaces::msg::PathStaticCollisionInfo>>(static_collision_pub_);
   //   flag_reset_timer_ = this->create_wall_timer(
   //       std::chrono::milliseconds(flag_pulse_ms_),
   //       [weak_pub]() {
   //         if (auto pub = weak_pub.lock()) {
-  //           multi_agent_msgs::msg::PathStaticCollisionInfo off;
+  //           robot_interfaces::msg::PathStaticCollisionInfo off;
   //           off.replan_request = false;
   //           off.is_goal_occupied = false;
   //           off.is_last_goal_occupied = false;
@@ -1933,7 +1937,7 @@ void PathValidatorNode::triggerReplan(const std::string & reason, bool is_goal_o
 // [NEW] 아무 장애물도, 에이전트도 없을 때 호출
 void PathValidatorNode::publishSafeStatus()
 {
-multi_agent_msgs::msg::PathStaticCollisionInfo m;
+robot_interfaces::msg::PathStaticCollisionInfo m;
   m.header.stamp = this->now();
   m.header.frame_id = global_frame_;
   m.replan_request = false;
