@@ -54,8 +54,8 @@ class RoiRangeManagerNode(Node):
 
         # footprint_padding 토글용
         self.declare_parameter('local_costmap_node', '/local_costmap/local_costmap')
-        self.declare_parameter('recovery_footprint_padding', 0.005)  # RECOVERY 시
-        self.declare_parameter('normal_footprint_padding', 0.01)     # 그 외
+        self.declare_parameter('recovery_footprint_padding', 0.0)  # RECOVERY 시
+        self.declare_parameter('normal_footprint_padding', 0.001)     # 그 외
 
         self.local_costmap_node_ = self.get_parameter('local_costmap_node').value
         self.recovery_padding_ = self.get_parameter('recovery_footprint_padding').value
