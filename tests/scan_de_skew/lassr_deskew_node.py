@@ -19,7 +19,7 @@ from tf2_ros.transform_listener import TransformListener
 
 
 def quat_rotate(q, v):
-    """쿼터니언 q(x,y,z,w)로 벡터 v를 회전. q는 (4,) 또는 (N,4), v는 (N,3)."""
+    """쿼터니언 q(x,y,z,w)로 벡터 v 회전. q는 (4,) 또는 (N,4), v는 (N,3)."""
     q = np.asarray(q, dtype=np.float64)
     v = np.asarray(v, dtype=np.float64)
     qv = q[..., :3]
@@ -33,11 +33,11 @@ def slerp(q0, q1, t):
     q0 = q0 / np.linalg.norm(q0)
     q1 = q1 / np.linalg.norm(q1)
     dot = float(np.dot(q0, q1))
-    if dot < 0.0:          # 최단 경로 보장
+    if dot < 0.0:
         q1 = -q1
         dot = -dot
     t = np.asarray(t, dtype=np.float64)
-    if dot > 0.9995:       # 거의 평행하면 선형 보간 + 정규화
+    if dot > 0.9995:
         res = q0[None, :] + t[:, None] * (q1 - q0)[None, :]
         return res / np.linalg.norm(res, axis=1, keepdims=True)
     theta0 = math.acos(max(-1.0, min(1.0, dot)))
@@ -64,12 +64,14 @@ class LaserDeskewNode(Node):
         self.output_topic = self.declare_parameter(
             'output_topic', 'scan_deskewed').value
         self.stamp_at_end = self.declare_parameter('stamp_at_end', False).value
+        self.tf_timeout = self.declare_parameter('tf_timeout', 0.05).value
         self.min_range = self.declare_parameter('min_range', 0.0).value
         self.max_range = self.declare_parameter('max_range', 0.0).value  # <=0 → range_max
-        self.stride = self.declare_parameter('stride', 1).value          # 1 = 비활성
+        self.stride = self.declare_parameter('stride', 1).value
 
         self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
+        # 대기 중에도 버퍼가 채워지도록 리스너에 전용 스레드 부여
+        self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=True)
 
         self.pub = self.create_publisher(
             PointCloud2, self.output_topic, qos_profile_sensor_data)
@@ -90,29 +92,27 @@ class LaserDeskewNode(Node):
         if n < 2:
             return
 
-        # 1) 빔별 절대 시간 (LaserScan 규약상 stamp = 첫 빔 시각)
-        scan_dur = (scan.scan_time if scan.scan_time > 0.0
-                    else (scan.time_increment * (n - 1)
-                          if scan.time_increment > 0.0 else 0.0))
-        t_first = Time.from_msg(scan.header.stamp)
-        if self.stamp_at_end:
-            t_first = t_first - Duration(seconds=scan_dur)
-
+        # 1) 빔당 시간 / 스윕 창 (scan_time 이 아니라 실제 데이터 창!)
         dt = (scan.time_increment if scan.time_increment > 0.0
-              else (scan_dur / (n - 1) if scan_dur > 0.0 else 0.0))
+              else (scan.scan_time / (n - 1) if scan.scan_time > 0.0 else 0.0))
         if dt <= 0.0:
-            self.get_logger().warn(
-                'time_increment/scan_time 가 0 → 빔별 de-skew 불가. 드라이버 설정 확인.',
-                throttle_duration_sec=2.0)
+            self.get_logger().warn('빔 타이밍 없음 → de-skew 불가',
+                                   throttle_duration_sec=2.0)
             return
 
+        sweep = (n - 1) * dt
+        t_stamp = Time.from_msg(scan.header.stamp)
+        if self.stamp_at_end:          # stamp = 마지막 빔 → 첫 빔으로 이동
+            t_first = t_stamp - Duration(seconds=sweep)
+        else:
+            t_first = t_stamp          # 규약: stamp = 첫 빔
         t0 = t_first
-        t1 = t_first + Duration(seconds=(n - 1) * dt)
-        t_ref = t1  # 기준 = 스윕 끝 (출력 stamp)
+        t1 = t_first + Duration(seconds=sweep)
+        t_ref = t1
 
-        # 2) 양 끝점 TF 한 번씩만 조회 (odom <- laser)
+        # 2) 양 끝점 TF 조회 (odom <- laser)
         if not self.tf_buffer.can_transform(
-                self.odom_frame, laser_frame, t1, Duration(seconds=0.0)):
+                self.odom_frame, laser_frame, t1, Duration(seconds=self.tf_timeout)):
             self.get_logger().warn(
                 f'TF({self.odom_frame}<-{laser_frame})@t_end 미준비 → drop',
                 throttle_duration_sec=1.0)
@@ -126,7 +126,7 @@ class LaserDeskewNode(Node):
             self.get_logger().warn(f'TF 예외: {exc}', throttle_duration_sec=1.0)
             return
 
-        # 3) 거리 밴드 + 옵션 stride 로 유효 빔 추출 (alpha 는 원래 인덱스 기준)
+        # 3) 거리 밴드 + 옵션 stride (alpha 는 원래 인덱스 기준)
         ranges = np.asarray(scan.ranges, dtype=np.float64)
         angles = scan.angle_min + np.arange(n) * scan.angle_increment
         alphas = np.arange(n, dtype=np.float64) / (n - 1)
@@ -138,7 +138,7 @@ class LaserDeskewNode(Node):
         mask = (np.isfinite(ranges)
                 & (ranges >= eff_min)
                 & (ranges <= eff_max))
-        if self.stride > 1:                 # 각도 방향 다운샘플
+        if self.stride > 1:
             keep = np.zeros(n, dtype=bool)
             keep[::self.stride] = True
             mask &= keep
@@ -154,18 +154,17 @@ class LaserDeskewNode(Node):
         else:
             inten = np.zeros(r.size, dtype=np.float32)
 
-        # 4) 빔별 보간: T_i = (slerp(q0,q1), lerp(p0,p1)) — odom <- laser(t_i)
+        # 4) 빔별 보간 후 재투영
         p_laser = np.column_stack(
             [r * np.cos(a), r * np.sin(a), np.zeros_like(r)])
         q_i = slerp(q0, q1, alpha)
         trans_i = (1.0 - alpha)[:, None] * p0 + alpha[:, None] * p1
         p_odom = quat_rotate(q_i, p_laser) + trans_i
 
-        # 5) T_ref^-1 적용: p_out = R1^T (p_odom - p1) = quat_rotate(conj(q1), ...)
         q1_conj = np.array([-q1[0], -q1[1], -q1[2], q1[3]])
         p_out = quat_rotate(q1_conj, p_odom - p1)
 
-        # 6) PointCloud2 발행 (frame_id = 센서 프레임 유지!)
+        # 5) PointCloud2 발행 (frame_id = 센서 프레임 유지)
         header = Header()
         header.stamp = t_ref.to_msg()
         header.frame_id = laser_frame
