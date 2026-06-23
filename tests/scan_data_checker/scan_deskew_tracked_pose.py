@@ -181,24 +181,41 @@ class ScanTrackedPoseCorrector(Node):
         self.pending.append((t_ref.nanoseconds * 1e-9, p_base, inten))
 
     # ---- 보류 스캔을 tracked_pose 도착 시 map 으로 배치 ----
+
     def flush_pending(self):
         now = self.get_clock().now().nanoseconds * 1e-9
         keep = deque(maxlen=self.pending.maxlen)
         while self.pending:
             t_ref, p_base, inten = self.pending.popleft()
-            pose = self.lookup_pose(t_ref)
+            pose = self.lookup_pose(t_ref)          # 1순위: 보정 pose 버퍼
             if pose is None:
-                if now - t_ref > self.pose_wait:
-                    # 너무 오래 대기 → 포기(또는 최신 TF로 폴백 가능). 여기선 폐기.
-                    self.get_logger().warn('tracked_pose 미도착 → 폐기',
-                                           throttle_duration_sec=2.0)
+                if now - t_ref < self.pose_wait:
+                    keep.append((t_ref, p_base, inten))  # 아직 도착 가능 → 대기
                     continue
-                keep.append((t_ref, p_base, inten))  # 다음 틱 재시도
-                continue
+                # 2순위: 누락 확정 → 예측 TF 로 fallback (연속성 확보)
+                pose = self.lookup_tf_pose(t_ref)
+                if pose is None:
+                    continue
             p_map_base, q_map_base = pose
             p_map = quat_rotate(q_map_base, p_base) + p_map_base
             self.publish_cloud(p_map, inten, t_ref)
         self.pending = keep
+
+    def lookup_tf_pose(self, t_ref):
+        """누락 구간 fallback: map->base_link 예측 TF."""
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                self.map_frame, 'base_link',
+                Time(seconds=t_ref), Duration(seconds=0.02))
+        except TransformException:
+            return None
+        p = np.array([tf.transform.translation.x, tf.transform.translation.y,
+                      tf.transform.translation.z])
+        q = np.array([tf.transform.rotation.x, tf.transform.rotation.y,
+                      tf.transform.rotation.z, tf.transform.rotation.w])
+        return p, q
+
+    
 
     def publish_cloud(self, pts_xyz, inten, t_ref_sec):
         header = Header()
