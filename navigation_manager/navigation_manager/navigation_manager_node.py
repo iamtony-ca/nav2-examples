@@ -265,7 +265,7 @@ class NavigationManagerNode(Node):
     # Topic callbacks
     # ------------------------------------------------------------------ #
     def _stop_callback(self, msg: UInt8) -> None:
-        self.get_logger().info('stop_callback!')
+        self.get_logger().info(f'stop_callback!, cmd_seq_num: {msg.data}')
         self._nav2_monitoring_data.ros_nav_driving_abort = False
         with self._state_lock:
             # while 문 중단을 위한 플래그 설정
@@ -283,7 +283,7 @@ class NavigationManagerNode(Node):
             self._path_agent_collision = False                        ### testing...
 
         handle.cancel_goal_async()
-        self.get_logger().info('cancle goal, stop_callback')
+        self.get_logger().info(f'cancle goal, stop_callback')
 
     def _move_callback(self, msg: NavigationCommand) -> None:
         self.get_logger().info('move_callback')
@@ -328,6 +328,11 @@ class NavigationManagerNode(Node):
                 self._nav2_cmd_data.goal_poses.append(msg.goal_poses[i])
                 self._nav2_cmd_data.from_node_id.append(msg.from_node_id[i])
                 self._nav2_cmd_data.to_node_id.append(msg.to_node_id[i])
+
+            
+            self.get_logger().info(f'goal poses: {self._nav2_cmd_data.goal_poses}')
+
+
 
 
 
