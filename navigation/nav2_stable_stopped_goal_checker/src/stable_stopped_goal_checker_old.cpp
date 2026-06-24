@@ -67,7 +67,8 @@ StableStoppedGoalChecker::StableStoppedGoalChecker()
   stateful_(true),
   check_xy_(true),
   in_xy_tolerance_(false),
-  in_yaw_tolerance_(false)
+  in_yaw_tolerance_(false),
+  path_topic_("/plan_truncated_short") // 기본값
 {
 }
 
@@ -100,6 +101,10 @@ void StableStoppedGoalChecker::initialize(
   nav2_util::declare_parameter_if_not_declared(
     node, plugin_name + ".stateful", rclcpp::ParameterValue(true));
 
+// [추가] path_topic 파라미터 선언
+  nav2_util::declare_parameter_if_not_declared(
+    node, plugin_name + ".path_topic", rclcpp::ParameterValue("/plan_truncated_short"));
+
   // Get parameters
   node->get_parameter(plugin_name + ".x_goal_tolerance", x_goal_tolerance_);
   node->get_parameter(plugin_name + ".y_goal_tolerance", y_goal_tolerance_);
@@ -109,6 +114,14 @@ void StableStoppedGoalChecker::initialize(
   node->get_parameter(plugin_name + ".xy_stability_duration", xy_stability_duration_);
   node->get_parameter(plugin_name + ".yaw_stability_duration", yaw_stability_duration_);
   node->get_parameter(plugin_name + ".stateful", stateful_);
+
+// [추가] Path Subscription 생성 (TransientLocal QoS 사용)
+  // rclcpp::QoS qos(rclcpp::KeepLast(1));
+  // qos.transient_local();
+  path_sub_ = node->create_subscription<nav_msgs::msg::Path>(
+    path_topic_, 10,
+    std::bind(&StableStoppedGoalChecker::pathCallback, this, _1));
+
 
   // Add callback for dynamic parameters
   dyn_params_handler_ = node->add_on_set_parameters_callback(
@@ -122,10 +135,44 @@ void StableStoppedGoalChecker::reset()
   in_yaw_tolerance_ = false;
 }
 
+// [추가] Path Callback 구현
+void StableStoppedGoalChecker::pathCallback(const nav_msgs::msg::Path::SharedPtr msg)
+{
+  std::lock_guard<std::mutex> lock(path_mutex_);
+  current_path_ = msg;
+}
+
 bool StableStoppedGoalChecker::isGoalReached(
   const geometry_msgs::msg::Pose & query_pose, const geometry_msgs::msg::Pose & goal_pose,
   const geometry_msgs::msg::Twist & velocity)
 {
+
+// [추가] Path Length Check
+  {
+    std::lock_guard<std::mutex> lock(path_mutex_);
+    if (current_path_) {
+      // nav2_util을 사용하여 경로 길이 계산
+      double total_distance = nav2_util::geometry_utils::calculate_path_length(*current_path_);
+      
+      // 남은 경로의 길이가 허용 오차의 2배보다 크면, 아직 도착하지 않은 것으로 간주
+      if (total_distance > 2.0 * x_goal_tolerance_) {
+        // 단, 이미 latch(XY 완료) 상태라면 거리 체크를 무시하고 Yaw 체크로 넘어갈 수 있도록
+        // 아래 로직이 필요할 수 있으나, 요구사항에 맞춰 "엄격하게" 리턴합니다.
+        // 만약 XY가 이미 맞았더라도 경로가 갑자기 길어지면(Replanning 등) 멈추지 않아야 합니다.
+        // 여기서는 요구사항대로 "if distance <= ... 일 때만 체크"를 역으로 적용하여
+        // "if distance > ... 이면 False 리턴"으로 구현합니다.
+        
+        // 주의: XY가 이미 맞아서 Latch된 상태(check_xy_ == false)에서도 
+        // 경로가 다시 길어졌다면(새로운 계획) 체크를 재개해야 하는지는 정책에 따릅니다.
+        // 여기서는 단순하게 적용합니다.
+        return false; 
+      }
+    }
+    // current_path_가 아직 없으면(nullptr), 안전을 위해 기존 로직을 수행하거나 false를 리턴할 수 있습니다.
+    // 여기서는 path가 없으면 거리 체크를 패스하고 기존 로직으로 넘어갑니다.
+  }
+
+
   // 1. Calculate Errors
   double dx = fabs(query_pose.position.x - goal_pose.position.x);
   double dy = fabs(query_pose.position.y - goal_pose.position.y);
