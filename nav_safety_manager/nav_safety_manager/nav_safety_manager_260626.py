@@ -26,21 +26,19 @@ class NavSafetyManagerNode(Node):
     def __init__(self):
         super().__init__('nav_safety_manager_node')
 
-        # 설정 변수 (N초, M초)
+        # --- declare ---
         self.declare_parameter('plc_false_duration_sec', 5.0)
         self.declare_parameter('collision_clear_duration_sec', 3.0)
         self.declare_parameter('target_polygon_name', 'PolygonSafety')
+        self.declare_parameter('verify_max_retry', 3)
+        self.declare_parameter('verify_settle_sec', 1.0)
         
-        # (추가) 검증/재시도 파라미터
-        self.declare_parameter('verify_max_retry', 3)      # N회 재시도
-        self.declare_parameter('verify_settle_sec', 1.0)   # range1 갱신 대기 시간
-        self.max_retry = self.get_parameter('verify_max_retry').value
-        self.verify_settle_sec = self.get_parameter('verify_settle_sec').value
-
-      
+        # --- get ---
         self.N_sec = self.get_parameter('plc_false_duration_sec').value
         self.M_sec = self.get_parameter('collision_clear_duration_sec').value
         self.target_polygon = self.get_parameter('target_polygon_name').value
+        self.max_retry = self.get_parameter('verify_max_retry').value
+        self.verify_settle_sec = self.get_parameter('verify_settle_sec').value
 
         # 동시성 처리를 위한 그룹
         self.cb_group = ReentrantCallbackGroup()
@@ -129,7 +127,14 @@ class NavSafetyManagerNode(Node):
         self.retry_count = 0
       
 
-        self.get_logger().info(f'Safety Node Started. PLC Wait: {self.N_sec}s, Col Clear: {self.M_sec}s')
+                # (변경) 선언된 파라미터 전체 로깅
+        self.get_logger().info('===== NavSafetyManagerNode Parameters =====')
+        self.get_logger().info(f'  plc_false_duration_sec      : {self.N_sec}s')
+        self.get_logger().info(f'  collision_clear_duration_sec: {self.M_sec}s')
+        self.get_logger().info(f'  target_polygon_name         : {self.target_polygon}')
+        self.get_logger().info(f'  verify_max_retry            : {self.max_retry}')
+        self.get_logger().info(f'  verify_settle_sec           : {self.verify_settle_sec}s')
+        self.get_logger().info('===========================================')
 
     # =========================================
     # 1. Data Callbacks (데이터 갱신만 담당)
