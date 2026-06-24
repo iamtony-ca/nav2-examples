@@ -38,11 +38,14 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <mutex> // [추가] Thread safety를 위해 필요
+
 
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "nav2_core/goal_checker.hpp"
 #include "rcl_interfaces/msg/set_parameters_result.hpp"
+#include "nav_msgs/msg/path.hpp" // [추가] Path 메시지 타입
 
 namespace nav2_controller
 {
@@ -126,6 +129,13 @@ protected:
   rclcpp::Time first_yaw_tolerance_time_;
   rclcpp::Clock::SharedPtr clock_;
 
+// [추가] Path Subscription 관련 변수
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
+  nav_msgs::msg::Path::SharedPtr current_path_;
+  std::mutex path_mutex_; 
+  std::string path_topic_; // 파라미터로 받기 위해 추가
+
+
   // Dynamic parameters handler
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr dyn_params_handler_;
   std::string plugin_name_;
@@ -136,6 +146,9 @@ protected:
    */
   rcl_interfaces::msg::SetParametersResult
   dynamicParametersCallback(std::vector<rclcpp::Parameter> parameters);
+
+  // [추가] Path Callback 함수
+  void pathCallback(const nav_msgs::msg::Path::SharedPtr msg);
 };
 
 }  // namespace nav2_controller
