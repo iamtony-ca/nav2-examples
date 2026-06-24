@@ -22,6 +22,9 @@
 #include <algorithm>
 #include <mutex>
 #include <cmath>
+#include <atomic>   // [추가] (이미 다수 include 있음)
+
+
 
 #include "nav2_core/controller.hpp"
 #include "nav2_costmap_2d/footprint_collision_checker.hpp"
@@ -173,7 +176,9 @@ protected:
   rclcpp::Clock::SharedPtr clock_;
   rclcpp::Time last_control_time_;
 
-
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr remaining_goals_sub_;   // [추가] ⚠️타입 확인
+  std::atomic<int> remaining_goals_count_{-1};                                // [추가]
+  void remainingGoalsCallback(const nav_msgs::msg::Path::SharedPtr msg);      // [추가]
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::string plugin_name_;
