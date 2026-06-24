@@ -71,7 +71,17 @@ void GracefulController::configure(
   motion_target_pub_ = node->create_publisher<geometry_msgs::msg::PoseStamped>("motion_target", 1);
   slowdown_pub_ = node->create_publisher<visualization_msgs::msg::Marker>("slowdown", 1);
 
+  remaining_goals_sub_ = node->create_subscription<nav_msgs::msg::Path>(
+    "/remaining_goals", rclcpp::QoS(10),
+    std::bind(&GracefulController::remainingGoalsCallback, this, std::placeholders::_1));
+  
   RCLCPP_INFO(logger_, "Configured Graceful Motion Controller: %s", plugin_name_.c_str());
+}
+
+
+void GracefulController::remainingGoalsCallback(const nav_msgs::msg::Path::SharedPtr msg)
+{
+  remaining_goals_count_.store(static_cast<int>(msg->poses.size()));  // ⚠️ 접근자 타입 맞춤
 }
 
 void GracefulController::cleanup()
@@ -334,17 +344,26 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
   // =========================================================================
   // [6] 3단계 모드 결정 (회전 / XY 안정화 / 경로 추종)
   // =========================================================================
-  bool enter_rotation_mode = false;     
-  bool is_xy_stabilizing_phase = false; 
+  bool enter_rotation_mode = false;
+  bool is_xy_stabilizing_phase = false;
+
+  constexpr double PATH_DIST_MAX = 2.8;                 // goal_checker와 동일값
+  const int  rgc = remaining_goals_count_.load();
+  const bool is_final_goal = (rgc >= 0 && rgc <= 1);    // -1 차단
 
   if (custom_checker) {
+    const double xy_tol = custom_checker->getXGoalTolerance();
+    const bool gate_ok = is_final_goal
+                       && (euclidean_dist <= xy_tol)
+                       && (dist_to_goal <= PATH_DIST_MAX);
     if (custom_checker->isXYLatched()) {
-        enter_rotation_mode = true;
-    } else if (euclidean_dist <= custom_checker->getXGoalTolerance()) {
+        enter_rotation_mode = true;          // checker가 이미 XY 통과(=게이트 통과)했으므로 신뢰
+    } else if (gate_ok) {
         is_xy_stabilizing_phase = true;
     }
+    // gate_ok 거짓 → 어떤 모드도 안 켬 → 경로 추종으로 떨어짐 (루프/교차/중간 = 그냥 주행)
   } else {
-    if (dist_to_goal < goal_dist_tolerance_ || goal_reached_) {
+    if (dist_to_goal < goal_dist_tolerance_ || goal_reached_) {   // 기존 그대로
         enter_rotation_mode = true;
     }
   }
@@ -457,102 +476,193 @@ geometry_msgs::msg::TwistStamped GracefulController::computeVelocityCommands(
       //   last_cmd_vel_.angular.z, target_cmd.twist.angular.z, 0.2, -2.0, dt_control);
       final_cmd.twist.angular.z = applyKinematicLimits(
         last_cmd_vel_.angular.z, target_cmd.twist.angular.z, ACC_IN_PLACE, DEC_IN_PLACE, dt_control);
+  // } else {
+  //     // [경로 추종 모드] 궤적 이탈(Wobbling) 방지를 위한 곡률(Curvature) 비율 유지 로직
+  //     double target_v = target_cmd.twist.linear.x;
+  //     double target_w = target_cmd.twist.angular.z;
+      
+  //     // A. 목표 궤적의 곡률 계산 (k = w / v)
+  //     double kappa = target_w / target_v; 
+
+  //     // B. 선속도(X)에만 가감속 한계 적용
+  //     // double limited_v = applyKinematicLimits(actual_speed, target_v, 1.0, -1.0, dt_control);
+  //     double limited_v = applyKinematicLimits(actual_speed, target_v, ACC_LINEAR, DEC_LINEAR, dt_control);
+      
+  //     // C. 제한된 선속도에 곡률을 곱해 각속도(Z)를 다시 계산 (조향 비율 완벽 유지!)
+  //     double limited_w = limited_v * kappa;
+
+  //     // D. (안전장치) 다시 계산된 각속도가 물리적 한계를 초과하면, 각속도 기준으로 다시 맞춤
+  //     // double max_w_limit = applyKinematicLimits(actual_w, target_w, 3.0, -3.0, dt_control);
+  //     double max_w_limit = applyKinematicLimits(actual_w, target_w, ACC_ANGULAR, DEC_ANGULAR, dt_control);
+      
+  //     if (std::abs(limited_w) > std::abs(max_w_limit)) {
+  //         limited_w = max_w_limit;
+
+  //         double turning_radius = 100.0;
+  //         if (std::abs(kappa) > 0.001) turning_radius = 1.0 / std::abs(kappa);
+
+  //         // ==========================================================
+  //         // 속도 및 반경 적응형 연속 스무딩 (Linear Adaptive Smoothing)
+  //         // ==========================================================
+  //         // double max_intervention_radius = 0.5; // 0.5m 이하의 코너에서만 개입 시작
+  //         double max_intervention_radius = MAX_INTERVENTION_RADIUS_; // 0.5m 이하의 코너에서만 개입 시작
+
+  //         if (turning_radius < max_intervention_radius) {
+  //             // 1. 반경 기반 가중치 (Radius Severity) : 0.0 ~ 1.0
+  //             // 반경이 0.5m면 0.0(개입 안함), 0m에 가까울수록 1.0(최대 개입)으로 선형 증가
+  //             double radius_severity = 1.0 - (turning_radius / max_intervention_radius);
+
+  //             // 2. 속도 기반 최대 스무딩 팩터 (Max Smoothing Factor)
+  //             // 속도가 빠를수록 원심력 때문에 궤적을 벗어나기 쉬우므로, 브레이크 비중을 더 높여줌
+  //             // (예: 정지 시 0.15, 최고 속도 시 0.40까지 선형 증가)
+  //             // double max_smoothing_factor = 0.15 + (0.25 * speed_ratio); 
+  //             double max_smoothing_factor = MIN_SMOOTHING_FACTOR + (SMOOTHING_FACTOR_SCALE * speed_ratio);
+
+  //             // 3. 최종 동적 스무딩 팩터 산출
+  //             double dynamic_smoothing_factor = radius_severity * max_smoothing_factor;
+
+  //             // 수학적 이상적 감속값(strict_v)과 현재 속도(limited_v)를 동적 비율로 혼합
+  //             double strict_v = limited_w / kappa;
+  //             limited_v = (strict_v * dynamic_smoothing_factor) + (limited_v * (1.0 - dynamic_smoothing_factor));
+  //         }
+  //     }
+
+  //     // 5. 비율 유지 스케일링 (Proportional Scaling)
+  //     double v_scale = 1.0;
+  //     double w_scale = 1.0;
+    
+  //     if (std::abs(limited_v) > dynamic_v_max && dynamic_v_max > 0.0) {
+  //         v_scale = dynamic_v_max / std::abs(limited_v);
+  //     }
+  //     if (std::abs(limited_w) > params_->v_angular_max && params_->v_angular_max > 0.0) {
+  //         w_scale = params_->v_angular_max / std::abs(limited_w);
+  //     }
+    
+  //     double final_scale = std::min(v_scale, w_scale);
+  //     limited_v *= final_scale;
+  //     limited_w *= final_scale;
+
+
+  //     // testing...
+  //     // limited_v = std::clamp(limited_v, params_->v_linear_min, params_->v_linear_max);
+  //     limited_v = std::clamp(limited_v, -params_->v_linear_max, params_->v_linear_max);
+  //     limited_w = std::clamp(limited_w, -params_->v_angular_max, params_->v_angular_max);
+
+  //     // testing....
+  //     // 주행 중일 때 모터 스톨(웅웅거림) 방지 (정지 목표가 아닐 때만 적용)
+  //     // [수정된 스톨 방지 로직 - 완전 무결함]
+  //     if (std::abs(target_v) > 0.001) {
+  //         if (std::abs(limited_v) < params_->v_linear_min) {
+              
+  //             // [수정 핵심] 부호의 기준을 limited_v가 아닌 target_v로 변경!
+  //             double new_v = std::copysign(params_->v_linear_min, target_v); 
+              
+  //             // v가 0이었든 아니든 상관없이, 무조건 완벽한 조향 비율 유지
+  //             limited_w = new_v * kappa;
+  //             limited_v = new_v;
+
+  //             limited_w = std::clamp(limited_w, -params_->v_angular_max, params_->v_angular_max);
+  //         }
+  //     }
+
+  //     final_cmd.twist.linear.x = limited_v;
+  //     final_cmd.twist.angular.z = limited_w;
+  // }
+
   } else {
-      // [경로 추종 모드] 궤적 이탈(Wobbling) 방지를 위한 곡률(Curvature) 비율 유지 로직
+      // [경로 추종 모드] 궤적 보존 + 특이점 가드
       double target_v = target_cmd.twist.linear.x;
       double target_w = target_cmd.twist.angular.z;
-      
-      // A. 목표 궤적의 곡률 계산 (k = w / v)
-      double kappa = target_w / target_v; 
 
-      // B. 선속도(X)에만 가감속 한계 적용
-      // double limited_v = applyKinematicLimits(actual_speed, target_v, 1.0, -1.0, dt_control);
-      double limited_v = applyKinematicLimits(actual_speed, target_v, ACC_LINEAR, DEC_LINEAR, dt_control);
-      
-      // C. 제한된 선속도에 곡률을 곱해 각속도(Z)를 다시 계산 (조향 비율 완벽 유지!)
-      double limited_w = limited_v * kappa;
-
-      // D. (안전장치) 다시 계산된 각속도가 물리적 한계를 초과하면, 각속도 기준으로 다시 맞춤
-      // double max_w_limit = applyKinematicLimits(actual_w, target_w, 3.0, -3.0, dt_control);
-      double max_w_limit = applyKinematicLimits(actual_w, target_w, ACC_ANGULAR, DEC_ANGULAR, dt_control);
-      
-      if (std::abs(limited_w) > std::abs(max_w_limit)) {
-          limited_w = max_w_limit;
-
-          double turning_radius = 100.0;
-          if (std::abs(kappa) > 0.001) turning_radius = 1.0 / std::abs(kappa);
-
-          // ==========================================================
-          // 속도 및 반경 적응형 연속 스무딩 (Linear Adaptive Smoothing)
-          // ==========================================================
-          // double max_intervention_radius = 0.5; // 0.5m 이하의 코너에서만 개입 시작
-          double max_intervention_radius = MAX_INTERVENTION_RADIUS_; // 0.5m 이하의 코너에서만 개입 시작
-
-          if (turning_radius < max_intervention_radius) {
-              // 1. 반경 기반 가중치 (Radius Severity) : 0.0 ~ 1.0
-              // 반경이 0.5m면 0.0(개입 안함), 0m에 가까울수록 1.0(최대 개입)으로 선형 증가
-              double radius_severity = 1.0 - (turning_radius / max_intervention_radius);
-
-              // 2. 속도 기반 최대 스무딩 팩터 (Max Smoothing Factor)
-              // 속도가 빠를수록 원심력 때문에 궤적을 벗어나기 쉬우므로, 브레이크 비중을 더 높여줌
-              // (예: 정지 시 0.15, 최고 속도 시 0.40까지 선형 증가)
-              // double max_smoothing_factor = 0.15 + (0.25 * speed_ratio); 
-              double max_smoothing_factor = MIN_SMOOTHING_FACTOR + (SMOOTHING_FACTOR_SCALE * speed_ratio);
-
-              // 3. 최종 동적 스무딩 팩터 산출
-              double dynamic_smoothing_factor = radius_severity * max_smoothing_factor;
-
-              // 수학적 이상적 감속값(strict_v)과 현재 속도(limited_v)를 동적 비율로 혼합
-              double strict_v = limited_w / kappa;
-              limited_v = (strict_v * dynamic_smoothing_factor) + (limited_v * (1.0 - dynamic_smoothing_factor));
-          }
+      // ── [추가 1] 컨텍스트 각속도 상한 ──
+      // 회전/안정화 의도(충돌로 회전이 막혀 여기로 흘러내린 경우 포함)면 0.35로 묶음
+      double context_max_w = params_->v_angular_max;
+      if (enter_rotation_mode || is_xy_stabilizing_phase) {
+          context_max_w = MAX_IN_PLACE_VEL;
       }
 
-      // 5. 비율 유지 스케일링 (Proportional Scaling)
+      // ── [추가 2] kappa(=curvature) 특이점 가드 ──
+      // planner min_turning_radius=0.3 → 합법 곡률 ≲3.3. 반경 0.15m(곡률 6.67) 초과는
+      // -1/r 특이점 아티팩트이므로 곡률 보존을 끈다. (1.8 스파이크 원천 차단)
+      constexpr double kSingularCurvature = 1.0 / 0.15;  // ≈6.67
+      double kappa = (std::abs(target_v) > 1e-6) ? (target_w / target_v) : 0.0;
+      const bool curvature_singular =
+          (std::abs(kappa) > kSingularCurvature) || (std::abs(target_v) < 0.02);
+      const bool use_curvature = !curvature_singular;
+
+      double limited_v = applyKinematicLimits(actual_speed, target_v, ACC_LINEAR, DEC_LINEAR, dt_control);
+      double limited_w;
+
+      if (use_curvature) {
+          // 곡률 보존: 제한된 선속도 × 곡률
+          limited_w = limited_v * kappa;
+
+          double max_w_limit = applyKinematicLimits(actual_w, target_w, ACC_ANGULAR, DEC_ANGULAR, dt_control);
+          if (std::abs(limited_w) > std::abs(max_w_limit)) {
+              limited_w = max_w_limit;
+              double turning_radius = 100.0;
+              if (std::abs(kappa) > 0.001) turning_radius = 1.0 / std::abs(kappa);
+
+              double max_intervention_radius = MAX_INTERVENTION_RADIUS_;
+              if (turning_radius < max_intervention_radius) {
+                  double radius_severity = 1.0 - (turning_radius / max_intervention_radius);
+                  double max_smoothing_factor = MIN_SMOOTHING_FACTOR + (SMOOTHING_FACTOR_SCALE * speed_ratio);
+                  double dynamic_smoothing_factor = radius_severity * max_smoothing_factor;
+                  double strict_v = limited_w / kappa;
+                  limited_v = (strict_v * dynamic_smoothing_factor) + (limited_v * (1.0 - dynamic_smoothing_factor));
+              }
+          }
+      } else {
+          // [특이점 구간] kappa 곱셈 차단, 각속도 단독 가감속
+          limited_w = applyKinematicLimits(actual_w, target_w, ACC_ANGULAR, DEC_ANGULAR, dt_control);
+      }
+
+      // 비율 유지 스케일링 (각속도 상한은 context_max_w)
       double v_scale = 1.0;
       double w_scale = 1.0;
-    
       if (std::abs(limited_v) > dynamic_v_max && dynamic_v_max > 0.0) {
           v_scale = dynamic_v_max / std::abs(limited_v);
       }
-      if (std::abs(limited_w) > params_->v_angular_max && params_->v_angular_max > 0.0) {
-          w_scale = params_->v_angular_max / std::abs(limited_w);
+      if (std::abs(limited_w) > context_max_w && context_max_w > 0.0) {
+          w_scale = context_max_w / std::abs(limited_w);
       }
-    
       double final_scale = std::min(v_scale, w_scale);
       limited_v *= final_scale;
       limited_w *= final_scale;
 
-
-      // testing...
-      // limited_v = std::clamp(limited_v, params_->v_linear_min, params_->v_linear_max);
       limited_v = std::clamp(limited_v, -params_->v_linear_max, params_->v_linear_max);
-      limited_w = std::clamp(limited_w, -params_->v_angular_max, params_->v_angular_max);
+      limited_w = std::clamp(limited_w, -context_max_w, context_max_w);   // [변경] context 상한
 
-      // testing....
-      // 주행 중일 때 모터 스톨(웅웅거림) 방지 (정지 목표가 아닐 때만 적용)
-      // [수정된 스톨 방지 로직 - 완전 무결함]
-      if (std::abs(target_v) > 0.001) {
-          if (std::abs(limited_v) < params_->v_linear_min) {
-              
-              // [수정 핵심] 부호의 기준을 limited_v가 아닌 target_v로 변경!
-              double new_v = std::copysign(params_->v_linear_min, target_v); 
-              
-              // v가 0이었든 아니든 상관없이, 무조건 완벽한 조향 비율 유지
-              limited_w = new_v * kappa;
-              limited_v = new_v;
-
-              limited_w = std::clamp(limited_w, -params_->v_angular_max, params_->v_angular_max);
+      // [버그픽스] 스톨 방지: use_curvature일 때만 곡률 보존
+      if (std::abs(target_v) > 0.001 && std::abs(limited_v) < params_->v_linear_min) {
+          double new_v = std::copysign(params_->v_linear_min, target_v);
+          limited_v = new_v;
+          if (use_curvature) {
+              limited_w = new_v * kappa;          // 곡률 정상일 때만 재계산
           }
+          // use_curvature==false면 위에서 단독 램핑된 limited_w 유지 (kappa=0 오염 방지)
+          limited_w = std::clamp(limited_w, -context_max_w, context_max_w);
       }
 
       final_cmd.twist.linear.x = limited_v;
       final_cmd.twist.angular.z = limited_w;
   }
 
+  // ── [방어] 최종 발행 직전 하드 가드 ──
+  // 사실상 병진이 없는데(|v|<=0.02) 각속도가 과도하면(>0.5) 캡.
+  // kappa 특이점/스파이크가 위 로직을 빠져나오는 경우의 최후 방어선.
+  if (std::abs(final_cmd.twist.linear.x) <= 0.02 &&
+      std::abs(final_cmd.twist.angular.z) > 0.5)
+  {
+      RCLCPP_WARN_THROTTLE(logger_, *clock_, 1000,
+        "[guard] angular capped: v=%.3f w=%.3f -> 0.5",
+        final_cmd.twist.linear.x, final_cmd.twist.angular.z);
+      final_cmd.twist.angular.z = std::copysign(0.5, final_cmd.twist.angular.z);
+  }
 
   last_cmd_vel_ = final_cmd.twist;
   return final_cmd;
+  
 }
 
 
