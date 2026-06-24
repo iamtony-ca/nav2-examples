@@ -39,6 +39,7 @@
 #include <string>
 #include <vector>
 #include <mutex> // [추가] Thread safety를 위해 필요
+#include <atomic>                       // [추가]
 
 
 #include "rclcpp/rclcpp.hpp"
@@ -139,6 +140,11 @@ protected:
   // Dynamic parameters handler
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr dyn_params_handler_;
   std::string plugin_name_;
+
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr remaining_goals_sub_;  // [추가] ⚠️타입 확인
+  std::atomic<int> remaining_goals_count_{-1};                               // [추가] -1=미수신
+  void remainingGoalsCallback(const nav_msgs::msg::Path::SharedPtr msg);     // [추가]
+
 
   /**
    * @brief Callback executed when a parameter change is detected
