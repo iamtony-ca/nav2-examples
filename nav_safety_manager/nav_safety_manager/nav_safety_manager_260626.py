@@ -99,7 +99,17 @@ class NavSafetyManagerNode(Node):
         self.latest_plc_data = None
         self.latest_collision_msg = None
         self.latest_nav_status = None
-        self.narrow_status = False
+        # (변경) range1~range8 최신값을 리스트로 보관 (데이터 없으면 None)
+        self.narrow_status = None
+        
+        # (추가) set_area 결과 기대 패턴 [range1, range2, ..., range8]
+        self.EXPECTED_RANGES = {
+            0: [True,  False, True,  False, True,  False, False, True ],  # set_area(0)
+            1: [False, True,  False, True,  False, True,  True,  False],  # set_area(1)
+        }
+        # sanity check: 두 패턴은 서로 정확히 반전 관계여야 함
+        assert self.EXPECTED_RANGES[0] == [not x for x in self.EXPECTED_RANGES[1]]
+        
 
         # 상태 머신 제어 변수
         self.current_phase = 0 
@@ -125,11 +135,16 @@ class NavSafetyManagerNode(Node):
     # 1. Data Callbacks (데이터 갱신만 담당)
     # =========================================
     def plc_callback(self, msg):
-        if (msg.protective_front is False) or (msg.protective_rear is False) :
+        if (msg.protective_front is False) or (msg.protective_rear is False):
             self.latest_plc_data = False
-        else :
+        else:
             self.latest_plc_data = True
-        self.narrow_status = msg.range1
+    
+        # (변경) range1~range8 전체를 리스트로 저장
+        self.narrow_status = [
+            msg.range1, msg.range2, msg.range3, msg.range4,
+            msg.range5, msg.range6, msg.range7, msg.range8,
+        ]
 
 
     def collision_callback(self, msg):
@@ -310,24 +325,31 @@ class NavSafetyManagerNode(Node):
 
 
     def _verify_loop(self):
-        """range1이 기대값으로 바뀌었는지 검증. 미반영이면 재시도."""
-        # range1 갱신까지 settle 시간 대기
+        """range1~range8가 기대 패턴으로 바뀌었는지 검증. 미반영이면 재시도."""
+        # range 갱신까지 settle 시간 대기
         elapsed = (self.get_clock().now() - self.verify_start_time).nanoseconds / 1e9
         if elapsed < self.verify_settle_sec:
             return
     
-        # set_area(0) -> range1 False / set_area(1) -> range1 True
-        expected = (self.pending_req_value == 1)
-        actual = self.narrow_status   # = msg.range1
+        # (변경) PLC 데이터가 아직 없으면 비교하지 않고 대기 (재시도 횟수 낭비 방지)
+        if self.narrow_status is None:
+            self.get_logger().warn('[Verify] PLC range 데이터 수신 대기 중...',
+                                   throttle_duration_sec=2.0)
+            return
+    
+        expected = self.EXPECTED_RANGES[self.pending_req_value]
+        actual = self.narrow_status   # = [range1..range8]
     
         if actual == expected:
             self.get_logger().info(
-                f'[Verify] set_area({self.pending_req_value}) 반영 확인 (range1={actual})')
+                f'[Verify] set_area({self.pending_req_value}) 반영 확인 '
+                f'(ranges={actual})')
             self._finish_verify(success=True)
         else:
             self.get_logger().warn(
-                f'[Verify] 미반영 (range1={actual}, 기대={expected})')
+                f'[Verify] 미반영 (ranges={actual}, 기대={expected})')
             self._retry_or_giveup()
+
     
     
     def _retry_or_giveup(self):
