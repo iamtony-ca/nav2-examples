@@ -661,7 +661,8 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
   // RCLCPP_INFO_THROTTLE(logger_, *node_shared_->get_clock(), 1000,
   //   "[AgentLayer] updateCosts called, agents=%zu, bounds=[%d,%d,%d,%d]",
   //   transformed_agents_.size(), min_i, min_j, max_i, max_j);
-  // std::lock_guard<std::mutex> param_lock(param_mtx_);
+    
+  std::lock_guard<std::mutex> param_lock(param_mtx_);
 
   // 1) viz_costmap 크기/원점 동기화 + 매 사이클 0으로 리셋 (기존 그대로)
   {
