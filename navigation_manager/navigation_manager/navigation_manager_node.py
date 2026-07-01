@@ -300,7 +300,7 @@ class NavigationManagerNode(Node):
     # Topic callbacks
     # ------------------------------------------------------------------ #
     def _nav_stop_callback(self, msg: UInt8) -> None:
-        self.get_logger().info(f'stop_callback!, cmd_seq_num: {msg.data}')
+        self.get_logger().info(f'nav stop_callback!, cmd_seq_num: {msg.data}')
         
         with self._state_lock:
             # while 문 중단을 위한 플래그 설정
@@ -309,7 +309,9 @@ class NavigationManagerNode(Node):
             self._nav2_monitoring_data.ros_nav_driving_abort = False
             
             if self._goal_handle is None:
-                self.get_logger().info('not cancle goal, stop_callback')
+                self.get_logger().info('not cancle goal, nav stop_callback')
+                self.nav_stop_command = False
+                self._stop_in_flight = False
                 return
             handle = self._goal_handle
             self._clear_nav2_command_data_locked()
@@ -320,10 +322,10 @@ class NavigationManagerNode(Node):
             self._path_agent_collision = False                        ### testing...
 
         handle.cancel_goal_async()
-        self.get_logger().info(f'cancle goal, stop_callback')
+        self.get_logger().info(f'cancle goal, nav stop_callback')
 
     def _main_stop_callback(self, msg: UInt8) -> None:
-        self.get_logger().info(f'stop_callback!, cmd_seq_num: {msg.data}')
+        self.get_logger().info(f'main_stop_callback!, cmd_seq_num: {msg.data}')
         
         with self._state_lock:
             # while 문 중단을 위한 플래그 설정
@@ -331,7 +333,8 @@ class NavigationManagerNode(Node):
             self._stop_in_flight = True
             
             if self._goal_handle is None:
-                self.get_logger().info('not cancle goal, stop_callback')
+                self.get_logger().info('not cancle goal, main stop_callback')
+                self._stop_in_flight = False
                 return
             handle = self._goal_handle
             self._clear_nav2_command_data_locked()
@@ -342,7 +345,7 @@ class NavigationManagerNode(Node):
             self._path_agent_collision = False                        ### testing...
 
         handle.cancel_goal_async()
-        self.get_logger().info(f'cancle goal, stop_callback')
+        self.get_logger().info(f'cancle goal, main stop_callback')
 
 
     def _reset_callback(self, msg: UInt8) -> None:
@@ -357,7 +360,7 @@ class NavigationManagerNode(Node):
 
     def _move_callback(self, msg: NavigationCommand) -> None:
         self.get_logger().info('move_callback')
-        self._stop_in_flight = False
+        # self._stop_in_flight = False
         cond_ready = False
         cond_static = False
         cond_agent = False
@@ -385,6 +388,7 @@ class NavigationManagerNode(Node):
 
         with self._state_lock:
             self._clear_nav2_command_data_locked()
+            self._stop_in_flight = False
             self._nav2_monitoring_data.ros_nav_driving_abort = False 
             self._nav2_cmd_data.goal_cnt = msg.goal_cnt
             self._nav2_cmd_data.cmd_seq_num = msg.cmd_seq_num
