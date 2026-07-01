@@ -360,12 +360,11 @@ class NavigationManagerNode(Node):
 
     def _move_callback(self, msg: NavigationCommand) -> None:
         self.get_logger().info('move_callback')
-        # self._stop_in_flight = False
+        with self._state_lock:
+            self._stop_in_flight = False
         cond_ready = False
         cond_static = False
         cond_agent = False
-
-
 
         self.clear_both_costmaps()
 
