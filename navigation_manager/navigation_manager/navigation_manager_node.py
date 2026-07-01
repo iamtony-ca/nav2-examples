@@ -99,6 +99,12 @@ class NavigationManagerNode(Node):
 
         self.nav_stop_command: bool = False  # nav_stop 명령 수신 여부를 나타내는 플래그
 
+
+        self.curr_x: float = 0.0
+        self.curr_y: float = 0.0
+        self.curr_z: float = 0.0
+        self_curr_w: float = 0.0
+        
         # ----- Subscriptions ------------------------------------------ #
         # move만 _cmd_cb_group 할당 (block 발생 지점)
         self._move_subscription = self.create_subscription(
@@ -123,6 +129,11 @@ class NavigationManagerNode(Node):
         self._reset_subscription = self.create_subscription(
             UInt8, '/reset_command',
             self._reset_callback, 10, callback_group=self._state_update_cb_group)
+
+        self._pose_tracked_subscription = self.create_subscription(
+            UInt8, '/pose_tracked',
+            self._pose_tracked_callback, 10, callback_group=self._state_update_cb_group)
+
         
         # /robot_status 추가
         self._robot_status_sub = self.create_subscription(
@@ -271,6 +282,19 @@ class NavigationManagerNode(Node):
             self._static_is_last_goal_occupied = msg.is_last_goal_occupied
             self._static_is_status_ready = msg.is_status_ready
 
+
+    def _pose_tracked_callback(self, msg: PoseStamped) -> None:
+        # self.get_logger().info(f'reset_callback!, cmd_seq_num: {msg.data}')
+        
+        with self._state_lock:
+            self.curr_x = round((msg.pose.position.x, 4)
+            self.curr_y = round((msg.pose.position.y, 4)
+            self.curr_z = round((msg.pose.orientation.z, 4)
+            self_curr_w = round((msg.pose.orientation.w, 4)
+   
+        # self.get_logger().info(f'reset abort status, reset_callback')
+
+    
     # ------------------------------------------------------------------ #
     # Topic callbacks
     # ------------------------------------------------------------------ #
@@ -374,7 +398,8 @@ class NavigationManagerNode(Node):
                 self._nav2_cmd_data.from_node_id.append(msg.from_node_id[i])
                 self._nav2_cmd_data.to_node_id.append(msg.to_node_id[i])
 
-            
+
+            self.get_logger().info(f'current pose: x: {self.curr_x}, y: {self.curr_y}, z: {self.curr_z}, w: {self.curr_w}')
             self.get_logger().info(f'goal poses: {self._nav2_cmd_data.goal_poses}')
 
 
