@@ -272,9 +272,10 @@ class NavigationManagerNode(Node):
     # ------------------------------------------------------------------ #
     def _nav_stop_callback(self, msg: UInt8) -> None:
         self.get_logger().info(f'stop_callback!, cmd_seq_num: {msg.data}')
-        self.nav_stop_command = True
+        
         with self._state_lock:
             # while 문 중단을 위한 플래그 설정
+            self.nav_stop_command = True
             self._stop_in_flight = True
             self._nav2_monitoring_data.ros_nav_driving_abort = False
             
@@ -749,7 +750,7 @@ def main(args=None) -> None:
     rclpy.init(args=args)
     node = NavigationManagerNode()
 
-    executor = MultiThreadedExecutor(num_threads=6)
+    executor = MultiThreadedExecutor(num_threads=9)
     executor.add_node(node)
 
     try:
