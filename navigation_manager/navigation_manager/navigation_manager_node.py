@@ -324,9 +324,10 @@ class NavigationManagerNode(Node):
 
     def _main_stop_callback(self, msg: UInt8) -> None:
         self.get_logger().info(f'stop_callback!, cmd_seq_num: {msg.data}')
-        self._nav2_monitoring_data.ros_nav_driving_abort = False
+        
         with self._state_lock:
             # while 문 중단을 위한 플래그 설정
+            self._nav2_monitoring_data.ros_nav_driving_abort = False
             self._stop_in_flight = True
             
             if self._goal_handle is None:
