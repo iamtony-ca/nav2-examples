@@ -70,6 +70,7 @@ class NavigationManagerNode(Node):
         # 상태 업데이트와 stop명령은 _state_update_cb_group에서 독립적으로 스레드를 점유해 실행됩니다.
         self._cmd_cb_group = MutuallyExclusiveCallbackGroup()
         self._state_update_cb_group = MutuallyExclusiveCallbackGroup()
+        self._pose_cb_group = ReentrantCallbackGroup()
         self._action_cb_group = ReentrantCallbackGroup()
         self._timer_cb_group = MutuallyExclusiveCallbackGroup()
         self._srv_cb_group = MutuallyExclusiveCallbackGroup()
@@ -103,7 +104,7 @@ class NavigationManagerNode(Node):
         self.curr_x: float = 0.0
         self.curr_y: float = 0.0
         self.curr_z: float = 0.0
-        self_curr_w: float = 0.0
+        self.curr_w: float = 0.0
         
         # ----- Subscriptions ------------------------------------------ #
         # move만 _cmd_cb_group 할당 (block 발생 지점)
@@ -131,8 +132,8 @@ class NavigationManagerNode(Node):
             self._reset_callback, 10, callback_group=self._state_update_cb_group)
 
         self._pose_tracked_subscription = self.create_subscription(
-            UInt8, '/pose_tracked',
-            self._pose_tracked_callback, 10, callback_group=self._state_update_cb_group)
+            PoseStamped, '/pose_tracked',
+            self._pose_tracked_callback, 1, callback_group=self._pose_cb_group)
 
         
         # /robot_status 추가
