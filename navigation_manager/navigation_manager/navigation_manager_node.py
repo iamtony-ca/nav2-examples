@@ -287,10 +287,10 @@ class NavigationManagerNode(Node):
         # self.get_logger().info(f'reset_callback!, cmd_seq_num: {msg.data}')
         
         with self._state_lock:
-            self.curr_x = round((msg.pose.position.x, 4)
-            self.curr_y = round((msg.pose.position.y, 4)
-            self.curr_z = round((msg.pose.orientation.z, 4)
-            self_curr_w = round((msg.pose.orientation.w, 4)
+            self.curr_x = round(msg.pose.position.x, 4)
+            self.curr_y = round(msg.pose.position.y, 4)
+            self.curr_z = round(msg.pose.orientation.z, 4)
+            self_curr_w = round(msg.pose.orientation.w, 4)
    
         # self.get_logger().info(f'reset abort status, reset_callback')
 
