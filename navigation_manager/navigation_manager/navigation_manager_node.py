@@ -120,6 +120,10 @@ class NavigationManagerNode(Node):
             UInt8, '/main_stop_command',
             self._main_stop_callback, 10, callback_group=self._state_update_cb_group)
 
+        self._reset_subscription = self.create_subscription(
+            UInt8, '/reset_command',
+            self._reset_callback, 10, callback_group=self._state_update_cb_group)
+        
         # /robot_status 추가
         self._robot_status_sub = self.create_subscription(
             String, '/robot_status',
@@ -315,6 +319,15 @@ class NavigationManagerNode(Node):
         self.get_logger().info(f'cancle goal, stop_callback')
 
 
+    def _reset_callback(self, msg: UInt8) -> None:
+        self.get_logger().info(f'reset_callback!, cmd_seq_num: {msg.data}')
+        
+        with self._state_lock:
+            self._nav2_monitoring_data.ros_nav_driving_abort = False
+   
+        self.get_logger().info(f'reset abort status, reset_callback')
+
+    
 
     def _move_callback(self, msg: NavigationCommand) -> None:
         self.get_logger().info('move_callback')
@@ -624,7 +637,6 @@ class NavigationManagerNode(Node):
             done_msg = Bool()
             done_msg.data = True
             self._stop_complete_publisher.publish(done_msg)
-            self._nav2_monitoring_data.ros_nav_driving_abort = False       #### testing...
             self.get_logger().info('nav_stop_complete published')
 
     # ------------------------------------------------------------------ #
