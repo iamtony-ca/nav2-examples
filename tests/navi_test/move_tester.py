@@ -4,6 +4,18 @@
 
 트리거 토픽(/test_trigger, std_msgs/Empty)을 받으면
 NavigationCommand 를 N초 간격으로 M회 연속 발행한다.
+
+# 기본값(1초 간격, 2회)으로 실행
+ros2 run <your_pkg> move_command_tester
+
+# N/M 지정해서 실행 (예: 0.5초 간격, 3회, 명령당 goal 2개)
+ros2 run <your_pkg> move_command_tester --ros-args \
+  -p interval_sec:=0.5 -p repeat_count:=3 -p goal_cnt:=2
+
+# 트리거 (다른 터미널에서)
+ros2 topic pub --once /test_trigger std_msgs/msg/Empty "{}"
+
+
 """
 
 import math
