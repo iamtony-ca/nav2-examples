@@ -99,6 +99,7 @@ class NavigationManagerNode(Node):
         self._agent_is_status_ready: bool = False 
 
         self.nav_stop_command: bool = False  # nav_stop 명령 수신 여부를 나타내는 플래그
+        self._move_in_progress: bool = False
 
 
         self.curr_x: float = 0.0
