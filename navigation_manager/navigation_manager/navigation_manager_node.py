@@ -361,8 +361,45 @@ class NavigationManagerNode(Node):
 
     def _move_callback(self, msg: NavigationCommand) -> None:
         self.get_logger().info('move_callback')
+        self.get_logger().info(f'goal_cnt: {msg.goal_cnt}, cmd_seq_num: {msg.cmd_seq_num}, from_node_id: {msg.from_node_id}, to_node_id: {msg.to_node_id}')
+
+        # [겹침 감지] 이전 move가 아직 살아있거나(action 진행 중),
+        # 다른 move가 대기/처리 중이면: 진행 goal을 cancel하고 abort 처리 후 이번 move는 버린다.
         with self._state_lock:
             self._stop_in_flight = False
+            overlapped = (
+                self._goal_handle is not None
+                or self._stop_in_flight
+                or self._move_in_progress
+            )
+            if overlapped:
+                handle = self._goal_handle
+                self._goal_handle = None
+                self._goal_status = GoalStatus.STATUS_ABORTED
+                self._nav2_monitoring_data.ros_nav_driving_abort = True
+                self.nav_stop_command = False
+                self._clear_nav2_command_data_locked()
+            else:
+                # 정상 진입: 이번 move가 점유 시작
+                self._move_in_progress = True
+                self._stop_in_flight = False
+
+        if overlapped:
+            self.get_logger().error(
+                'Overlapping move_command received. Cancelling current goal and aborting.')
+            if handle is not None:
+                handle.cancel_goal_async()
+            return
+
+        # ---- 정상 흐름: 반드시 finally에서 _move_in_progress 해제 ----
+        try:
+            self._run_move(msg)
+        finally:
+            with self._state_lock:
+                self._move_in_progress = False   
+    
+
+    def _run_move(self, msg: NavigationCommand) -> None:
         cond_ready = False
         cond_static = False
         cond_agent = False
@@ -372,6 +409,9 @@ class NavigationManagerNode(Node):
         if not msg.goal_poses:
             self.get_logger().warn('Received empty multi goal list')
             return
+        # ... (기존 본문 그대로, while 루프와 send_goal_async 포함) ...
+
+
 
         if not (len(msg.goal_poses) == msg.goal_cnt
                 == len(msg.from_node_id) == len(msg.to_node_id)):
@@ -531,6 +571,9 @@ class NavigationManagerNode(Node):
         send_goal_future = self._nav2_through_poses_client.send_goal_async(
             goal_msg, feedback_callback=self._move_feedback_callback)
         send_goal_future.add_done_callback(self._move_response_callback)
+
+
+
 
     def _pause_callback(self, msg: UInt8) -> None:
         self.get_logger().info('pause_callback')
