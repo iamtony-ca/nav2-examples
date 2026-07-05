@@ -1,0 +1,26 @@
+# zed_monitoring 노드 파라미터 설정 파일
+#
+# 노드 이름 키로 /**/zed_monitoring 사용:
+#   ** 는 0개 이상의 네임스페이스 토큰과 매칭되므로
+#   /zed_monitoring, /robot1/zed_monitoring, /fleet/robot1/zed_monitoring 모두 적용됨.
+#   → 멀티로봇에서 네임스페이스가 붙어도 이 노드에만 파라미터가 들어감.
+#
+# 대안 키:
+#   zed_monitoring:   # 루트 네임스페이스(/zed_monitoring)에서만 매칭
+#   /**:              # 이름/네임스페이스 무관 모든 노드에 적용 (범용적이지만 광범위)
+
+/**/zed_monitoring:
+  ros__parameters:
+    # ---- 토픽 이름 ----
+    image_topic: /zed/zed_node/rgb/image_rect_color   # 감시 대상 ZED 이미지 토픽
+    status_topic: camera_alive                        # Bool: 생존 여부 발행 토픽
+    stop_command_topic: stop_command                  # UInt8: 정지 명령 발행 토픽
+
+    # ---- 타이밍 (float, 반드시 소수점 표기: 정수로 쓰면 타입 불일치 에러) ----
+    timeout_sec: 120.0            # 이 시간 동안 이미지 미수신 시 dead 판정
+    check_period_sec: 0.5         # 생존 판정 + status 발행 주기
+    stop_repeat_period_sec: 10.0   # dead 지속 동안 stop_command 재발행 주기
+    status_log_period_sec: 5.0     # status 토픽 발행 주기 (로그용)
+
+    # ---- 정지 명령 값 (int) ----
+    stop_command_value: 999
