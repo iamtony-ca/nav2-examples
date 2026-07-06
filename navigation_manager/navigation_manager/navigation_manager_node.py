@@ -183,8 +183,11 @@ class NavigationManagerNode(Node):
         # ----- Publishers --------------------------------------------- #
         self._monitoring_publisher = self.create_publisher(
             NavigationMonitoring, 'ros2_nav2_monitoring_data', 10)
+        # self._pause_resume_publisher = self.create_publisher(
+        #     Bool, 'nav_pause_flag', 10)
         self._pause_resume_publisher = self.create_publisher(
-            Bool, 'nav_pause_flag', 10)
+            Bool, '/controller_pause_flag', qos_pause)
+        
         self._stop_complete_publisher = self.create_publisher(
             Bool, 'nav_stop_complete', 10)
         self._bt_log_publisher = self.create_publisher(
@@ -363,6 +366,11 @@ class NavigationManagerNode(Node):
         self.get_logger().info('move_callback')
         self.get_logger().info(f'goal_cnt: {msg.goal_cnt}, cmd_seq_num: {msg.cmd_seq_num}, from_node_id: {msg.from_node_id}, to_node_id: {msg.to_node_id}')
 
+
+        pause_msg = Bool()
+        pause_msg.data = False
+        self._pause_resume_publisher.publish(pause_msg)
+        
         # [겹침 감지] 이전 move가 아직 살아있거나(action 진행 중),
         # 다른 move가 대기/처리 중이면: 진행 goal을 cancel하고 abort 처리 후 이번 move는 버린다.
         with self._state_lock:
