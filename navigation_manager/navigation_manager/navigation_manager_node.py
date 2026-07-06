@@ -374,7 +374,7 @@ class NavigationManagerNode(Node):
         # [겹침 감지] 이전 move가 아직 살아있거나(action 진행 중),
         # 다른 move가 대기/처리 중이면: 진행 goal을 cancel하고 abort 처리 후 이번 move는 버린다.
         with self._state_lock:
-            self._stop_in_flight = False
+            # self._stop_in_flight = False
             overlapped = (
                 self._goal_handle is not None
                 or self._stop_in_flight
