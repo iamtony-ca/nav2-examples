@@ -183,11 +183,12 @@ class NavigationManagerNode(Node):
         # ----- Publishers --------------------------------------------- #
         self._monitoring_publisher = self.create_publisher(
             NavigationMonitoring, 'ros2_nav2_monitoring_data', 10)
-        # self._pause_resume_publisher = self.create_publisher(
-        #     Bool, 'nav_pause_flag', 10)
         self._pause_resume_publisher = self.create_publisher(
-            Bool, '/controller_pause_flag', qos_pause)
-        
+            Bool, 'nav_pause_flag', 10)
+        # self._pause_resume_publisher = self.create_publisher(
+        #     Bool, '/controller_pause_flag', qos_pause)
+
+
         self._stop_complete_publisher = self.create_publisher(
             Bool, 'nav_stop_complete', 10)
         self._bt_log_publisher = self.create_publisher(
@@ -357,6 +358,11 @@ class NavigationManagerNode(Node):
         
         with self._state_lock:
             self._nav2_monitoring_data.ros_nav_driving_abort = False
+            # [FIX] _goal_status가 STATUS_ABORTED로 남아 있으면 _timer_callback의
+            # _update_nav2_status()가 매 tick마다 ros_nav_driving_abort를 다시 True로
+            # 세워서, 위에서 지운 값이 publish 되기 전에 덮어써진다.
+            # (_nav_stop_callback / _main_stop_callback이 STATUS_CANCELED를 넣는 것과 동일한 처리)
+            self._goal_status = GoalStatus.STATUS_CANCELED
    
         self.get_logger().info(f'reset abort status, reset_callback')
 
@@ -366,11 +372,12 @@ class NavigationManagerNode(Node):
         self.get_logger().info('move_callback')
         self.get_logger().info(f'goal_cnt: {msg.goal_cnt}, cmd_seq_num: {msg.cmd_seq_num}, from_node_id: {msg.from_node_id}, to_node_id: {msg.to_node_id}')
 
+        # pause_msg = Bool()
+        # pause_msg.data = False
+        # self._pause_resume_publisher.publish(pause_msg)
 
-        pause_msg = Bool()
-        pause_msg.data = False
-        self._pause_resume_publisher.publish(pause_msg)
-        
+
+
         # [겹침 감지] 이전 move가 아직 살아있거나(action 진행 중),
         # 다른 move가 대기/처리 중이면: 진행 goal을 cancel하고 abort 처리 후 이번 move는 버린다.
         with self._state_lock:
@@ -595,9 +602,12 @@ class NavigationManagerNode(Node):
         pause_msg = Bool()
         pause_msg.data = True
         self._pause_resume_publisher.publish(pause_msg)
+        # self._pause_resume_publisher.publish(pause_msg)
+        # self._pause_resume_publisher.publish(pause_msg)
         self.get_logger().info('pause flag published (FollowPath canceled in BT)')
 
     def _resume_callback(self, msg: UInt8) -> None:
+        self.get_logger().info('resume_callback start')
         with self._state_lock:
             self._nav2_cmd_data.cmd_seq_num = msg.data
             self._nav2_monitoring_data.ros_nav_cmd_seq_num = msg.data
@@ -605,6 +615,8 @@ class NavigationManagerNode(Node):
         pause_msg = Bool()
         pause_msg.data = False
         self._pause_resume_publisher.publish(pause_msg)
+        # self._pause_resume_publisher.publish(pause_msg)
+        # self._pause_resume_publisher.publish(pause_msg)
         self.get_logger().info('resume_callback')
 
     # ------------------------------------------------------------------ #
@@ -844,7 +856,7 @@ def main(args=None) -> None:
     rclpy.init(args=args)
     node = NavigationManagerNode()
 
-    executor = MultiThreadedExecutor(num_threads=9)
+    executor = MultiThreadedExecutor(num_threads=10)
     executor.add_node(node)
 
     try:
