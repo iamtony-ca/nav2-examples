@@ -61,7 +61,18 @@ class RobotStatusManagerNode(Node):
 
         # --- 상태 변수 (공유됨) ---
         self.current_status = RobotStatus.IDLE
-        self.last_log_time = self.get_clock().now() - Duration(seconds=self.idle_timeout_sec * 2.0)
+        # [sim 수정] use_sim_time 에서는 노드 기동 시점의 시계가 0 근처라
+        # now() - Duration(...) 이 음수가 되어 rclpy 가 ValueError 를 던지고
+        # 노드가 그대로 죽는다 (실물은 wall clock 이라 이 문제가 없다).
+        #   ValueError: Subtraction leads to negative time.
+        # 의도는 '마지막 로그가 오래 전이었던 것으로 쳐서 IDLE 로 시작' 이므로,
+        # 뺄 수 없을 만큼 시계가 작으면 0 으로 둔다.
+        _now = self.get_clock().now()
+        _back = Duration(seconds=self.idle_timeout_sec * 2.0)
+        if _now.nanoseconds > _back.nanoseconds:
+            self.last_log_time = _now - _back
+        else:
+            self.last_log_time = Time(nanoseconds=0, clock_type=_now.clock_type)
         self.bt_running_nodes = set()
         self.bt_terminal_nodes = {} # {node_name: "SUCCESS" or "FAILURE"}
         self.active_goal_id = None  # type: UUID | None
