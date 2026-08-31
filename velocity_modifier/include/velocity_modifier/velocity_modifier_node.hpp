@@ -6,11 +6,11 @@
 #include <robot_interfaces/msg/modifier_control.hpp>
 #include <std_msgs/msg/string.hpp>
 
-#include <mutex>
+#include <mutex> // <atomic> 대신 <mutex>를 포함
 #include <limits>
 #include <memory>
-#include <cmath>
-#include <string> // string 추가
+#include <cmath>  // for std::adb, std::copysign
+#include <string>
 
 namespace velocity_modifier
 {
@@ -19,7 +19,7 @@ class VelocityModifierNode : public rclcpp::Node
 {
 public:
   using ModifierControl = robot_interfaces::msg::ModifierControl;
-  using String = std_msgs::msg::String;
+  using String = std_msgs::msg::String; // 타입 별칭 추가
 
   explicit VelocityModifierNode(const rclcpp::NodeOptions & options);
 
@@ -55,21 +55,29 @@ private:
     STANDARD_SCALE,
     RATIO_LIMIT_SCALE
   };
-  SpeedMode current_mode_ = SpeedMode::STANDARD_LIMIT;  
+  SpeedMode current_mode_ = SpeedMode::STANDARD_LIMIT;
+
 
   double min_abs_linear_vel_ = 0.05;
   double min_abs_angular_vel_ = 0.05;
+  // [추가] 회복 구간 저속 보정의 판단 기준. 모터 데드밴드는 로봇 몸체 속도가 아니라
+  // 바퀴 속도의 성질이므로, 좌/우 바퀴 속도로 판단한다. min_abs_linear_vel_ /
+  // min_abs_angular_vel_ 은 더 이상 이 판단에 쓰지 않는다(아래 cmdVelCallback 주석 참고).
+  double min_abs_wheel_vel_ = 0.02;   // 실측 데드밴드 0.01 (그 이하면 안 움직임) + 2배 마진
+  double wheel_separation_ = 0.526;   // roboteq.yaml 의 track_width
   
   // 비율 보정 시 적용될 상한선 
   double ratio_scaling_max_linear_vel_ = 0.35;
   double ratio_scaling_max_angular_vel_ = 0.25;
-  
+
   bool recovery_mode_ = false;
 
   // === [Added] 주행 시작 속도 제한을 위한 변수 ===
   rclcpp::Time driving_start_time_;      // 주행 시작 시각 저장
   std::string last_robot_status_ = "";   // 상태 변화 감지용
   double startup_phase2_limit_ = 0.3;    // 1초 ~ 2.5초 사이의 속도 제한 값 (파라미터화)
+
+
 
 };
 
