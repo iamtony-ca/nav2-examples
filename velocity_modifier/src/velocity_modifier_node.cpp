@@ -211,7 +211,7 @@ void VelocityModifierNode::cmdVelCallback(const geometry_msgs::msg::Twist::Share
   }
   // [수정된 로직 끝]
 
-  RCLCPP_INFO(this->get_logger(), "1▶ vx: %.11lf, wz: %.11lf", adjusted_vel->linear.x, adjusted_vel->linear.z);
+  RCLCPP_INFO(this->get_logger(), "1▶ vx: %.11lf, wz: %.11lf", adjusted_vel->linear.x, adjusted_vel->angular.z);
 
    // 3. 저속 보정 로직 ( numerically stable version )
   if (recovery_mode_ == true) {
@@ -250,15 +250,57 @@ void VelocityModifierNode::cmdVelCallback(const geometry_msgs::msg::Twist::Share
       double new_wz = wz * scale;
       RCLCPP_INFO(this->get_logger(), " scale: %.5lf, new_vx: %.5lf, new_wz: %.5lf", scale, new_vx, new_wz);
 
-      // // 이 로직으로 계산된 값에 대해서만 특별 상한선 적용
-      adjusted_vel->linear.x = std::clamp(
-        new_vx, -ratio_scaling_max_linear_vel_, ratio_scaling_max_linear_vel_);
-      adjusted_vel->angular.z = std::clamp(
-        new_wz, -ratio_scaling_max_angular_vel_, ratio_scaling_max_angular_vel_);
+      // 이 로직으로 계산된 값에 대해서만 특별 상한선 적용.
+      //
+      // [수정] 예전에는 두 축을 각각 std::clamp 했다. 그러면 한쪽 축만 잘려서
+      // 바로 위에서 공통 배율(scale)로 애써 보존한 곡률(v/w)이 도로 깨진다.
+      // 현장 사례: 입력 (v=-0.0132, w=-0.2736) = 회전반경 0.048 m 인 명령이
+      //   scale=2.28 -> (-0.030, -0.623) -> 각속도만 0.20 으로 잘림
+      //   -> 출력 (-0.030, -0.200) = 회전반경 0.15 m
+      // 로 바뀌어 회전 반경이 3배로 부풀었다. 더 나쁜 것은, 이 경로를 타면
+      // 회전반경이 0.15 m(= min_abs_linear_vel_ / ratio_scaling_max_angular_vel_)
+      // 미만인 "모든" 입력이 똑같이 (-0.03, -0.20) 으로 뭉개진다는 점이다.
+      // 컨트롤러가 명령을 바꿔도 로봇은 늘 같은 원을 돌게 되어 제어 루프가 끊긴다
+      // (실제로 회복 주행이 이 원에서 빠져나오지 못했다).
+      //
+      // 그래서 위쪽 RATIO_LIMIT_SCALE 블록과 동일하게, 상한을 넘긴 만큼을
+      // 두 축에 공통으로 적용해 곡률을 유지한 채로 줄인다.
+      // 그 결과 선속도가 min_abs_linear_vel_ 에 못 미칠 수 있는데, 이는 의도된
+      // 절충이다. 곡률이 뒤틀린 명령보다 조금 느린 명령이 낫다.
+      double clip = 1.0;
+      const double abs_new_vx = std::abs(new_vx);
+      const double abs_new_wz = std::abs(new_wz);
+      if (abs_new_vx > ratio_scaling_max_linear_vel_) {
+        clip = std::min(clip, ratio_scaling_max_linear_vel_ / abs_new_vx);
+      }
+      if (abs_new_wz > ratio_scaling_max_angular_vel_) {
+        clip = std::min(clip, ratio_scaling_max_angular_vel_ / abs_new_wz);
+      }
+      // [가드] 저속 보정은 "올리는" 로직이므로 결과적으로 원래 명령보다 느려지면
+      // 적용하지 않는다(원본 유지). 위쪽 RATIO_LIMIT_SCALE 블록의
+      // `scale = std::min(scale, 1.0)` (속도를 증가시키지 않도록) 과 대칭인 가드다.
+      //
+      // 사실상 제자리 선회(|v/w| 가 아주 작은 명령)에서 이 상황이 생긴다.
+      // 각속도가 ratio_scaling_max_angular_vel_ 에 먼저 걸려서, 곡률을 지키려면
+      // 선속도를 원래보다 깎아야 하기 때문이다. 그럴 바에는 손대지 않는 게 맞다.
+      const double net = scale * clip;
+      if (net < 1.0) {
+        RCLCPP_INFO(
+          this->get_logger(),
+          " skip: net=%.5lf (<1.0) - 저속 보정이 감속이 되므로 원본 유지", net);
+      } else {
+        if (clip < 1.0) {
+          RCLCPP_INFO(
+            this->get_logger(), " clip: %.5lf, final_vx: %.5lf, final_wz: %.5lf",
+            clip, new_vx * clip, new_wz * clip);
+        }
+        adjusted_vel->linear.x = new_vx * clip;
+        adjusted_vel->angular.z = new_wz * clip;
+      }
     }
   } // End of if (recovery_mode_)
   
-  RCLCPP_INFO(this->get_logger(), "2▶ vx: %.11lf, wz: %.11lf", adjusted_vel->linear.x, adjusted_vel->linear.z);
+  RCLCPP_INFO(this->get_logger(), "2▶ vx: %.11lf, wz: %.11lf", adjusted_vel->linear.x, adjusted_vel->angular.z);
 
   adjusted_cmd_vel_pub_->publish(std::move(adjusted_vel));
 }
