@@ -183,8 +183,31 @@ class NavigationManagerNode(Node):
         # ----- Publishers --------------------------------------------- #
         self._monitoring_publisher = self.create_publisher(
             NavigationMonitoring, 'ros2_nav2_monitoring_data', 10)
+        # [수정] nav_pause_flag 를 TRANSIENT_LOCAL 로 발행한다.
+        #
+        # 이 토픽은 pause/resume 이 일어난 "순간에만" 1회 발행된다. 기존처럼
+        # VOLATILE 로 내보내면, 나중에 구독을 시작한 쪽은 현재 pause 상태를 알 방법이
+        # 없다. moduler31 의 회복 pause 브랜치(ManeuverServerPause)가 이 토픽을
+        # 봐야 하는데, amr_bt_nodes 의 CheckPauseCondition 은 항상 TRANSIENT_LOCAL 로
+        # 구독하므로(= transient_local 포트가 durability 를 되돌리지 않는 결함이 있다)
+        # VOLATILE 발행과는 QoS 가 맞지 않아 아예 수신되지 않는다.
+        #
+        # TRANSIENT_LOCAL 발행은 기존 구독자와도 호환된다
+        # ("발행자가 제공하는 durability >= 구독자가 요구하는 durability").
+        # controller_server 도 같은 이유로 TRANSIENT_LOCAL 구독으로 맞춰 두었다.
+        # 그래야 컨트롤러가 재기동해도 직전 pause 상태를 그대로 이어받는다.
+        #
+        # depth 는 1 로 둔다. TRANSIENT_LOCAL 에서 depth 를 크게 잡으면 나중에 붙는
+        # 구독자가 과거 샘플을 여러 개 돌려받는다. pause 플래그는 "현재 상태" 하나만
+        # 의미가 있으므로 마지막 값만 유지하는 것이 맞다.
+        # (fleet_decision_node 가 /controller_pause_flag 를 발행할 때 쓰는 프로파일과 같다)
+        qos_nav_pause = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
         self._pause_resume_publisher = self.create_publisher(
-            Bool, 'nav_pause_flag', 10)
+            Bool, 'nav_pause_flag', qos_nav_pause)
         # self._pause_resume_publisher = self.create_publisher(
         #     Bool, '/controller_pause_flag', qos_pause)
 
@@ -362,7 +385,18 @@ class NavigationManagerNode(Node):
             # _update_nav2_status()가 매 tick마다 ros_nav_driving_abort를 다시 True로
             # 세워서, 위에서 지운 값이 publish 되기 전에 덮어써진다.
             # (_nav_stop_callback / _main_stop_callback이 STATUS_CANCELED를 넣는 것과 동일한 처리)
-            self._goal_status = GoalStatus.STATUS_CANCELED
+            #
+            # [주의] 반드시 STATUS_ABORTED 일 때만 바꾼다. 조건 없이 CANCELED 를 넣으면
+            # 주행 중에 reset 이 들어왔을 때 다음 두 가지가 같이 망가진다.
+            #   1) _update_nav2_status(CANCELED) 가 ros_nav_driving 을 False 로 만든다.
+            #   2) _move_feedback_callback 이 _goal_status in (SUCCEEDED/ABORTED/CANCELED)
+            #      에서 조기 return 하므로 STATUS_EXECUTING 으로 되돌아오지 못하고,
+            #      current_node_id / distance_remaining / poses_remaining 갱신도 멈춘다.
+            # 그러면 로봇은 계속 주행하는데 상위 서버에는 "정지" 로 보인다.
+            # (sim 실측: 주행 중 reset 후 6초간 cmd_vel 은 100% 비영인데
+            #  ros_nav_driving 은 55tick 전부 False. 조건을 달면 55/55 True 로 정상.)
+            if self._goal_status == GoalStatus.STATUS_ABORTED:
+                self._goal_status = GoalStatus.STATUS_CANCELED
    
         self.get_logger().info(f'reset abort status, reset_callback')
 

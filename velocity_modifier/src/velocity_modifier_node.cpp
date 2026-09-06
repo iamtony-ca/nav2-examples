@@ -64,6 +64,11 @@ VelocityModifierNode::VelocityModifierNode(const rclcpp::NodeOptions & options)
   // [Added] Phase 2 (1.0s ~ 2.5s) 속도 제한 파라미터 (기본값 0.3)
   this->declare_parameter<double>("startup_phase2_limit", 0.3);
 
+  // [추가] 주행 초기(Phase 1, 2 공통) 각속도 제한.
+  // 선속도 제한만으로는 제자리 선회를 못 막는다. 현장 컨트롤러의 v_angular_max 가
+  // 1.8 이므로, 이 값은 주행 시작 2.5초 동안 실제로 걸리는 상한이다.
+  this->declare_parameter<double>("startup_angular_limit", 0.5);
+
 
   this->get_parameter("min_abs_linear_vel", min_abs_linear_vel_);
   this->get_parameter("min_abs_angular_vel", min_abs_angular_vel_);
@@ -74,11 +79,13 @@ VelocityModifierNode::VelocityModifierNode(const rclcpp::NodeOptions & options)
 
    // [Added] 파라미터 읽기
   this->get_parameter("startup_phase2_limit", startup_phase2_limit_);
+  this->get_parameter("startup_angular_limit", startup_angular_limit_);
   
   // [Added] 시간 초기화 (0초로 설정)
   driving_start_time_ = rclcpp::Time(0, 0, this->get_clock()->get_clock_type()); 
 
   RCLCPP_INFO(this->get_logger(), "Startup Phase2 Limit: %.3f m/s", startup_phase2_limit_);
+  RCLCPP_INFO(this->get_logger(), "Startup Angular Limit: %.3f rad/s", startup_angular_limit_);
 
 
   // [수정] cmd_vel 은 MutuallyExclusive 여야 한다.
@@ -122,7 +129,27 @@ VelocityModifierNode::VelocityModifierNode(const rclcpp::NodeOptions & options)
     "velocity_modifier/control", qos_control,
     std::bind(&VelocityModifierNode::controlCallback, this, std::placeholders::_1),
     sub_control_opt);
-  
+
+  // [추가] 토픽과 같은 기능의 서비스. 기존 토픽 경로는 그대로 둔다.
+  //
+  // 토픽은 보내고 나면 반영됐는지 알 수 없고, 값이 제한됐는지도 알 수 없다.
+  // 응답이 필요한 호출자를 위해 서비스를 함께 제공한다.
+  // 적용 로직은 controlCallback 과 applyControl() 하나를 공유하므로 두 경로가
+  // 갈라질 수 없다.
+  //
+  //   ros2 service call /velocity_modifier/set_control
+  //       robot_interfaces/srv/SetVelocityModifier
+  //       "{control: {command_type: 1, linear_value: 0.2, angular_value: 0.3}}"
+  //
+  // 콜백 그룹은 토픽과 같은 것을 쓴다. 같은 상태를 만지므로 cmd_vel 처리와는
+  // 분리하되, 서로에 대해서는 data_mutex_ 로 직렬화된다.
+  control_service_ = this->create_service<SetVelocityModifier>(
+    "velocity_modifier/set_control",
+    std::bind(&VelocityModifierNode::setControlService, this,
+              std::placeholders::_1, std::placeholders::_2),
+    rmw_qos_profile_services_default,
+    cb_group_control_);
+
   // /robot_status 토픽을 구독하는 로직 추가
   auto sub_recovery_opt = rclcpp::SubscriptionOptions();
   sub_recovery_opt.callback_group = cb_group_recovery_;
@@ -210,19 +237,33 @@ void VelocityModifierNode::cmdVelCallback(const geometry_msgs::msg::Twist::Share
       startup_limit = startup_phase2_limit_;
     }
 
-    // 제한 값이 설정되었고, 현재 선속도가 그보다 크다면 Clamping 수행
+    // 제한 값이 설정되었으면 선속도 상한과 각속도 상한을 함께 적용한다.
+    //
+    // [수정] 예전에는 선속도만 봤다.
+    //   if (abs_vx > startup_limit) { scale = startup_limit / abs_vx; ... }
+    // 이러면 제자리 선회 지령(선속도 0, 각속도만 큰 지령)이 조건에 아예 걸리지 않아
+    // 주행 시작 직후에도 각속도가 무제한으로 나간다. 실측: 주행 시작 1초 안에
+    // (0.000, 1.500) 이 그대로 통과했다. 현장 컨트롤러의 v_angular_max 는 1.8 이라
+    // 이 구간에서 로봇이 제자리에서 급하게 돌 수 있다.
+    //
+    // 두 상한을 "공통 배율"로 적용하므로 곡률(v/w)은 그대로 유지된다.
+    // (이 파일의 다른 상한 처리와 같은 방식이다. commonLimitScale 주석 참고)
     if (startup_limit > 0.0) {
-      double abs_vx = std::abs(adjusted_vel->linear.x);
-      if (abs_vx > startup_limit) {
-        // 비율 유지 Clamping: scale = limit / current
-        double scale = startup_limit / abs_vx;
+      const double orig_vx = adjusted_vel->linear.x;
+      const double orig_wz = adjusted_vel->angular.z;
 
-        adjusted_vel->linear.x *= scale;
-        adjusted_vel->angular.z *= scale; // 각속도도 동일 비율로 줄임
+      const double scale = commonLimitScale(
+        orig_vx, orig_wz, startup_limit, startup_angular_limit_);
+
+      if (scale < 1.0) {
+        adjusted_vel->linear.x = orig_vx * scale;
+        adjusted_vel->angular.z = orig_wz * scale;
 
         RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-          "Startup Limit Active (t=%.2fs): Limit=%.2f, OrigVx=%.2f -> NewVx=%.2f",
-          elapsed_sec, startup_limit, abs_vx, adjusted_vel->linear.x);
+          "Startup Limit Active (t=%.2fs): lin<=%.2f ang<=%.2f | "
+          "(%.3f, %.3f) -> (%.3f, %.3f)",
+          elapsed_sec, startup_limit, startup_angular_limit_,
+          orig_vx, orig_wz, adjusted_vel->linear.x, adjusted_vel->angular.z);
       }
     }
   }
@@ -343,48 +384,142 @@ void VelocityModifierNode::cmdVelCallback(const geometry_msgs::msg::Twist::Share
   adjusted_cmd_vel_pub_->publish(std::move(adjusted_vel));
 }
 
-void VelocityModifierNode::controlCallback(const ModifierControl::SharedPtr msg)
+bool VelocityModifierNode::applyControl(
+  const ModifierControl & req, ModifierControl & applied, std::string & message)
 {
   const std::lock_guard<std::mutex> lock(data_mutex_);
 
-  switch (msg->command_type) {
+  applied = req;
+  bool ok = true;
+
+  switch (req.command_type) {
     case ModifierControl::TYPE_SPEED_LIMIT:
       current_mode_ = SpeedMode::STANDARD_LIMIT;
-      speed_limit_linear_ = msg->linear_value;
-      speed_limit_angular_ = msg->angular_value;
+      speed_limit_linear_ = req.linear_value;
+      speed_limit_angular_ = req.angular_value;
       speed_scale_ = 1.0;
       RCLCPP_INFO(
         this->get_logger(), "Set Mode: STANDARD_LIMIT. Linear: %.2f, Angular: %.2f",
         speed_limit_linear_, speed_limit_angular_);
+      message = "STANDARD_LIMIT applied";
       break;
 
     case ModifierControl::TYPE_SPEED_SCALE:
+    {
       current_mode_ = SpeedMode::STANDARD_SCALE;
-      speed_scale_ = msg->linear_value;
+
+      // [수정] 배율을 [0, 1] 로 제한한다.
+      //
+      // 이 노드는 속도를 "줄이는" 마지막 관문이고, 출력이 곧 /cmd_vel 이라 바로
+      // 모터 드라이버로 간다. 그런데 이 모드만은 배율을 검증 없이 그대로 대입하고
+      // 상한마저 DBL_MAX 로 열어두기 때문에, 1.0 보다 큰 값이 한 번 들어오면
+      // 그대로 증폭되어 나갔다.
+      //   실측: scale=5.0 일 때 (0.300, 0.100) -> (1.500, 0.500)
+      // 상류 Nav2 파라미터를 아무리 조여도 이 노드 뒤에서 풀려버린다.
+      // 단위 착오(퍼센트를 배율로 전송)나 패킷 오해석 한 번이면 5배 가속 지령이 된다.
+      //
+      // 속도 제한 노드가 속도를 올리는 것은 어떤 경우에도 의도가 아니므로 1.0 에서 자른다.
+      // 음수도 막는다(부호가 뒤집히면 로봇이 반대로 간다).
+      const bool finite = std::isfinite(req.linear_value);
+      const double clamped =
+        finite ? std::clamp<double>(req.linear_value, 0.0, 1.0) : 0.0;
+
+      if (!finite || req.linear_value < 0.0 || req.linear_value > 1.0) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "STANDARD_SCALE: 배율 %.3f 는 허용 범위 [0, 1] 를 벗어난다. %.3f 로 제한한다.",
+          req.linear_value, clamped);
+        message = "STANDARD_SCALE applied (scale clamped to [0, 1])";
+      } else {
+        message = "STANDARD_SCALE applied";
+      }
+
+      speed_scale_ = clamped;
+      applied.linear_value = static_cast<float>(clamped);
+      // 이 모드에서 angular_value 는 쓰이지 않는다. 응답에서도 그 사실이 드러나게 0 으로 둔다.
+      applied.angular_value = 0.0f;
+
       speed_limit_linear_ = std::numeric_limits<double>::max();
       speed_limit_angular_ = std::numeric_limits<double>::max();
       RCLCPP_INFO(this->get_logger(), "Set Mode: STANDARD_SCALE. Scale: %.2f", speed_scale_);
       break;
+    }
 
     case ModifierControl::TYPE_SPEED_LIMIT_SCALE:
       current_mode_ = SpeedMode::RATIO_LIMIT_SCALE;
-      ratio_limit_linear_ = msg->linear_value;
-      ratio_limit_angular_ = msg->angular_value;
+      ratio_limit_linear_ = req.linear_value;
+      ratio_limit_angular_ = req.angular_value;
       // 다른 모드 설정 초기화
-      speed_scale_ = 1.0; 
+      speed_scale_ = 1.0;
       speed_limit_linear_ = std::numeric_limits<double>::max();
       speed_limit_angular_ = std::numeric_limits<double>::max();
 
       RCLCPP_INFO(
         this->get_logger(), "Set Mode: RATIO_LIMIT_SCALE. Linear: %.2f, Angular: %.2f",
         ratio_limit_linear_, ratio_limit_angular_);
+      message = "RATIO_LIMIT_SCALE applied";
       break;
 
     default:
       RCLCPP_WARN(
-        this->get_logger(), "Received control command with unknown type: %d", msg->command_type);
+        this->get_logger(), "Received control command with unknown type: %d", req.command_type);
+      message = "unknown command_type: " + std::to_string(req.command_type) +
+                " (mode unchanged)";
+      ok = false;
       break;
   }
+
+  if (!ok) {
+    // 실패했으면 "지금 유지 중인 값" 을 돌려준다. 호출자가 현재 상태를 알 수 있어야 한다.
+    switch (current_mode_) {
+      case SpeedMode::STANDARD_LIMIT:
+        applied.command_type = ModifierControl::TYPE_SPEED_LIMIT;
+        applied.linear_value = static_cast<float>(speed_limit_linear_);
+        applied.angular_value = static_cast<float>(speed_limit_angular_);
+        break;
+      case SpeedMode::STANDARD_SCALE:
+        applied.command_type = ModifierControl::TYPE_SPEED_SCALE;
+        applied.linear_value = static_cast<float>(speed_scale_);
+        applied.angular_value = 0.0f;
+        break;
+      case SpeedMode::RATIO_LIMIT_SCALE:
+        applied.command_type = ModifierControl::TYPE_SPEED_LIMIT_SCALE;
+        applied.linear_value = static_cast<float>(ratio_limit_linear_);
+        applied.angular_value = static_cast<float>(ratio_limit_angular_);
+        break;
+    }
+  }
+
+  return ok;
+}
+
+// 기존 토픽 경로. 동작은 그대로 두고 적용 로직만 applyControl 로 옮겼다.
+// 토픽과 서비스가 각자 모드를 세팅하면 언젠가 갈라지므로 한 곳에만 둔다.
+void VelocityModifierNode::controlCallback(const ModifierControl::SharedPtr msg)
+{
+  ModifierControl applied;
+  std::string message;
+  applyControl(*msg, applied, message);
+}
+
+// [추가] 서비스 경로. 토픽과 같은 일을 하되 결과를 돌려준다.
+//
+// 토픽은 보내고 나면 반영됐는지 알 방법이 없고, 값이 제한됐는지도 알 수 없다.
+// (예: STANDARD_SCALE 의 배율은 [0, 1] 로 잘린다)
+// 서비스는 success / message / 실제 적용된 값을 함께 돌려준다.
+void VelocityModifierNode::setControlService(
+  const std::shared_ptr<SetVelocityModifier::Request> request,
+  std::shared_ptr<SetVelocityModifier::Response> response)
+{
+  std::string message;
+  response->success = applyControl(request->control, response->applied, message);
+  response->message = message;
+
+  RCLCPP_INFO(
+    this->get_logger(), "[service] set_control: type=%u req=(%.3f, %.3f) -> %s | %s",
+    request->control.command_type, request->control.linear_value,
+    request->control.angular_value,
+    response->success ? "OK" : "REJECTED", response->message.c_str());
 }
 
 }  // namespace velocity_modifier

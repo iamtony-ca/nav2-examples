@@ -1,0 +1,34 @@
+# velocity_modifier 의 속도 제한/스케일을 서비스로 설정한다.
+#
+# 기존 토픽 `/velocity_modifier/control` (robot_interfaces/ModifierControl) 과
+# 기능이 완전히 같다. 토픽 방식은 그대로 두고, 응답이 필요한 호출자를 위해 추가한 것이다.
+#
+# 토픽 대비 이점:
+#   - 적용 성공/실패를 알 수 있다 (토픽은 보내고 나면 반영됐는지 알 방법이 없다).
+#   - 실제로 적용된 값을 돌려받는다. 요청 값이 그대로 쓰이지 않을 수 있다.
+#     예: TYPE_SPEED_SCALE 의 배율은 [0, 1] 로 제한된다. 1.5 를 보내면 1.0 이 적용되고
+#         applied.linear_value 에 1.0 이 담겨 온다.
+#
+# 요청 필드는 토픽과 같은 메시지를 그대로 쓴다. 그래야 command_type 상수
+# (TYPE_SPEED_LIMIT / TYPE_SPEED_SCALE / TYPE_SPEED_LIMIT_SCALE) 가 한 곳에만 존재하고
+# 두 경로가 어긋날 수 없다.
+#
+# 사용 예 (한 줄):
+#   ros2 service call /velocity_modifier/set_control robot_interfaces/srv/SetVelocityModifier "{control: {command_type: 1, linear_value: 0.2, angular_value: 0.3}}"
+#
+# [주의] 이 파일의 주석에 역슬래시를 쓰면 안 된다. rosidl 이 .idl 로 변환할 때
+# 주석 문자열을 파이썬 이스케이프로 해석해 UnicodeDecodeError 로 빌드가 깨진다.
+
+ModifierControl control
+
+---
+
+# 요청이 받아들여졌는가. command_type 이 알 수 없는 값이면 false 이고
+# 이때 모드는 바뀌지 않는다.
+bool success
+
+# 사람이 읽는 결과 설명. 값이 제한된 경우 그 사실도 여기에 적는다.
+string message
+
+# 실제로 적용된 값. success 가 false 면 현재 유지 중인 값이 담긴다.
+ModifierControl applied

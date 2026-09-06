@@ -32,6 +32,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ModifierControl.msg"
   "srv/SmartRecoveryPath.srv"
   "srv/SetNavigationMode.srv"
+  "srv/SetVelocityModifier.srv"
   
   "action/SmartRecovery.action"
   DEPENDENCIES geometry_msgs std_msgs std_srvs nav_msgs builtin_interfaces

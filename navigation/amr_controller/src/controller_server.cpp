@@ -256,6 +256,7 @@ ControllerServer::on_configure(const rclcpp_lifecycle::State & state)
     speed_limit_topic, rclcpp::QoS(10),
     std::bind(&ControllerServer::speedLimitCallback, this, std::placeholders::_1));
 
+    // ADD SEC changgwak
   // pause_flag subscriber 등록
   callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
   // callback_group_ = get_node_base_interface()->create_callback_group(
@@ -264,6 +265,16 @@ ControllerServer::on_configure(const rclcpp_lifecycle::State & state)
 
   rclcpp::SubscriptionOptions sub_options;
   sub_options.callback_group = callback_group_;
+  // [FIX] nav_pause_flag 를 TRANSIENT_LOCAL 로 구독한다.
+  //
+  // 이 토픽은 pause/resume 이 일어난 "순간에만" 발행된다. VOLATILE 로 구독하면
+  // controller_server 가 재기동(respawn)했을 때 그 전에 발행된 pause 를 받지 못해
+  // pause_flag_ 가 false 인 채로 올라온다. 즉 **관제가 세워둔 로봇이 컨트롤러 재기동만으로
+  // 다시 움직이기 시작한다.** 상태를 잃는 쪽이 아니라 유지하는 쪽이 fail-safe 다.
+  //
+  // 위 주석 처리된 줄이 원래 의도였는데, 그때는 발행 측(navigation_manager)이
+  // VOLATILE 이라 durability 가 맞지 않아(요구 TRANSIENT_LOCAL > 제공 VOLATILE)
+  // 아예 연결되지 않았을 것이다. 발행 측을 TRANSIENT_LOCAL 로 올렸으므로 이제 성립한다.
   pause_sub_ = this->create_subscription<std_msgs::msg::Bool>(
     "/nav_pause_flag", rclcpp::QoS(1).transient_local().reliable(),
     std::bind(&ControllerServer::pauseCallback, this, std::placeholders::_1), sub_options);
@@ -431,6 +442,8 @@ bool ControllerServer::findGoalCheckerId(
     current_goal_checker = c_name;
   }
 
+  // added sec
+  // RCLCPP_WARN(get_logger(), "Selected goal checker: %s.", current_goal_checker.c_str());
   return true;
 }
 
@@ -476,7 +489,6 @@ void ControllerServer::computeControl()
     std::string current_controller;
     if (findControllerId(c_name, current_controller)) {
       current_controller_ = current_controller;
-      RCLCPP_WARN(get_logger(), "Selected controller: %s.", current_controller_.c_str());
     } else {
       throw nav2_core::InvalidController("Failed to find controller name: " + c_name);
     }
@@ -485,7 +497,6 @@ void ControllerServer::computeControl()
     std::string current_goal_checker;
     if (findGoalCheckerId(gc_name, current_goal_checker)) {
       current_goal_checker_ = current_goal_checker;
-      RCLCPP_WARN(get_logger(), "Selected goal checker: %s.", current_goal_checker_.c_str());
     } else {
       throw nav2_core::ControllerException("Failed to find goal checker name: " + gc_name);
     }
@@ -554,6 +565,20 @@ void ControllerServer::computeControl()
         velocity.header.stamp = now();
         velocity.header.frame_id = costmap_ros_->getBaseFrameID();
         publishVelocity(velocity);
+
+        // [FIX] loop_rate.sleep() 은 이 루프의 "끝" 에 있다. 그냥 continue 하면
+        // 그 sleep 에 도달하지 못해, pause 동안 제어 루프가 controller_frequency 를
+        // 지키지 않고 CPU 가 허용하는 만큼 돈다(바쁜 대기).
+        //
+        // sim 실측 (현장 controller_frequency 20Hz 기준):
+        //   주행 중   CPU   9.1% / cmd_vel_nav   20 Hz
+        //   pause 중  CPU 109~122% / cmd_vel_nav 4741~5321 Hz   <- 코어 하나를 다 먹는다
+        //   resume 후 CPU   9.2% / cmd_vel_nav   20 Hz
+        // 정지 지령 자체는 velocity_smoother 가 자체 20Hz 타이머로 흡수해서 모터까지
+        // 번지지는 않았지만, pause 가 지속되는 내내 CPU 한 코어와 DDS 대역을 낭비한다.
+        //
+        // 여기서 한 번 재워 주면 pause 중에도 정상 주기(20Hz)로 정지 지령을 낸다.
+        loop_rate.sleep();
         continue;
       }
 
@@ -567,8 +592,10 @@ void ControllerServer::computeControl()
 
       computeAndPublishVelocity();
 
+      // modified sec
       if (isGoalReached()) {
-        RCLCPP_INFO(get_logger(), "Reached the goal!");
+        RCLCPP_WARN(get_logger(), "Reached the goal!");
+        // RCLCPP_INFO(get_logger(), "Reached the goal!");
         break;
       }
 
@@ -865,6 +892,16 @@ bool ControllerServer::isGoalReached()
   nav_2d_utils::transformPose(
     costmap_ros_->getTfBuffer(), costmap_ros_->getGlobalFrameID(),
     end_pose_, transformed_end_pose, tolerance);
+
+  // added sec chang.gwak
+  // RCLCPP_WARN_THROTTLE(
+  // get_logger(), *this->get_clock(), 2000,
+  // "isGoalReached executed!!! pose.pose.x: %.4lf, pose.pose.y: %.4lf, transformed_end_pose.pose.x: %.4lf, transformed_end_pose.pose.y: %.4lf,", pose.pose.position.x, pose.pose.position.y, transformed_end_pose.pose.position.x, transformed_end_pose.pose.position.y);
+
+  // RCLCPP_WARN_THROTTLE(
+  // get_logger(), *this->get_clock(), 2000,
+  // "isGoalReached executed!!! pose.header.frame_id: %s", pose.header.frame_id.c_str());
+    // added sec
 
   return goal_checkers_[current_goal_checker_]->isGoalReached(
     pose.pose, transformed_end_pose.pose,

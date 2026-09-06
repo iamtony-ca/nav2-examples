@@ -223,8 +223,10 @@ ControllerServer::on_configure(const rclcpp_lifecycle::State & state)
   odom_sub_ = std::make_unique<nav_2d_utils::OdomSubscriber>(node);
   vel_publisher_ = std::make_unique<nav2_util::TwistPublisher>(node, "cmd_vel", 1);
 
+
   double action_server_result_timeout;
   get_parameter("action_server_result_timeout", action_server_result_timeout);
+
   rcl_action_server_options_t server_options = rcl_action_server_get_default_options();
   server_options.result_timeout.nanoseconds = RCL_S_TO_NS(action_server_result_timeout);
 
@@ -234,6 +236,7 @@ ControllerServer::on_configure(const rclcpp_lifecycle::State & state)
 
   // Create the action server that we implement with our followPath method
   // This may throw due to real-time prioritzation if user doesn't have real-time permissions
+
   try {
     action_server_ = std::make_unique<ActionServer>(
       shared_from_this(),
@@ -253,8 +256,37 @@ ControllerServer::on_configure(const rclcpp_lifecycle::State & state)
     speed_limit_topic, rclcpp::QoS(10),
     std::bind(&ControllerServer::speedLimitCallback, this, std::placeholders::_1));
 
+    // ADD SEC changgwak
+  // pause_flag subscriber 등록
+  callback_group_ = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+  // callback_group_ = get_node_base_interface()->create_callback_group(
+  //   rclcpp::CallbackGroupType::Reentrant);  // Reentrant
+
+
+  rclcpp::SubscriptionOptions sub_options;
+  sub_options.callback_group = callback_group_;
+  // [FIX] nav_pause_flag 를 TRANSIENT_LOCAL 로 구독한다.
+  //
+  // 이 토픽은 pause/resume 이 일어난 "순간에만" 발행된다. VOLATILE 로 구독하면
+  // controller_server 가 재기동(respawn)했을 때 그 전에 발행된 pause 를 받지 못해
+  // pause_flag_ 가 false 인 채로 올라온다. 즉 **관제가 세워둔 로봇이 컨트롤러 재기동만으로
+  // 다시 움직이기 시작한다.** 상태를 잃는 쪽이 아니라 유지하는 쪽이 fail-safe 다.
+  //
+  // 위 주석 처리된 줄이 원래 의도였는데, 그때는 발행 측(navigation_manager)이
+  // VOLATILE 이라 durability 가 맞지 않아(요구 TRANSIENT_LOCAL > 제공 VOLATILE)
+  // 아예 연결되지 않았을 것이다. 발행 측을 TRANSIENT_LOCAL 로 올렸으므로 이제 성립한다.
+  pause_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+    "/nav_pause_flag", rclcpp::QoS(1).transient_local().reliable(),
+    std::bind(&ControllerServer::pauseCallback, this, std::placeholders::_1), sub_options);
+
+
   return nav2_util::CallbackReturn::SUCCESS;
 }
+
+
+
+
+
 
 nav2_util::CallbackReturn
 ControllerServer::on_activate(const rclcpp_lifecycle::State & /*state*/)
@@ -410,6 +442,8 @@ bool ControllerServer::findGoalCheckerId(
     current_goal_checker = c_name;
   }
 
+  // added sec
+  // RCLCPP_WARN(get_logger(), "Selected goal checker: %s.", current_goal_checker.c_str());
   return true;
 }
 
@@ -481,7 +515,9 @@ void ControllerServer::computeControl()
     last_valid_cmd_time_ = now();
     rclcpp::WallRate loop_rate(controller_frequency_);
     while (rclcpp::ok()) {
+      
       auto start_time = this->now();
+
 
       if (action_server_ == nullptr || !action_server_->is_server_active()) {
         RCLCPP_DEBUG(get_logger(), "Action server unavailable or inactive. Stopping.");
@@ -512,10 +548,54 @@ void ControllerServer::computeControl()
 
       updateGlobalPath();
 
+
+      if (pause_flag_) {
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 3500,
+          "Paused: Controller is holding position.");
+        geometry_msgs::msg::TwistStamped velocity;
+        
+        was_paused_last_cycle_ = true;
+
+        velocity.twist.linear.x = 0.0;
+        velocity.twist.linear.y = 0.0;
+        velocity.twist.linear.z = 0.0;
+        velocity.twist.angular.x = 0.0;
+        velocity.twist.angular.y = 0.0;
+        velocity.twist.angular.z = 0.0;
+        velocity.header.stamp = now();
+        velocity.header.frame_id = costmap_ros_->getBaseFrameID();
+        publishVelocity(velocity);
+
+        // [FIX] loop_rate.sleep() 은 이 루프의 "끝" 에 있다. 그냥 continue 하면
+        // 그 sleep 에 도달하지 못해, pause 동안 제어 루프가 controller_frequency 를
+        // 지키지 않고 CPU 가 허용하는 만큼 돈다(바쁜 대기).
+        //
+        // sim 실측 (현장 controller_frequency 20Hz 기준):
+        //   주행 중   CPU   9.1% / cmd_vel_nav   20 Hz
+        //   pause 중  CPU 109~122% / cmd_vel_nav 4741~5321 Hz   <- 코어 하나를 다 먹는다
+        //   resume 후 CPU   9.2% / cmd_vel_nav   20 Hz
+        // 정지 지령 자체는 velocity_smoother 가 자체 20Hz 타이머로 흡수해서 모터까지
+        // 번지지는 않았지만, pause 가 지속되는 내내 CPU 한 코어와 DDS 대역을 낭비한다.
+        //
+        // 여기서 한 번 재워 주면 pause 중에도 정상 주기(20Hz)로 정지 지령을 낸다.
+        loop_rate.sleep();
+        continue;
+      }
+
+      // after resume, when first loop, reset progress checker
+      if (was_paused_last_cycle_) {
+        progress_checkers_[current_progress_checker_]->reset();
+        was_paused_last_cycle_ = false;
+        RCLCPP_INFO(get_logger(), "Progress checker reset after resume");
+      }
+
+
       computeAndPublishVelocity();
 
+      // modified sec
       if (isGoalReached()) {
-        RCLCPP_INFO(get_logger(), "Reached the goal!");
+        RCLCPP_WARN(get_logger(), "Reached the goal!");
+        // RCLCPP_INFO(get_logger(), "Reached the goal!");
         break;
       }
 
@@ -600,6 +680,7 @@ void ControllerServer::computeControl()
   action_server_->succeeded_current();
 }
 
+
 void ControllerServer::setPlannerPath(const nav_msgs::msg::Path & path)
 {
   RCLCPP_DEBUG(
@@ -621,8 +702,19 @@ void ControllerServer::setPlannerPath(const nav_msgs::msg::Path & path)
   current_path_ = path;
 }
 
+
+void ControllerServer::pauseCallback(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  RCLCPP_INFO(get_logger(), "pause_callback");
+  pause_flag_ = msg->data;
+
+}
+
+
+
 void ControllerServer::computeAndPublishVelocity()
 {
+
   geometry_msgs::msg::PoseStamped pose;
 
   if (!getRobotPose(pose)) {
@@ -700,7 +792,9 @@ void ControllerServer::computeAndPublishVelocity()
 void ControllerServer::updateGlobalPath()
 {
   if (action_server_->is_preempt_requested()) {
-    RCLCPP_INFO(get_logger(), "Passing new path to controller.");
+    if (!pause_flag_) {
+      RCLCPP_INFO(get_logger(), "Passing new path to controller.");
+    }
     auto goal = action_server_->accept_pending_goal();
     std::string current_controller;
     if (findControllerId(goal->controller_id, current_controller)) {
@@ -738,7 +832,16 @@ void ControllerServer::updateGlobalPath()
       action_server_->terminate_current();
       return;
     }
-    setPlannerPath(goal->path);
+
+    if (!pause_flag_) {
+      // if not pause status, send the path to the controller
+      setPlannerPath(goal->path);
+      // RCLCPP_INFO(get_logger(), "Passing new path to controller.");
+    } else {
+      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 3500,
+        "Preempted goal received during pause. Path will be held.");
+    }
+    // setPlannerPath(goal->path);
   }
 }
 
@@ -746,6 +849,7 @@ void ControllerServer::publishVelocity(const geometry_msgs::msg::TwistStamped & 
 {
   auto cmd_vel = std::make_unique<geometry_msgs::msg::TwistStamped>(velocity);
   if (vel_publisher_->is_activated() && vel_publisher_->get_subscription_count() > 0) {
+    // RCLCPP_INFO(get_logger(), "publishVelocitypublishVelocitypublishVelocitypublishVelocity");
     vel_publisher_->publish(std::move(cmd_vel));
   }
 }
@@ -788,6 +892,16 @@ bool ControllerServer::isGoalReached()
   nav_2d_utils::transformPose(
     costmap_ros_->getTfBuffer(), costmap_ros_->getGlobalFrameID(),
     end_pose_, transformed_end_pose, tolerance);
+
+  // added sec
+  // RCLCPP_WARN_THROTTLE(
+  // get_logger(), *this->get_clock(), 2000,
+  // "isGoalReached executed!!! pose.pose.x: %.4lf, pose.pose.y: %.4lf, transformed_end_pose.pose.x: %.4lf, transformed_end_pose.pose.y: %.4lf,", pose.pose.position.x, pose.pose.position.y, transformed_end_pose.pose.position.x, transformed_end_pose.pose.position.y);
+
+  // RCLCPP_WARN_THROTTLE(
+  // get_logger(), *this->get_clock(), 2000,
+  // "isGoalReached executed!!! pose.header.frame_id: %s", pose.header.frame_id.c_str());
+    // added sec
 
   return goal_checkers_[current_goal_checker_]->isGoalReached(
     pose.pose, transformed_end_pose.pose,
