@@ -18,7 +18,9 @@ from rclpy.node import Node
 from rclpy.time import Time
 from rclpy.duration import Duration
 
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool
+from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
+                       ReliabilityPolicy)
 from nav2_msgs.msg import BehaviorTreeLog
 from action_msgs.msg import GoalStatusArray, GoalStatus
 from unique_identifier_msgs.msg import UUID
@@ -82,6 +84,19 @@ class RobotStatusManagerNode(Node):
         self.curr_status_ = RobotStatus.IDLE
         self.prev_status_ = RobotStatus.IDLE
 
+        # [FIX] 관제(winros_bridge -> navigation_manager)가 건 pause 상태.
+        #
+        # 이 노드는 PAUSED 를 BT 노드 이름으로만 판정해 왔다
+        # (WaitUntilUnpausedAndClear / CancelControl). 그런데 그 두 노드는
+        # moduler31 의 PauseBranch 안에만 있고, 그 브랜치의 진입 조건은
+        # /controller_pause_flag 다 -- 즉 fleet_decision(다중로봇 조정) 전용이다.
+        #
+        # 관제 PAUSE 는 /nav_pause_flag 로 controller_server 를 직접 세운다.
+        # BT 는 PauseBranch 를 타지 않고 FollowPath_Main 이 RUNNING 인 채로 남으므로,
+        # 로봇이 실제로 서 있는데도 상태는 DRIVING 으로 보고돼 왔다.
+        # (sim 실측: 관제 pause 중 STATUS driving 비트 121/121, 이동 거리 0.000 m)
+        self.nav_pause_flag_ = False
+
         # --- ROS 2 통신 ---
         self.bt_log_sub = self.create_subscription(
             BehaviorTreeLog,
@@ -107,6 +122,17 @@ class RobotStatusManagerNode(Node):
         #     self.action_status_callback,
         #     10)        
 
+        # [FIX] 발행자(navigation_manager)가 TRANSIENT_LOCAL 이므로 구독도 맞춰야
+        # 수신된다. depth 1 로 두면 이 노드가 늦게 떠도(respawn 포함) 직전 pause
+        # 상태를 그대로 이어받는다.
+        self.nav_pause_sub = self.create_subscription(
+            Bool,
+            '/nav_pause_flag',
+            self.nav_pause_callback,
+            QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                       reliability=ReliabilityPolicy.RELIABLE))
+
         self.status_publisher = self.create_publisher(
             String,
             'robot_status',
@@ -119,6 +145,10 @@ class RobotStatusManagerNode(Node):
 
         self.get_logger().info('Robot Status Manager (즉시 발행 v3)가 시작되었습니다.')
         self.get_logger().info('#### Robot Status Manager (즉시 발행 v3)가 시작되었습니다.')
+
+    def nav_pause_callback(self, msg: Bool):
+        self.nav_pause_flag_ = msg.data
+        self.get_logger().info(f'nav_pause_flag: {msg.data}')
 
     def log_callback(self, msg: BehaviorTreeLog):
         """
@@ -331,9 +361,26 @@ class RobotStatusManagerNode(Node):
         2. 현재 상태를 주기적으로 게시합니다.
         """
         status_msg = String()
-        status_msg.data = self.curr_status_
+
+        # [FIX] 관제 pause 를 여기서 덮어쓴다.
+        #
+        # curr_status_ 자체는 건드리지 않는다. 발행값만 바꾸므로 prev_status_ 부기가
+        # 어긋나지 않고, resume 하면 저절로 원래 상태로 돌아간다. 관제 pause 중에는
+        # BT 가 조용해서(FollowPath_Main RUNNING 유지 -> prev == curr) log_callback 이
+        # 아무것도 발행하지 않으므로, 이 타이머가 그 구간의 유일한 발행자다.
+        #
+        # [주의] READY 는 일부러 덮어쓰지 않는다. navigation_manager 의 _run_move 가
+        # 목표 점유 대기에서 robot_status == "READY" 를 기다린다. 'PAUSE -> STOP ->
+        # 새 MOVE' 순서에서는 그 대기 구간에 nav_pause_flag 가 아직 true 인데,
+        # READY 까지 덮으면 그 대기가 영영 안 풀려 새로운 정지를 만든다.
+        if self.nav_pause_flag_ and self.curr_status_ in (
+                RobotStatus.DRIVING, RobotStatus.PLANNING, RobotStatus.RECEIVED_GOAL):
+            status_msg.data = RobotStatus.PAUSED
+        else:
+            status_msg.data = self.curr_status_
+
         self.status_publisher.publish(status_msg)
-        self.get_logger().info(f"주기적 상태 발행: {self.curr_status_}", throttle_duration_sec=1.0)
+        self.get_logger().info(f"주기적 상태 발행: {status_msg.data}", throttle_duration_sec=1.0)
 
         # with self.state_lock:
         #     # 1. 타임아웃 (IDLE) 등 시간 기반 변경 사항을 평가
