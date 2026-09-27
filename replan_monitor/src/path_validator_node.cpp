@@ -99,6 +99,8 @@ PathValidatorNode::PathValidatorNode()
   // MultiAgent 구독
   this->declare_parameter<std::string>("agents_topic", "/multi_agent_infos");
   this->declare_parameter("agents_freshness_timeout_ms", 800);
+  // [FIX] 이웃 캐시 보존 시간. 병합만 하고 만료가 없으면 떠난 로봇이 영원히 남는다.
+  this->declare_parameter("agent_cache_ttl_sec", 5.0);
   this->declare_parameter("agent_match_dilate_m", 0.1); // 0.05
 
   // Nav2 footprint 스타일
@@ -116,6 +118,11 @@ PathValidatorNode::PathValidatorNode()
   this->declare_parameter("agent_path_hit_max_poses", 1000);
 
   this->declare_parameter("respect_higher_priority_path", false);
+  // [V2 M-6] 로봇의 현재 발자국(+여유) 안에 있는 정적 lethal 셀은 HIT 로 세지 않는다.
+  // 벽에 붙은 채 로컬라이제이션 오차로 자기 발자국이 lethal 에 걸리면 replan 으로는
+  // 영영 못 푼다(출발점이 막혀 새 경로도 같은 HIT). Nav2 가 스스로 빠져나오게 둔다.
+  this->declare_parameter("ignore_static_hit_in_self_footprint", true);
+  this->declare_parameter("self_footprint_margin_m", 0.05);
 
   this->declare_parameter("validation_frequency", 10.0); // 기본 10Hz 주기
 
@@ -125,6 +132,20 @@ PathValidatorNode::PathValidatorNode()
   this->declare_parameter("goal_doorstep_agent_m", 0.05); // 에이전트는 지연 오차를 고려해 조금 더 크게 설정 가능
 
   goal_doorstep_static_m_ = this->get_parameter("goal_doorstep_static_m").as_double();
+  // [V2.30 09-24] READY(출발 전) 목표 점유 검사의 **노선 거리 상한**. 0 이하 = 제한 없음(현장 원본과 동일).
+  // 현장 원본은 남은 목표 **전부**를 거리 제한 없이 검사해, 노선 어딘가 하나만 막혀도 출발하지 않는다.
+  // 노선 전체를 한 번에 받는 현장 방식에서는 대수가 늘수록 "내 노선 어딘가에 로봇이 서 있을" 확률이
+  // 올라간다. sim 실측(K1, 작은 링 5대): 세 대가 40분 내내 0 m — "goals are occupied" 298회.
+  // 먼 목표는 가까워졌을 때 주행 중 검사가 다시 본다. 그래서 출발 판단은 가까운 구간만 본다.
+  ready_goal_horizon_m_ = this->declare_parameter("ready_goal_horizon_m", 0.0);
+  // [V2.31 09-24] READY 교착 **탈출**. 평소에는 위 상한(기본 0 = 현장 원본, 노선 전체)을 그대로 쓰고,
+  // READY 에서 ready_escape_after_sec 이상 계속 막혀 있을 때만 ready_escape_horizon_m 로 좁힌다.
+  // 예방이 아니라 탈출 장치다. K1 실측: 네 대가 150 s 타임아웃에 동시에 걸려 동시에 재지령을 받고
+  // 다시 서로의 "두 번째 목표"에 막히기를 10회 반복했다(26분). 가까운 목표는 계속 검사하고,
+  // 출발한 뒤에는 주행 중 검사가 먼 목표를 다시 보므로 안전 판정은 줄지 않는다.
+  // navigation_manager 의 MAX_WAIT(150 s) 보다 충분히 짧아야 한다.
+  ready_escape_after_sec_ = this->declare_parameter("ready_escape_after_sec", 0.0);
+  ready_escape_horizon_m_ = this->declare_parameter("ready_escape_horizon_m", 3.0);
   goal_doorstep_agent_m_ = this->get_parameter("goal_doorstep_agent_m").as_double();
 
 
@@ -172,6 +193,7 @@ PathValidatorNode::PathValidatorNode()
 
   agents_topic_               = this->get_parameter("agents_topic").as_string();
   agents_freshness_timeout_ms_= this->get_parameter("agents_freshness_timeout_ms").as_int();
+  agent_cache_ttl_sec_        = this->get_parameter("agent_cache_ttl_sec").as_double();
   agent_match_dilate_m_       = this->get_parameter("agent_match_dilate_m").as_double();
 
   // Nav2 footprint / radius
@@ -204,6 +226,8 @@ PathValidatorNode::PathValidatorNode()
   agent_path_hit_max_poses_   = this->get_parameter("agent_path_hit_max_poses").as_int();
 
   respect_higher_priority_path_ = this->get_parameter("respect_higher_priority_path").as_bool();
+  ignore_self_fp_hit_ = this->get_parameter("ignore_static_hit_in_self_footprint").as_bool();
+  self_fp_margin_m_ = this->get_parameter("self_footprint_margin_m").as_double();
 
   // [NEW] Add declaration for the robot list
   this->declare_parameter<std::vector<std::string>>("robot_ids", std::vector<std::string>({}));
@@ -393,6 +417,8 @@ PathValidatorNode::PathValidatorNode()
      << "  - agent_path_hit_dilate_m: " << agent_path_hit_dilate_m_ << "\n"
      << "  - agent_path_hit_max_poses: " << agent_path_hit_max_poses_ << "\n"
      << "  - respect_higher_priority_path: " << (respect_higher_priority_path_ ? "true" : "false") << "\n"
+     << "  - [V2] ignore_static_hit_in_self_footprint: " << (ignore_self_fp_hit_ ? "true" : "false")
+     << " (margin " << self_fp_margin_m_ << ")\n"
      << " [Goal Doorstep]\n"
      << "  - goal_doorstep_static_m: " << goal_doorstep_static_m_ << "\n"
      << "  - goal_doorstep_agent_m: " << goal_doorstep_agent_m_ << "\n"
@@ -471,6 +497,32 @@ void PathValidatorNode::agentsCallback(const robot_interfaces::msg::MultiAgentIn
   std::lock_guard<std::mutex> lock(agents_mutex_);
   last_agents_ = msg;
   last_agents_stamp_ = msg->header.stamp;
+
+  // [FIX] 통째로 들고 있지 않고 machine_id 별로 누적한다. (agent_cache_ 주석 참고)
+  if (!msg->header.frame_id.empty() && msg->header.frame_id != global_frame_) {
+    return;   // 좌표계가 다르면 받지 않는다 (예전에는 조회 시점에 걸렀다)
+  }
+
+  const rclcpp::Time now = this->now();
+  for (const auto & a : msg->agents) {
+    if (!a.header.frame_id.empty() && a.header.frame_id != global_frame_) continue;
+    agent_cache_[a.machine_id] = a;
+    agent_seen_at_[a.machine_id] = now;
+  }
+
+  // 소식이 끊긴 이웃은 버린다. 병합만 하면 떠난 로봇의 몇 분 전 자세/경로로
+  // 계속 판단하게 되므로, 만료가 병합의 필수 짝이다.
+  for (auto it = agent_seen_at_.begin(); it != agent_seen_at_.end(); ) {
+    if ((now - it->second).seconds() > agent_cache_ttl_sec_) {
+      RCLCPP_WARN(this->get_logger(),
+        "[agents] agent %u 소식 끊김 (%.1fs). 캐시에서 제거한다.",
+        static_cast<unsigned>(it->first), agent_cache_ttl_sec_);
+      agent_cache_.erase(it->first);
+      it = agent_seen_at_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 void PathValidatorNode::robotStatusCallback(const std_msgs::msg::String::SharedPtr msg)
@@ -481,6 +533,10 @@ void PathValidatorNode::robotStatusCallback(const std_msgs::msg::String::SharedP
   is_robot_in_driving_state_.store(valid_state);
   
   is_robot_in_ready_state_.store(s == "READY");
+  if (s != "READY") {                     // [V2.31] READY 를 벗어나면 막힘 기록을 지운다
+    ready_blocked_since_ns_.store(0);
+    ready_escape_logged_.store(false);
+  }
 
 // 다른 상태(IDLE, CHARGING 등 미션 완전히 종료/대기)인 경우 데이터 초기화
   if (!valid_state) {
@@ -584,7 +640,7 @@ void PathValidatorNode::validatePathOptimized(const std::vector<geometry_msgs::m
   const unsigned char phase1_thr = 253; 
   
   // [Phase 1] 경로 중심선 기준 좌우로 몇 미터까지 훑어볼 것인가? (맨해튼 버퍼)
-  const double phase1_buffer_m = 0.001; //0.1;   
+  const double phase1_buffer_m = 0.001;  //0.1;   
   
   // [Phase 2] 정밀 검사 시 '충돌(Hit)'로 판정할 코스트 (완전한 물리적 충돌: 254 고정)
   const unsigned char phase2_thr = 254; 
@@ -703,6 +759,29 @@ void PathValidatorNode::validatePathOptimized(const std::vector<geometry_msgs::m
     padded_footprint = footprint_;
   }
 
+  // [V2 M-6] 현재 자세의 자기 발자국(+여유) 다각형. 이 안의 lethal 셀은 무시한다.
+  std::vector<geometry_msgs::msg::Point> self_poly;
+  if (ignore_self_fp_hit_ && !footprint_.empty()) {
+    double scx = 0.0, scy = 0.0;
+    for (const auto & p : footprint_) { scx += p.x; scy += p.y; }
+    scx /= static_cast<double>(footprint_.size());
+    scy /= static_cast<double>(footprint_.size());
+    const double cyaw = tf2::getYaw(cur_pose.orientation);
+    const double cc = std::cos(cyaw), cs = std::sin(cyaw);
+    for (const auto & p : footprint_) {
+      double vx = p.x - scx, vy = p.y - scy;
+      double n = std::hypot(vx, vy); if (n < 1e-6) n = 1.0;
+      const double lx = p.x + self_fp_margin_m_ * (vx / n);
+      const double ly = p.y + self_fp_margin_m_ * (vy / n);
+      geometry_msgs::msg::Point q;
+      q.x = cur_pose.position.x + cc * lx - cs * ly;
+      q.y = cur_pose.position.y + cs * lx + cc * ly;
+      q.z = 0.0;
+      self_poly.push_back(q);
+    }
+  }
+  size_t self_fp_skipped = 0;
+
   size_t consecutive = 0;
   double narrow_acc = 0.0;
 
@@ -759,6 +838,15 @@ void PathValidatorNode::validatePathOptimized(const std::vector<geometry_msgs::m
         const unsigned char cost = costmap->getCost(umx, umy);
         
         if ((!ignore_unknown_ || cost != nav2_costmap_2d::NO_INFORMATION) && cost >= phase2_thr) {
+          if (!self_poly.empty() && pointInPolygon(self_poly, wx, wy)
+              && !(compare_agent_mask_ && agentCellBlockedNear(umx, umy,
+                     static_cast<unsigned char>(agent_cost_threshold_), 1))) {
+            // [V2 M-6] 내 발자국 안의 **정적** lethal 만 무시한다. agent 마스크가 칠한 셀(상대 몸체가 내
+            // 발자국과 겹칠 만큼 가까움) 은 그대로 HIT 로 둔다 — S8 3차에서 대면 중 agent HIT 가 사라져
+            // fleet_decision 이 "비었다" 고 재개 → 컨트롤러 충돌 → recovery 111회.
+            ++self_fp_skipped;
+            continue;
+          }
           blocked_cell_count++;
           
           // [성능 최적화] std::hypot 대신 유클리디안 제곱합으로 고속 비교
@@ -869,6 +957,11 @@ void PathValidatorNode::validatePathOptimized(const std::vector<geometry_msgs::m
     }
   }
 // 3. 루프를 문제없이 끝까지 다 돌고 안전하게 끝났을 때
+  if (self_fp_skipped > 0) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+      "[V2 M-6] 자기 발자국 안의 lethal 셀 %zu 개를 무시했다 (벽 붙음/로컬라이제이션 오차). 경로는 안전으로 본다.",
+      self_fp_skipped);
+  }
   publishSafeStatus();
 }
 
@@ -920,12 +1013,14 @@ std::vector<PathValidatorNode::AgentHit> PathValidatorNode::findNearestAgent(
 {
   std::vector<AgentHit> out;
   std::lock_guard<std::mutex> lk(agents_mutex_);
-  if (!last_agents_) return out;
+  if (agent_cache_.empty()) return out;   // [FIX] 누적 캐시를 본다
 
   double min_dist_overall = 1e9;
   const robot_interfaces::msg::MultiAgentInfo* true_owner = nullptr;
 
-  for (const auto & a : last_agents_->agents) {
+  // [FIX] 맵을 직접 순회한다. 임시 벡터로 복사하면 true_owner 포인터가 매달린다.
+  for (const auto & kv : agent_cache_) {
+    const auto & a = kv.second;
     if (a.machine_id == self_machine_id_) continue;
 
     // 1. 현재 위치 거리
@@ -1246,8 +1341,32 @@ void PathValidatorNode::validationTimerCallback()
       goals_snapshot = current_remaining_goals_;
     }
 
+    // [V2.31] 막힌 지 ready_escape_after_sec 가 지났으면 탈출 상한으로 좁힌다
+    double horizon_m = ready_goal_horizon_m_;
+    const int64_t blocked_since = ready_blocked_since_ns_.load();
+    if (ready_escape_after_sec_ > 0.0 && blocked_since != 0) {
+      const double blocked_sec = (this->now().nanoseconds() - blocked_since) / 1e9;
+      if (blocked_sec >= ready_escape_after_sec_ &&
+          (horizon_m <= 0.0 || ready_escape_horizon_m_ < horizon_m)) {
+        horizon_m = ready_escape_horizon_m_;
+        if (!ready_escape_logged_.exchange(true)) {
+          RCLCPP_WARN(this->get_logger(),
+            "[V2.31 READY escape] %.0fs 동안 출발 못 함 — 노선 %.1fm 안의 목표만 보고 출발 판단",
+            blocked_sec, horizon_m);
+        }
+      }
+    }
+
+    double route_acc = 0.0;                         // [V2.30] 로봇 → g0 → g1 … 누적 노선 거리
+    double prev_x = cur_pose.position.x, prev_y = cur_pose.position.y;
     for (size_t i = 0; i < goals_snapshot.size(); ++i) {
       const auto& current_check_goal = goals_snapshot[i].pose;
+      route_acc += std::hypot(current_check_goal.position.x - prev_x,
+                              current_check_goal.position.y - prev_y);
+      prev_x = current_check_goal.position.x; prev_y = current_check_goal.position.y;
+      if (horizon_m > 0.0 && route_acc > horizon_m) {
+        break;   // [V2.30] 노선을 따라 이만큼 먼 목표는 출발 판단에서 뺀다 (가까워지면 주행 중 검사가 본다)
+      }
       
       // 로봇과 현재 검사 중인 Goal 사이의 거리
       double dist_robot_to_goal = std::hypot(
@@ -1274,6 +1393,12 @@ void PathValidatorNode::validationTimerCallback()
         // 막힌 곳을 하나라도 발견하면 즉시 순회 중단
         break; 
       }
+    }
+
+    // [V2.31] 처음 막힌 시각을 남긴다. 풀려도 READY 를 벗어날 때까지 지우지 않는다
+    // (지우면 다음 주기에 전체 검사로 돌아가 출발 조건이 깜빡인다).
+    if (is_any_goal_occupied && ready_blocked_since_ns_.load() == 0) {
+      ready_blocked_since_ns_.store(this->now().nanoseconds());
     }
 
     // 3. 검사 결과 퍼블리시
@@ -1679,19 +1804,17 @@ std::vector<PathValidatorNode::AgentHit> PathValidatorNode::whoCoversPoint(doubl
   std::vector<AgentHit> out;
 
   std::lock_guard<std::mutex> lk(agents_mutex_);
-  if (!last_agents_) return out;
+  if (agent_cache_.empty()) return out;   // [FIX] 누적 캐시를 본다
 
+  // 관제 링크 자체가 끊겼는지 확인 (마지막 수신 패킷 기준)
   if ((this->now() - last_agents_stamp_).nanoseconds() >
        static_cast<int64_t>(agents_freshness_timeout_ms_) * 1000000LL) {
     return out;
   }
+  // 좌표계 검사는 agentsCallback 의 병합 시점으로 옮겼다.
 
-  if (!last_agents_->header.frame_id.empty() &&
-      last_agents_->header.frame_id != global_frame_) {
-    return out;
-  }
-
-  for (const auto & a : last_agents_->agents) {
+  for (const auto & kv : agent_cache_) {
+    const auto & a = kv.second;
     // [add] 대상이 나 자신이면 연산에서 완전히 제외하고 건너뜀
     if (a.machine_id == self_machine_id_) {
       continue;

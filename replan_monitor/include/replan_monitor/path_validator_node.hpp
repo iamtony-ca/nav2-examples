@@ -211,6 +211,16 @@ private:
   rclcpp::Time last_agents_stamp_;
   mutable std::mutex agents_mutex_;
 
+  // [FIX] machine_id 별 이웃 캐시.
+  // winros_bridge 는 이웃 패킷 1개당 agent 1개짜리 배열을 발행하므로
+  // (winros_bridge.cpp:1466 makeAndPublishMultiAgentMsg, :1614 push_back)
+  // last_agents_ 만 들고 있으면 한 tick 에 이웃 한 대만 검사 대상이 된다.
+  // 그러면 다른 로봇이 경로를 막아도 agent 로 귀속되지 않고 정적 장애물로
+  // 떨어져(triggerReplan), ID 우선순위 양보 프로토콜이 개입하지 못한다.
+  std::unordered_map<uint16_t, robot_interfaces::msg::MultiAgentInfo> agent_cache_;
+  std::unordered_map<uint16_t, rclcpp::Time> agent_seen_at_;
+  double agent_cache_ttl_sec_{5.0};
+
   std::atomic<bool> is_robot_in_driving_state_{false};
   std::atomic<bool> is_robot_in_ready_state_{false};
   rclcpp::Time last_replan_time_;        // replan 쿨다운 기준
@@ -287,6 +297,8 @@ private:
   int    agent_path_hit_max_poses_{200};
 
   // [NEW] 우선순위에 따른 경로 검사 옵션
+  bool ignore_self_fp_hit_{true};   // [V2 M-6]
+  double self_fp_margin_m_{0.05};   // [V2 M-6]
   bool respect_higher_priority_path_{false};  
 
 
@@ -299,6 +311,11 @@ private:
 
   // [파라미터 추가]
   double goal_doorstep_static_m_;
+  double ready_goal_horizon_m_{0.0};   // [V2.30] READY 목표 점유 검사의 노선 거리 상한 (0=무제한)
+  double ready_escape_after_sec_{0.0};   // [V2.31] READY 에서 이만큼 막혀 있으면 탈출 상한으로 좁힌다 (0=끔)
+  double ready_escape_horizon_m_{3.0};   // [V2.31] 탈출 때 쓰는 노선 거리 상한
+  std::atomic<int64_t> ready_blocked_since_ns_{0};  // [V2.31] READY 에서 처음 막힌 시각 (0=기록 없음)
+  std::atomic<bool> ready_escape_logged_{false};
   double goal_doorstep_agent_m_;
 
 };

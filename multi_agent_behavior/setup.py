@@ -30,7 +30,8 @@ setup(
             # 'multi_agent_behavior_controller = multi_agent_behavior.multi_agent_behavior_controller:main',
             # 'multi_agent_behavior_driver = multi_agent_behavior.multi_agent_behavior_driver:main',
             # node_executable_name = package_name.python_file:main_func
-            'fleet_decision_node = multi_agent_behavior.fleet_decision_node:main',            
+            'fleet_decision_node = multi_agent_behavior.fleet_decision_node:main',
+            # 'fleet_decision_node = multi_agent_behavior.fleet_decision_node:main',             
         ],
     },
 )

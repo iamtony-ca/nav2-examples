@@ -1,0 +1,103 @@
+fleet_decision_node:
+  ros__parameters:
+    # --- Robot Identity ---
+    my_machine_id: 1
+    use_reroute: true
+
+    # --- Wait Timeouts (Seconds) ---
+    wait_detect_amr_sec: 2.0        # TYPE 1, 6, 7, 10, 12
+    wait_other_amr_long_sec: 150.0 #450.0  # TYPE 5 (Reroute ON)
+    wait_other_amr_short_sec: 30.0  # TYPE 5 (Reroute OFF)
+    wait_abnormal_long_sec: 100.0 #300.0   # TYPE 2 (Reroute ON)
+    wait_abnormal_short_sec: 30.0   # TYPE 2 (Reroute OFF)
+    wait_obstacle_sec: 15.0         # TYPE 11 (General Obstacle)
+
+    simple_mode: false #true #false  # [수정] Simple Mode 활성화 여부 (true/false)
+    wait_simple_mode_sec: 10.0  # [수정] Simple Mode에서 대기하는 시간 (초)
+
+
+    # --- Thresholds ---
+    replan_ignore_sec_after_agent: 0.5
+    collision_msg_timeout_sec: 3.0  # [수정] 충돌 메시지 타임아웃 설정
+    reroute_cooldown_sec: 5.0       # [수정] Reroute 요청 쿨다운 시간 설정
+
+    replan_flag_wait_sec: 3.0 #2.0 #0.0 #7.0
+
+    # --- Input Topics ---
+    topic_collision: "/path_agent_collision_info"
+    topic_agents: "/multi_agent_infos"
+    # topic_replan_flag: "/replan_flag"
+    topic_path_block_status: "/path_block_status"  # [NEW] 추가됨
+    wall_hugging_wait_sec: 2.0  # [NEW] Wall hugging 감지 시 대기하는 시간 (초)
+    direct_obs_clear_sec: 3.0   # [NEW] Direct Obstacle Clear 요구 시간 (초)
+    direct_obs_timeout_sec: 15.0 # [NEW] Direct Obstacle 타임아웃 시간 (초)    
+
+
+    # --- Output Topics ---
+    topic_decision_state: "/decision_state"
+    topic_request_replan: "/request_replan"
+    topic_request_reroute: "/request_reroute" # [NEW] 추가됨    
+    topic_cmd_run: "/cmd/run"
+    topic_cmd_resume: "/controller_pause_flag"   # <--- [NEW] 추가됨
+    topic_cmd_pause: "/controller_pause_flag"
+    topic_cmd_stop: "stop_command"
+
+
+    # [FIX] 스스로는 영영 움직일 수 없는 상대의 AgentStatus.phase 목록.
+    # 여기 든 상태는 ID 우선순위 비교를 건너뛰고 일반 장애물(TYPE_11)로 격하해
+    # wait_obstacle_sec 뒤 우회한다. 기다려도 비켜주지 않는 상대들이다.
+    #    0 INIT / 14 ERROR / 18 WAITING_FOR_ROS_STATUS
+    #   19 CHARGING / 20 CHARGE_DONE / 21 UNKNOWN
+    #
+    # [주의] 이적재(5 MARKING, 6 UNLOADING, 7 UNLOADED, 8 LOADING, 9 LOADED)는
+    # 일부러 뺐다. 현장 실측 50초 내외로 끝나는 유한 정지라 우회할 이유가 없고,
+    # 좁은 통로에서 돌아가면 오히려 병목을 만든다. 기존 우선순위 분기로 두면
+    # Early Exit(agent_wait_before_resume 3초)가 작업이 끝나는 즉시 원경로로
+    # 출발시킨다 - 대기 시간들은 고정 정지가 아니라 상한이다.
+    #
+    # 그 밖에 뺀 것: 15 PAUSE, 16 WAITING_FOR_SAFETY, 17 WAITING_FOR_FLOWCONTROL,
+    #   2 WAITING_FOR_OBS, 4 ARRIVED (곧 다시 움직임 - ID tie-break 유지 필요)
+    #   10 AUTORECOVERY, 11 RECOVERING (회복 중 움직일 수 있음)
+    #   12/13 MANUAL (앞단에서 TYPE_1 로 처리)
+    # phase 값은 Windows 관제가 정한다. 현장 매핑 확인 후 재빌드 없이 조정할 것.
+    immobile_agent_phases: [0, 14, 18, 19, 20, 21]
+
+    # [FIX] 정적 장애물 진동(pause <-> resume 반복) 방어.
+    # 맵에 없는 장애물에 경로가 아슬아슬하게 걸치면 차단 판정이 깜빡이고, 그때마다
+    # SM 이 새로 진입하며 타이머가 0 으로 돌아가 replan(15초)에 영영 도달하지 못했다.
+    # 짧은 간격으로 재차단되면 같은 상황으로 보고 경과 시간을 이어받는다.
+    # 0 이면 누적이 꺼져 기존 동작 그대로.
+    static_rejoin_window_sec: 5.0
+    # 같은 상황에서 replan 을 이 횟수만큼 시도하고도 계속 막히면 자력 우회 실패로
+    # 보고 관제에 알린다 (내부 정지 -> driving_abort -> 관제는 reroute 요청으로 읽는다).
+    # '진동 횟수' 가 아니라 **replan 시도 횟수** 다. 진동 횟수로 세면 빠른 진동에서
+    # replan 을 한 번도 안 해보고 관제에 넘기게 된다(즉시 replan 배제 원칙 위반).
+    # 카운터는 (1) 재차단 간격이 위 창을 넘으면 = 다른 상황, (2) goal 종료,
+    # (3) 관제 보고 직후 에 0 으로 초기화된다. 따라서 서로 다른 장소에서 생긴
+    # 진동이 누적되지 않는다. 0 이면 에스컬레이션을 끈다.
+    static_max_replan_retry: 10
+
+    # [FIX B-7] agent(다른 로봇) 쪽에도 같은 장치. 지금까지는 상대에게 막혀 replan 을 쏘고
+    # 재개한 뒤 다시 같은 상대에 걸리면 타이머가 0 부터 돌고 횟수를 세지 않아, 끝은
+    # 조정 로직이 아니라 Nav2 goal abort 가 냈다 (롱런 3차: 좁은 통로에서 시간당 102회).
+    # agent_rejoin_window_sec: 해제 뒤 이 시간 안에 **같은 상대**에게 다시 걸리면 같은 상황.
+    #   Early Exit 뒤면 경과를 이어받고, replan 뒤면 경과 0 + 재시도 횟수 유지.
+    #   상대가 바뀌거나 창을 넘기면 초기화. 0 이면 끔.
+    agent_rejoin_window_sec: 5.0
+    # agent_max_replan_retry: 같은 상대에게 replan 을 이 횟수만큼 해도 막히면 관제에 넘긴다
+    #   (내부 정지 -> driving_abort, static 쪽과 동일). 0 이면 끔.
+    #   [보수적 기본값] 현장 사이드 이펙트를 아직 모르므로 30 — 사실상 안 걸린다.
+    #   현장에서 재빌드 없이 이 값만 낮춰 활성화한다 (예: 5 면 TYPE_10 기준 약 30초 뒤 보고).
+    agent_max_replan_retry: 30
+
+    # [FIX] goal 점유 처리 활성화 (10초 remove_passed / 15·20초 remove_first / 25초 replan).
+    # 예전에는 코드에 False 로 하드코딩되어 블록 전체가 돌지 않았다. 원인은 BT 쪽이었고
+    # (pause 중 경로 계산 실패가 /controller_pause_flag=false 를 유발) moduler32 에서
+    # 고쳤다. 현장에서 문제가 생기면 여기서 false 로 끄면 된다 (재빌드 불필요).
+    enable_goal_occupied_handling: true
+
+    agent_cache_ttl_sec: 5.0       # [FIX] 이웃 캐시 보존 시간 (소식 끊기면 제거)
+    nav_stop_complete_timeout_sec: 10.0  # [FIX] /nav_stop_complete 유실 watchdog
+
+    replan_clear_timeout_sec: 2.0  # [NEW] Replan Flag가 False로 연속 유지되어야 하는 시간 (초)
+    goal_occupied_timeout_sec: 100.0  # [NEW] Goal 점유 상태에서 대기할 최대 시간 (초)

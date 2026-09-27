@@ -7,11 +7,11 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 
 def generate_launch_description():
     fleet_dir = get_package_share_directory('multi_agent_behavior')
-    fleet_config_dir = get_package_share_directory('amr_fleet_config')
+    fleet_config_dir = get_package_share_directory('ammr_common_config')
     
     # 1. 공통 YAML 읽기
-    with open(os.path.join(fleet_config_dir, 'config', 'common_fleet.yaml'), 'r') as f:
-        machine_id = yaml.safe_load(f)['common_settings']['machine_id']
+    with open(os.path.join(fleet_config_dir, 'config', 'common_ammr.yaml'), 'r') as f:
+        machine_id = yaml.safe_load(f)['common_settings']['my_machine_id']
 
     # ---------------------------------------------------------
     # [핵심 수정] 파일이 'launch' 폴더 안에 있는지 먼저 확인하고, 

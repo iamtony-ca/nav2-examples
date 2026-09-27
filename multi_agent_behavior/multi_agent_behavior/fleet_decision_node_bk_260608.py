@@ -384,7 +384,7 @@ class FleetDecisionNode(Node):
 
 
         if self.current_robot_status in ['RECEIVED_GOAL', 'PLANNING', 'DRIVING', 'PAUSED', 'RECOVERY_FAILURE', 'RECOVERY_RUNNING', 'RECOVERY_SUCCESS']:
-
+            ## is_last_goal_occupied
             if self.is_processing_last_goal_occupied_pause and self.static_is_last_goal_occupied_ is True and self.is_processing_replan_pause is False and self.is_processing_goal_occupied_pause is False:
                 self._last_goal_occupied_false_start_time = None
                 if self._pause_start_time is not None:
@@ -441,8 +441,7 @@ class FleetDecisionNode(Node):
             if self.is_processing_last_goal_occupied_pause:
                 return # 최상위 로직이 실행 중이면 아래 로직은 무시함
 
-    ###### is_goal_occupied
-
+            ###### is_goal_occupied
             ## replan이후 1.0 대기 후 resume
             if self.delay_after_replan_goal_occupied and self.delay_after_replan_start_time_goal_occupied is not None and self.is_processing_replan_pause is False and self.is_processing_last_goal_occupied_pause is False:
                 elapsed_delay = (now - self.delay_after_replan_start_time_goal_occupied).nanoseconds * 1e-9

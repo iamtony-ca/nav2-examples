@@ -13,7 +13,7 @@ find_package(nav_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
-find_package(multi_agent_msgs REQUIRED)  # 여러분의 메시지 패키지
+find_package(robot_interfaces REQUIRED)  
 find_package(rclcpp_lifecycle REQUIRED)
 
 
@@ -26,7 +26,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
   $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
 )
 ament_target_dependencies(${PROJECT_NAME}
-  rclcpp rclcpp_lifecycle nav2_costmap_2d pluginlib geometry_msgs nav_msgs std_msgs tf2 tf2_geometry_msgs multi_agent_msgs
+  rclcpp rclcpp_lifecycle nav2_costmap_2d pluginlib geometry_msgs nav_msgs std_msgs tf2 tf2_geometry_msgs robot_interfaces
 )
 
 # pluginlib에 XML 등록 (그룹: nav2_costmap_2d)
@@ -49,7 +49,7 @@ install(FILES agent_layer_plugin.xml
 ament_export_include_directories(include)
 ament_export_libraries(${PROJECT_NAME})
 ament_export_dependencies(
-  rclcpp rclcpp_lifecycle nav2_costmap_2d pluginlib geometry_msgs nav_msgs std_msgs tf2 tf2_geometry_msgs multi_agent_msgs
+  rclcpp rclcpp_lifecycle nav2_costmap_2d pluginlib geometry_msgs nav_msgs std_msgs tf2 tf2_geometry_msgs robot_interfaces
 )
 
 ament_package()

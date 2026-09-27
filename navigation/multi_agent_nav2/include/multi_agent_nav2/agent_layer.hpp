@@ -83,10 +83,28 @@ private:
   nav2_costmap_2d::Costmap2D viz_costmap_;
   std::unique_ptr<nav2_costmap_2d::Costmap2DPublisher> costmap_pub_;
 
-  // last data
+  // [FIX AL-1] 이웃 캐시 — machine_id 별 누적.
+  //
+  // winros_bridge 는 관제의 이웃 패킷 1개마다 agent 1개짜리 배열을 발행한다
+  // (winros_bridge.cpp makeAndPublishMultiAgentMsg: 구조체 하나를 push_back 하고
+  // 바로 publish). 예전처럼 마지막 배열 하나(last_infos_)만 들고 있으면
+  // 코스트맵에는 항상 "마지막 패킷의 1대" 만 그려지고, 어느 1대인지는 위치가
+  // 아니라 관제의 송신 순서로 정해졌다. compare_agent_mask 를 켠 path_validator 가
+  // 이 마스크를 충돌 판정 입력으로 쓰므로 나머지 이웃은 플래너에도 충돌 판정에도
+  // 안 보였다. fleet_decision(B-2a)/path_validator(PV-1) 과 같은 형태로 고친다.
+  //
+  // 배열 길이가 1 이든 N 이든 항목 단위로 병합하므로, 나중에 winros_bridge 가
+  // 이웃 전체를 한 메시지에 담아 보내도 이 코드는 그대로 동작한다.
+  struct CachedAgent {
+    robot_interfaces::msg::MultiAgentInfo info;   // header.frame_id 는 항상 채워 둔다
+    rclcpp::Time seen_at;                          // 메시지 stamp (freshness 판정용)
+    // [V2] 자세 이력으로 추정한 속도 (관제 twist 는 0 으로 온다). 수신 시각 기준.
+    double hist_x{0.0}, hist_y{0.0};
+    rclcpp::Time hist_t{0, 0, RCL_ROS_TIME};
+    double speed_mps{-1.0};                        // -1 = 아직 모름
+  };
   std::mutex data_mtx_;
-  robot_interfaces::msg::MultiAgentInfoArray::SharedPtr last_infos_;
-  rclcpp::Time last_stamp_;
+  std::map<uint16_t, CachedAgent> agent_cache_;
 
   // parameters
   bool        enabled_{true};
@@ -132,6 +150,17 @@ private:
   double cached_robot_y_{0.0};
 
   bool ignore_higher_machine_id_path_{true};
+  // [V2] 시간 인지형 경로 튜브: 상대 속도 × tube_horizon_sec 만큼만 칠한다 (min/max 로 자름).
+  // 정지한 상대(속도 < agent_moving_mps) 는 paint_stopped_agent_path 가 아니면 몸체만 칠한다.
+  double tube_horizon_sec_{4.0};
+  double tube_min_m_{0.5};
+  double tube_max_m_{4.0};
+  double agent_moving_mps_{0.05};
+  bool   paint_stopped_agent_path_{false};
+  std::map<uint16_t, double> agent_speed_;      // updateBounds 에서 캐시에서 복사 (updateCosts 용)
+
+  double load_rear_smear_m_{0.4};   // [NEW] LOADING/UNLOADING 시 rear 확장량
+
 
   // TF 시간차 캐시
   std::vector<robot_interfaces::msg::MultiAgentInfo> transformed_agents_;
@@ -168,6 +197,7 @@ private:
                        const geometry_msgs::msg::Pose & pose,
                        double extra_dilation_m,
                        double forward_len_m,
+                       double rear_len_m,                  // [NEW]
                        nav2_costmap_2d::Costmap2D * grid,
                        unsigned char cost,
                        std::vector<std::pair<unsigned int,unsigned int>> * meta_hits = nullptr);
@@ -177,6 +207,9 @@ private:
 
   double computeDilation(const robot_interfaces::msg::MultiAgentInfo & a) const;
 
+  double computeRearSmear(const robot_interfaces::msg::MultiAgentInfo & a) const;
+
+
   unsigned char computeCost(const robot_interfaces::msg::MultiAgentInfo & a) const;
 
   static inline bool isMovingPhase(uint8_t phase)
@@ -184,6 +217,15 @@ private:
     using S = robot_interfaces::msg::AgentStatus;
     return phase == S::STATUS_MOVING || phase == S::STATUS_PATH_SEARCHING;
   }
+
+  inline bool inRoi(double wx, double wy) const
+  {
+    const double dx = wx - cached_robot_x_;
+    const double dy = wy - cached_robot_y_;
+    return std::hypot(dx, dy) <= roi_range_m_;
+  }
+
+
 };
 
 } // namespace multi_agent_nav2

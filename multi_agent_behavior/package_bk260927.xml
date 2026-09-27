@@ -11,11 +11,6 @@
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>robot_interfaces</depend>
-  <!-- [amhs 이관 S2 09-27] 정책 v2 가 쓰는 메시지·액션 -->
-  <depend>nav_msgs</depend>
-  <depend>nav2_msgs</depend>
-  <depend>std_srvs</depend>
-  <depend>tf2_ros</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
