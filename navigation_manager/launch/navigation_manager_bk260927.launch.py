@@ -20,10 +20,9 @@ def generate_launch_description():
         name='navigation_manager_node',
         output='screen',
         emulate_tty=True,
-        # [09-27] use_command_services 를 읽으려고 yaml 을 넘긴다 (winros_bridge.yaml 과 같은 값이어야 한다)
-        parameters=[
-            config_file_path  # Load YAML params
-        ],
+        # parameters=[
+        #     config_file_path  # Load YAML params
+        # ],
         respawn=True,
         respawn_delay=10.0
     )

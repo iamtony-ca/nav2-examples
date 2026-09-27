@@ -60,11 +60,6 @@ class NavCommandData:
 # Node
 # ---------------------------------------------------------------------- #
 class NavigationManagerNode(Node):
-    # 재라우팅 시 이전 goal 의 취소가 끝나기를 기다리는 상한(초).
-    # Nav2 의 취소는 BT 를 halt 하고 controller 를 정지시키는 데 보통 1초 안쪽이면
-    # 끝난다. 이 시간을 넘기면 스택이 정상이 아니라고 보고 이번 명령을 포기한다.
-    REROUTE_CANCEL_TIMEOUT = 10.0
-
     def __init__(self) -> None:
         super().__init__('navigation_manager_node')
 
@@ -75,7 +70,6 @@ class NavigationManagerNode(Node):
         # 상태 업데이트와 stop명령은 _state_update_cb_group에서 독립적으로 스레드를 점유해 실행됩니다.
         self._cmd_cb_group = MutuallyExclusiveCallbackGroup()
         self._state_update_cb_group = MutuallyExclusiveCallbackGroup()
-        self._pose_cb_group = ReentrantCallbackGroup()
         self._action_cb_group = ReentrantCallbackGroup()
         self._timer_cb_group = MutuallyExclusiveCallbackGroup()
         self._srv_cb_group = MutuallyExclusiveCallbackGroup()
@@ -104,22 +98,7 @@ class NavigationManagerNode(Node):
         self._agent_is_status_ready: bool = False 
 
         self.nav_stop_command: bool = False  # nav_stop 명령 수신 여부를 나타내는 플래그
-        self._move_in_progress: bool = False
 
-        # [추가] 재라우팅(주행 중 새 move 수신) 처리용.
-        # _reroute_in_flight 가 True 인 동안의 CANCELED 는 "주행 실패" 가 아니라
-        # "새 명령을 위해 내가 일부러 취소한 것" 이다. 관제에 abort 로 보고하지 않는다.
-        self._reroute_in_flight: bool = False
-        # 이전 goal 의 취소가 실제로 끝났는지 기다리기 위한 이벤트.
-        # _move_result_callback 이 세운다(액션 콜백 그룹이 달라 데드락 없음).
-        self._goal_finished_event = threading.Event()
-
-
-        self.curr_x: float = 0.0
-        self.curr_y: float = 0.0
-        self.curr_z: float = 0.0
-        self.curr_w: float = 0.0
-        
         # ----- Subscriptions ------------------------------------------ #
         # move만 _cmd_cb_group 할당 (block 발생 지점)
         self._move_subscription = self.create_subscription(
@@ -141,15 +120,6 @@ class NavigationManagerNode(Node):
             UInt8, '/main_stop_command',
             self._main_stop_callback, 10, callback_group=self._state_update_cb_group)
 
-        self._reset_subscription = self.create_subscription(
-            UInt8, '/reset_command',
-            self._reset_callback, 10, callback_group=self._state_update_cb_group)
-
-        self._pose_tracked_subscription = self.create_subscription(
-            PoseStamped, '/pose_tracked',
-            self._pose_tracked_callback, 1, callback_group=self._pose_cb_group)
-
-        
         # /robot_status 추가
         self._robot_status_sub = self.create_subscription(
             String, '/robot_status',
@@ -196,35 +166,8 @@ class NavigationManagerNode(Node):
         # ----- Publishers --------------------------------------------- #
         self._monitoring_publisher = self.create_publisher(
             NavigationMonitoring, 'ros2_nav2_monitoring_data', 10)
-        # [수정] nav_pause_flag 를 TRANSIENT_LOCAL 로 발행한다.
-        #
-        # 이 토픽은 pause/resume 이 일어난 "순간에만" 1회 발행된다. 기존처럼
-        # VOLATILE 로 내보내면, 나중에 구독을 시작한 쪽은 현재 pause 상태를 알 방법이
-        # 없다. moduler31 의 회복 pause 브랜치(ManeuverServerPause)가 이 토픽을
-        # 봐야 하는데, amr_bt_nodes 의 CheckPauseCondition 은 항상 TRANSIENT_LOCAL 로
-        # 구독하므로(= transient_local 포트가 durability 를 되돌리지 않는 결함이 있다)
-        # VOLATILE 발행과는 QoS 가 맞지 않아 아예 수신되지 않는다.
-        #
-        # TRANSIENT_LOCAL 발행은 기존 구독자와도 호환된다
-        # ("발행자가 제공하는 durability >= 구독자가 요구하는 durability").
-        # controller_server 도 같은 이유로 TRANSIENT_LOCAL 구독으로 맞춰 두었다.
-        # 그래야 컨트롤러가 재기동해도 직전 pause 상태를 그대로 이어받는다.
-        #
-        # depth 는 1 로 둔다. TRANSIENT_LOCAL 에서 depth 를 크게 잡으면 나중에 붙는
-        # 구독자가 과거 샘플을 여러 개 돌려받는다. pause 플래그는 "현재 상태" 하나만
-        # 의미가 있으므로 마지막 값만 유지하는 것이 맞다.
-        # (fleet_decision_node 가 /controller_pause_flag 를 발행할 때 쓰는 프로파일과 같다)
-        qos_nav_pause = QoSProfile(
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-        )
         self._pause_resume_publisher = self.create_publisher(
-            Bool, 'nav_pause_flag', qos_nav_pause)
-        # self._pause_resume_publisher = self.create_publisher(
-        #     Bool, '/controller_pause_flag', qos_pause)
-
-
+            Bool, 'nav_pause_flag', 10)
         self._stop_complete_publisher = self.create_publisher(
             Bool, 'nav_stop_complete', 10)
         self._bt_log_publisher = self.create_publisher(
@@ -324,77 +267,19 @@ class NavigationManagerNode(Node):
             self._static_is_last_goal_occupied = msg.is_last_goal_occupied
             self._static_is_status_ready = msg.is_status_ready
 
-
-    def _pose_tracked_callback(self, msg: PoseStamped) -> None:
-        # self.get_logger().info(f'reset_callback!, cmd_seq_num: {msg.data}')
-        
-        with self._state_lock:
-            self.curr_x = round(msg.pose.position.x, 4)
-            self.curr_y = round(msg.pose.position.y, 4)
-            self.curr_z = round(msg.pose.orientation.z, 4)
-            self.curr_w = round(msg.pose.orientation.w, 4)
-   
-        # self.get_logger().info(f'reset abort status, reset_callback')
-
-    
     # ------------------------------------------------------------------ #
     # Topic callbacks
     # ------------------------------------------------------------------ #
     def _nav_stop_callback(self, msg: UInt8) -> None:
-        self.get_logger().info(f'nav stop_callback!, cmd_seq_num: {msg.data}')
-        
+        self.get_logger().info(f'stop_callback!, cmd_seq_num: {msg.data}')
+        self.nav_stop_command = True
         with self._state_lock:
             # while 문 중단을 위한 플래그 설정
-            self.nav_stop_command = True
             self._stop_in_flight = True
             self._nav2_monitoring_data.ros_nav_driving_abort = False
             
             if self._goal_handle is None:
-                self.get_logger().info('not cancle goal, nav stop_callback')
-                self.nav_stop_command = False
-                self._stop_in_flight = False
-                return
-            handle = self._goal_handle
-            # [FIX] msg.data 를 cmd_seq_num 에 넣으면 안 된다.
-            #
-            # /stop_command 는 관제가 쓰는 토픽이 아니다. 관제의 정지는
-            # winros_bridge 가 /main_stop_command 로 넣어주고(_main_stop_callback),
-            # 이 토픽은 로봇 내부 전용이다. 실제 발행자는 둘뿐이다.
-            #   - 동작 트리의 405 에스컬레이션      -> 상수 2
-            #   - fleet_decision 의 goal 점유 타임아웃 -> 상수 1
-            # 그 상수를 cmd_seq_num 에 넣으면 관제가 발급한 시퀀스가 1 또는 2 로
-            # 덮어써지고, _move_result_callback 의 CANCELED 처리가 그 값을
-            # ros_nav_cmd_seq_num 으로 올려버린다. 관제는 자기가 예전에 보냈던
-            # 1번/2번 명령이 끝난 것으로 오인한다.
-            # (sim 실측: 관제가 seq=77 로 보낸 주행이 내부 정지 후 seq=2 로 보고됨)
-            #
-            # 진행 중이던 관제 시퀀스를 그대로 유지한다. 그러면 뒤이어 올라가는
-            # driving_abort=True 가 "당신이 보낸 77번 명령이 실패했다" 는 뜻이 되어
-            # 비로소 관제가 쓸 수 있는 정보가 된다.
-            current_cmd_seq = self._nav2_cmd_data.cmd_seq_num
-            self._clear_nav2_command_data_locked()
-            self._nav2_cmd_data.cmd_seq_num = current_cmd_seq
-            self._goal_status = GoalStatus.STATUS_CANCELED
-            self._controller_pause_flag = False                       ### testing...
-            self._path_static_collision = False                       ### testing...
-            self._path_agent_collision = False                        ### testing...
-
-        handle.cancel_goal_async()
-        self.get_logger().info(
-            f'cancle goal, nav stop_callback (내부 정지 값={msg.data}, '
-            f'관제 seq={current_cmd_seq} 유지)')
-
-    def _main_stop_callback(self, msg: UInt8) -> None:
-        self.get_logger().info(f'main_stop_callback!, cmd_seq_num: {msg.data}')
-        
-        with self._state_lock:
-            # while 문 중단을 위한 플래그 설정
-            self._nav2_monitoring_data.ros_nav_driving_abort = False
-            self._stop_in_flight = True
-            
-            if self._goal_handle is None:
-                self.get_logger().info('not cancle goal, main stop_callback')
-                self._stop_in_flight = False
+                self.get_logger().info('not cancle goal, stop_callback')
                 return
             handle = self._goal_handle
             self._clear_nav2_command_data_locked()
@@ -405,132 +290,45 @@ class NavigationManagerNode(Node):
             self._path_agent_collision = False                        ### testing...
 
         handle.cancel_goal_async()
-        self.get_logger().info(f'cancle goal, main stop_callback')
+        self.get_logger().info(f'cancle goal, stop_callback')
 
-
-    def _reset_callback(self, msg: UInt8) -> None:
-        self.get_logger().info(f'reset_callback!, cmd_seq_num: {msg.data}')
-        
+    def _main_stop_callback(self, msg: UInt8) -> None:
+        self.get_logger().info(f'stop_callback!, cmd_seq_num: {msg.data}')
+        self._nav2_monitoring_data.ros_nav_driving_abort = False
         with self._state_lock:
-            self._nav2_monitoring_data.ros_nav_driving_abort = False
-            # [FIX] _goal_status가 STATUS_ABORTED로 남아 있으면 _timer_callback의
-            # _update_nav2_status()가 매 tick마다 ros_nav_driving_abort를 다시 True로
-            # 세워서, 위에서 지운 값이 publish 되기 전에 덮어써진다.
-            # (_nav_stop_callback / _main_stop_callback이 STATUS_CANCELED를 넣는 것과 동일한 처리)
-            #
-            # [주의] 반드시 STATUS_ABORTED 일 때만 바꾼다. 조건 없이 CANCELED 를 넣으면
-            # 주행 중에 reset 이 들어왔을 때 다음 두 가지가 같이 망가진다.
-            #   1) _update_nav2_status(CANCELED) 가 ros_nav_driving 을 False 로 만든다.
-            #   2) _move_feedback_callback 이 _goal_status in (SUCCEEDED/ABORTED/CANCELED)
-            #      에서 조기 return 하므로 STATUS_EXECUTING 으로 되돌아오지 못하고,
-            #      current_node_id / distance_remaining / poses_remaining 갱신도 멈춘다.
-            # 그러면 로봇은 계속 주행하는데 상위 서버에는 "정지" 로 보인다.
-            # (sim 실측: 주행 중 reset 후 6초간 cmd_vel 은 100% 비영인데
-            #  ros_nav_driving 은 55tick 전부 False. 조건을 달면 55/55 True 로 정상.)
-            if self._goal_status == GoalStatus.STATUS_ABORTED:
-                self._goal_status = GoalStatus.STATUS_CANCELED
-   
-        self.get_logger().info(f'reset abort status, reset_callback')
+            # while 문 중단을 위한 플래그 설정
+            self._stop_in_flight = True
+            
+            if self._goal_handle is None:
+                self.get_logger().info('not cancle goal, stop_callback')
+                return
+            handle = self._goal_handle
+            self._clear_nav2_command_data_locked()
+            self._nav2_cmd_data.cmd_seq_num = msg.data
+            self._goal_status = GoalStatus.STATUS_CANCELED
+            self._controller_pause_flag = False                       ### testing...
+            self._path_static_collision = False                       ### testing...
+            self._path_agent_collision = False                        ### testing...
 
-    
+        handle.cancel_goal_async()
+        self.get_logger().info(f'cancle goal, stop_callback')
+
+
 
     def _move_callback(self, msg: NavigationCommand) -> None:
         self.get_logger().info('move_callback')
-        self.get_logger().info(f'goal_cnt: {msg.goal_cnt}, cmd_seq_num: {msg.cmd_seq_num}, from_node_id: {msg.from_node_id}, to_node_id: {msg.to_node_id}')
-
-        # [주의] 예전엔 여기서 /nav_pause_flag=false 를 쐈다(주석 처리되어 있었다).
-        # 이 자리는 아직 재라우팅 취소 대기도, 목표 점유 대기(최대 150초)도 시작하기
-        # 전이라 pause 해제와 실제 주행 시작 사이가 너무 벌어진다.
-        # 지금은 _run_move() 의 send_goal_async 직전으로 옮겼다.
-
-
-        # [겹침 처리] 이전 move 가 아직 살아 있으면(action 진행 중) 재라우팅으로 본다.
-        #
-        # [FIX] 예전에는 여기서 이전 goal 을 취소하고 abort 를 세운 뒤 이번 명령을
-        # 그냥 버렸다(return). 그래서 관제는 주행 중인 로봇의 경로를 바꿀 수 없었고,
-        # 정상적인 재라우팅을 보내도 로봇이 서면서 driving_abort 가 올라왔다.
-        # 게다가 _clear_nav2_command_data_locked() 가 cmd_seq_num 을 0 으로 만들어
-        # 관제가 발급한 적 없는 seq=0 이 보고됐다.
-        # (sim 실측: 주행 중 move seq=20 전송 -> seq=0 / abort=True / 명령 소실)
-        #
-        # 이제는 이전 goal 을 취소하고 그 취소가 실제로 끝날 때까지 기다린 뒤
-        # 이번 명령을 그대로 수행한다.
-        with self._state_lock:
-            # self._stop_in_flight = False
-            overlapped = (
-                self._goal_handle is not None
-                or self._stop_in_flight
-                or self._move_in_progress
-            )
-            handle = self._goal_handle
-            if overlapped:
-                if handle is not None:
-                    # 이 취소는 "실패" 가 아니라 재라우팅을 위한 것이다.
-                    self._reroute_in_flight = True
-                    self._goal_finished_event.clear()
-            else:
-                # 정상 진입: 이번 move가 점유 시작
-                self._move_in_progress = True
-                self._stop_in_flight = False
-
-        if overlapped:
-            self.get_logger().warn(
-                'Overlapping move_command received. Cancelling current goal '
-                'and re-routing to the new goals.')
-            if handle is not None:
-                # [주의] _reroute_in_flight 는 어떤 경로로 빠져나가든 반드시 내려야 한다.
-                # 켜진 채로 남으면 이후의 모든 CANCELED 가 "재라우팅" 으로 오인되어
-                # 내부 정지의 driving_abort 와 cmd_seq_num 갱신이 영구히 사라진다.
-                # cancel_goal_async() 는 액션 클라이언트가 정리 중이면 예외를 던질 수 있다.
-                try:
-                    handle.cancel_goal_async()
-                    # 취소가 끝나야 새 goal 을 보낼 수 있다. 액션 콜백은 다른 콜백
-                    # 그룹(_action_cb_group, Reentrant)에서 돌아가므로 여기서 블록해도
-                    # _move_result_callback 은 정상적으로 실행된다.
-                    finished = self._goal_finished_event.wait(
-                        timeout=self.REROUTE_CANCEL_TIMEOUT)
-                finally:
-                    with self._state_lock:
-                        self._reroute_in_flight = False
-                if not finished:
-                    # 취소가 제한 시간 안에 끝나지 않았다. 이 상태로 새 goal 을
-                    # 보내면 어느 goal 이 사는지 알 수 없으므로 포기하고, 그 사실을
-                    # 관제가 발급한 시퀀스와 함께 실패로 올린다(seq 는 건드리지 않는다).
-                    with self._state_lock:
-                        self._goal_status = GoalStatus.STATUS_ABORTED
-                        self._nav2_monitoring_data.ros_nav_driving_abort = True
-                    self.get_logger().error(
-                        f'Cancel of the previous goal did not finish within '
-                        f'{self.REROUTE_CANCEL_TIMEOUT}s. Dropping this move_command '
-                        f'(cmd_seq_num={msg.cmd_seq_num}).')
-                    return
-
-            with self._state_lock:
-                self._move_in_progress = True
-                self._stop_in_flight = False
-                self.nav_stop_command = False
-
-        # ---- 정상 흐름: 반드시 finally에서 _move_in_progress 해제 ----
-        try:
-            self._run_move(msg)
-        finally:
-            with self._state_lock:
-                self._move_in_progress = False
-    
-
-    def _run_move(self, msg: NavigationCommand) -> None:
+        self._stop_in_flight = False
         cond_ready = False
         cond_static = False
         cond_agent = False
+
+
 
         self.clear_both_costmaps()
 
         if not msg.goal_poses:
             self.get_logger().warn('Received empty multi goal list')
             return
-        # ... (기존 본문 그대로, while 루프와 send_goal_async 포함) ...
-
-
 
         if not (len(msg.goal_poses) == msg.goal_cnt
                 == len(msg.from_node_id) == len(msg.to_node_id)):
@@ -547,7 +345,6 @@ class NavigationManagerNode(Node):
 
         with self._state_lock:
             self._clear_nav2_command_data_locked()
-            self._stop_in_flight = False
             self._nav2_monitoring_data.ros_nav_driving_abort = False 
             self._nav2_cmd_data.goal_cnt = msg.goal_cnt
             self._nav2_cmd_data.cmd_seq_num = msg.cmd_seq_num
@@ -563,8 +360,7 @@ class NavigationManagerNode(Node):
                 self._nav2_cmd_data.from_node_id.append(msg.from_node_id[i])
                 self._nav2_cmd_data.to_node_id.append(msg.to_node_id[i])
 
-
-            self.get_logger().info(f'current pose: x: {self.curr_x}, y: {self.curr_y}, z: {self.curr_z}, w: {self.curr_w}')
+            
             self.get_logger().info(f'goal poses: {self._nav2_cmd_data.goal_poses}')
 
 
@@ -686,35 +482,10 @@ class NavigationManagerNode(Node):
                 'navigate_through_poses action server not available!')
             return
 
-        # [FIX] goal 을 보내기 직전에 pause 래치를 반드시 내린다.
-        #
-        # controller_server 의 pause_flag_ 는 /nav_pause_flag 콜백에서만 쓰이고
-        # (controller_server.cpp:709 가 유일한 쓰기), goal 시작/종료/취소 어디서도
-        # 초기화되지 않는다. 그리고 false 를 내보내는 곳은 관제 RESUME 하나뿐이었다.
-        # BT 의 InitSequence 가 goal 마다 내보내는 것은 /controller_pause_flag 로
-        # 토픽이 다르므로 컨트롤러의 pause 를 풀지 못한다.
-        #
-        # 그래서 'pause -> 관제 stop -> goal 취소 -> 새 move' 처럼 RESUME 없이
-        # pause 가 남은 채 다음 명령이 오면, 컨트롤러가 computeControl 루프의
-        # pause 분기에 걸려 0 속도만 계속 발행한다(= 로봇이 영영 안 움직인다).
-        #
-        # 새 move 는 관제의 새 지시이므로 직전 pause 는 그 지시로 무효가 된다.
-        # 여기(대기 루프와 wait_for_server 를 모두 통과한 뒤, send_goal_async 바로 앞)
-        # 에 두어야 pause 해제와 실제 주행 시작 사이에 창이 생기지 않는다.
-        #
-        # /nav_pause_flag 는 TRANSIENT_LOCAL 이라 이 false 가 래치를 덮어쓴다.
-        # 즉 이후 controller_server 가 재기동해도 옛 pause 로 되살아나지 않는다.
-        pause_msg = Bool()
-        pause_msg.data = False
-        self._pause_resume_publisher.publish(pause_msg)
-
         self.get_logger().info('Request sending NavigateThroughPoses goal')
         send_goal_future = self._nav2_through_poses_client.send_goal_async(
             goal_msg, feedback_callback=self._move_feedback_callback)
         send_goal_future.add_done_callback(self._move_response_callback)
-
-
-
 
     def _pause_callback(self, msg: UInt8) -> None:
         self.get_logger().info('pause_callback')
@@ -728,12 +499,9 @@ class NavigationManagerNode(Node):
         pause_msg = Bool()
         pause_msg.data = True
         self._pause_resume_publisher.publish(pause_msg)
-        # self._pause_resume_publisher.publish(pause_msg)
-        # self._pause_resume_publisher.publish(pause_msg)
         self.get_logger().info('pause flag published (FollowPath canceled in BT)')
 
     def _resume_callback(self, msg: UInt8) -> None:
-        self.get_logger().info('resume_callback start')
         with self._state_lock:
             self._nav2_cmd_data.cmd_seq_num = msg.data
             self._nav2_monitoring_data.ros_nav_cmd_seq_num = msg.data
@@ -741,8 +509,6 @@ class NavigationManagerNode(Node):
         pause_msg = Bool()
         pause_msg.data = False
         self._pause_resume_publisher.publish(pause_msg)
-        # self._pause_resume_publisher.publish(pause_msg)
-        # self._pause_resume_publisher.publish(pause_msg)
         self.get_logger().info('resume_callback')
 
     # ------------------------------------------------------------------ #
@@ -834,58 +600,30 @@ class NavigationManagerNode(Node):
 
             elif status == GoalStatus.STATUS_CANCELED:
                 self._goal_status = GoalStatus.STATUS_CANCELED
+                self._nav2_monitoring_data.ros_nav_cmd_seq_num = \
+                    self._nav2_cmd_data.cmd_seq_num
                 self.get_logger().warn('CANCELED')
 
-                if self._reroute_in_flight:
-                    # [FIX] 재라우팅을 위해 _move_callback 이 일부러 취소한 것이다.
-                    # 관제 입장에서 주행이 실패한 것이 아니므로 driving_abort 를
-                    # 세우지 않고, cmd_seq_num 도 손대지 않는다. 곧바로 새 goal 이
-                    # 나가면서 _move_response_callback 이 새 시퀀스로 갱신한다.
-                    self.get_logger().info('  (재라우팅을 위한 취소 - 실패 아님)')
-                else:
-                    self._nav2_monitoring_data.ros_nav_cmd_seq_num = \
-                        self._nav2_cmd_data.cmd_seq_num
-
-                    if self.nav_stop_command:
-                        self.nav_stop_command = False
-                        self._nav2_monitoring_data.ros_nav_driving_abort = True       #### testing...
+                if self.nav_stop_command:
+                    self.nav_stop_command = False
+                    self._nav2_monitoring_data.ros_nav_driving_abort = True       #### testing...
+                if self._stop_in_flight:
+                    publish_stop_complete = True
+                    self._stop_in_flight = False
 
             else:
                 self._goal_status = GoalStatus.STATUS_UNKNOWN
                 self.get_logger().error(f'Unknown result status: {status}')
 
             self._goal_handle = None
-
-            # [FIX] 정지 완료 통지는 goal 의 종료 상태와 무관하게 반드시 내보낸다.
-            #
-            # 예전에는 이 블록이 CANCELED 분기 안에 있었다. 그래서 두 경우에 유실됐다.
-            #   1) 재라우팅: 정지 진행 중(_stop_in_flight)에 새 move 가 들어와
-            #      위에서 재라우팅으로 처리되는 경로.
-            #   2) 경합: _nav_stop_callback / _main_stop_callback 이
-            #      cancel_goal_async() 를 부른 뒤 서버가 취소를 처리하기 전에
-            #      goal 이 스스로 SUCCEEDED / ABORTED 로 끝나는 경로.
-            #
-            # 통지가 유실되면 fleet_decision 은 nav_stop_complete_ 가 False 로
-            # 영구 고착되고, 그 동안 check_collision_obstacle /
-            # check_collision_agent / on_collision 을 전부 조기 return 시킨다.
-            # 즉 그 로봇은 재기동 전까지 다른 로봇을 전혀 인지하지 못한다.
-            # (fleet_decision_node.py 의 358 / 381 / 648 / 803 행)
-            #
-            # _stop_in_flight 는 여기서 항상 내려가므로, 기존의
-            # "status != CANCELED 이면 강제 클리어" 와 최종 상태가 같다.
-            if self._stop_in_flight:
-                publish_stop_complete = True
+            if status != GoalStatus.STATUS_CANCELED:
                 self._stop_in_flight = False
-
-        # 이전 goal 이 완전히 끝났음을 알린다. 재라우팅으로 대기 중인
-        # _move_callback 이 이 신호를 받고 새 goal 을 보낸다.
-        # (락 밖에서 세운다 - 기다리는 쪽이 _state_lock 을 잡지 않은 채 깨어나도록)
-        self._goal_finished_event.set()
 
         if publish_stop_complete:
             done_msg = Bool()
             done_msg.data = True
             self._stop_complete_publisher.publish(done_msg)
+            self._nav2_monitoring_data.ros_nav_driving_abort = False       #### testing...
             self.get_logger().info('nav_stop_complete published')
 
     # ------------------------------------------------------------------ #
@@ -1011,7 +749,7 @@ def main(args=None) -> None:
     rclpy.init(args=args)
     node = NavigationManagerNode()
 
-    executor = MultiThreadedExecutor(num_threads=10)
+    executor = MultiThreadedExecutor(num_threads=6)
     executor.add_node(node)
 
     try:

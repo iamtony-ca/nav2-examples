@@ -1,2 +1,7 @@
 navigation_manager_node:
   ros__parameters:
+    # [09-27] 관제 명령 경로 선택.
+    #   false = 기존 토픽 방식(move_command / pause_command / resume_command / main_stop_command / reset_command) — 현장 검증 완료본
+    #   true  = 0923 action/service 방식(navigate_command action + navigation_control service). 기존 토픽 구독도 함께 가진다.
+    # winros_bridge/config/winros_bridge.yaml 의 use_command_services 와 반드시 같은 값으로 둔다.
+    use_command_services: true

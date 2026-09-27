@@ -70,6 +70,7 @@ class NavigationManagerNode(Node):
         # 상태 업데이트와 stop명령은 _state_update_cb_group에서 독립적으로 스레드를 점유해 실행됩니다.
         self._cmd_cb_group = MutuallyExclusiveCallbackGroup()
         self._state_update_cb_group = MutuallyExclusiveCallbackGroup()
+        self._pose_cb_group = ReentrantCallbackGroup()
         self._action_cb_group = ReentrantCallbackGroup()
         self._timer_cb_group = MutuallyExclusiveCallbackGroup()
         self._srv_cb_group = MutuallyExclusiveCallbackGroup()
@@ -97,6 +98,14 @@ class NavigationManagerNode(Node):
         self._static_is_status_ready: bool = False 
         self._agent_is_status_ready: bool = False 
 
+        self.nav_stop_command: bool = False  # nav_stop 명령 수신 여부를 나타내는 플래그
+
+
+        self.curr_x: float = 0.0
+        self.curr_y: float = 0.0
+        self.curr_z: float = 0.0
+        self.curr_w: float = 0.0
+        
         # ----- Subscriptions ------------------------------------------ #
         # move만 _cmd_cb_group 할당 (block 발생 지점)
         self._move_subscription = self.create_subscription(
@@ -110,10 +119,23 @@ class NavigationManagerNode(Node):
         self._resume_subscription = self.create_subscription(
             UInt8, 'resume_command',
             self._resume_callback, 10, callback_group=self._state_update_cb_group)
-        self._stop_subscription = self.create_subscription(
+        self._nav_stop_subscription = self.create_subscription(
             UInt8, 'stop_command',
-            self._stop_callback, 10, callback_group=self._state_update_cb_group)
+            self._nav_stop_callback, 10, callback_group=self._state_update_cb_group)
 
+        self._main_stop_subscription = self.create_subscription(
+            UInt8, '/main_stop_command',
+            self._main_stop_callback, 10, callback_group=self._state_update_cb_group)
+
+        self._reset_subscription = self.create_subscription(
+            UInt8, '/reset_command',
+            self._reset_callback, 10, callback_group=self._state_update_cb_group)
+
+        self._pose_tracked_subscription = self.create_subscription(
+            PoseStamped, '/pose_tracked',
+            self._pose_tracked_callback, 1, callback_group=self._pose_cb_group)
+
+        
         # /robot_status 추가
         self._robot_status_sub = self.create_subscription(
             String, '/robot_status',
@@ -261,18 +283,35 @@ class NavigationManagerNode(Node):
             self._static_is_last_goal_occupied = msg.is_last_goal_occupied
             self._static_is_status_ready = msg.is_status_ready
 
+
+    def _pose_tracked_callback(self, msg: PoseStamped) -> None:
+        # self.get_logger().info(f'reset_callback!, cmd_seq_num: {msg.data}')
+        
+        with self._state_lock:
+            self.curr_x = round(msg.pose.position.x, 4)
+            self.curr_y = round(msg.pose.position.y, 4)
+            self.curr_z = round(msg.pose.orientation.z, 4)
+            self.curr_w = round(msg.pose.orientation.w, 4)
+   
+        # self.get_logger().info(f'reset abort status, reset_callback')
+
+    
     # ------------------------------------------------------------------ #
     # Topic callbacks
     # ------------------------------------------------------------------ #
-    def _stop_callback(self, msg: UInt8) -> None:
-        self.get_logger().info(f'stop_callback!, cmd_seq_num: {msg.data}')
-        self._nav2_monitoring_data.ros_nav_driving_abort = False
+    def _nav_stop_callback(self, msg: UInt8) -> None:
+        self.get_logger().info(f'nav stop_callback!, cmd_seq_num: {msg.data}')
+        
         with self._state_lock:
             # while 문 중단을 위한 플래그 설정
+            self.nav_stop_command = True
             self._stop_in_flight = True
+            self._nav2_monitoring_data.ros_nav_driving_abort = False
             
             if self._goal_handle is None:
-                self.get_logger().info('not cancle goal, stop_callback')
+                self.get_logger().info('not cancle goal, nav stop_callback')
+                self.nav_stop_command = False
+                self._stop_in_flight = False
                 return
             handle = self._goal_handle
             self._clear_nav2_command_data_locked()
@@ -283,16 +322,49 @@ class NavigationManagerNode(Node):
             self._path_agent_collision = False                        ### testing...
 
         handle.cancel_goal_async()
-        self.get_logger().info(f'cancle goal, stop_callback')
+        self.get_logger().info(f'cancle goal, nav stop_callback')
+
+    def _main_stop_callback(self, msg: UInt8) -> None:
+        self.get_logger().info(f'main_stop_callback!, cmd_seq_num: {msg.data}')
+        
+        with self._state_lock:
+            # while 문 중단을 위한 플래그 설정
+            self._nav2_monitoring_data.ros_nav_driving_abort = False
+            self._stop_in_flight = True
+            
+            if self._goal_handle is None:
+                self.get_logger().info('not cancle goal, main stop_callback')
+                self._stop_in_flight = False
+                return
+            handle = self._goal_handle
+            self._clear_nav2_command_data_locked()
+            self._nav2_cmd_data.cmd_seq_num = msg.data
+            self._goal_status = GoalStatus.STATUS_CANCELED
+            self._controller_pause_flag = False                       ### testing...
+            self._path_static_collision = False                       ### testing...
+            self._path_agent_collision = False                        ### testing...
+
+        handle.cancel_goal_async()
+        self.get_logger().info(f'cancle goal, main stop_callback')
+
+
+    def _reset_callback(self, msg: UInt8) -> None:
+        self.get_logger().info(f'reset_callback!, cmd_seq_num: {msg.data}')
+        
+        with self._state_lock:
+            self._nav2_monitoring_data.ros_nav_driving_abort = False
+   
+        self.get_logger().info(f'reset abort status, reset_callback')
+
+    
 
     def _move_callback(self, msg: NavigationCommand) -> None:
         self.get_logger().info('move_callback')
-        self._stop_in_flight = False
+        with self._state_lock:
+            self._stop_in_flight = False
         cond_ready = False
         cond_static = False
         cond_agent = False
-
-
 
         self.clear_both_costmaps()
 
@@ -315,6 +387,8 @@ class NavigationManagerNode(Node):
 
         with self._state_lock:
             self._clear_nav2_command_data_locked()
+            self._stop_in_flight = False
+            self._nav2_monitoring_data.ros_nav_driving_abort = False 
             self._nav2_cmd_data.goal_cnt = msg.goal_cnt
             self._nav2_cmd_data.cmd_seq_num = msg.cmd_seq_num
 
@@ -329,7 +403,8 @@ class NavigationManagerNode(Node):
                 self._nav2_cmd_data.from_node_id.append(msg.from_node_id[i])
                 self._nav2_cmd_data.to_node_id.append(msg.to_node_id[i])
 
-            
+
+            self.get_logger().info(f'current pose: x: {self.curr_x}, y: {self.curr_y}, z: {self.curr_z}, w: {self.curr_w}')
             self.get_logger().info(f'goal poses: {self._nav2_cmd_data.goal_poses}')
 
 
@@ -345,11 +420,7 @@ class NavigationManagerNode(Node):
 
         wait_start_time = None
         target_duration = 1.0  # 조건 충족 유지 시간 (초)
-
-        # [추가] 조건 미충족 시 costmap clear 주기 관리
-        last_clear_time = self.get_clock().now()
-        CLEAR_COSTMAP_INTERVAL = 15.0  # N초. 원하는 주기로 조정
-
+        
         # 타임아웃 설정 변수
         loop_start_time = self.get_clock().now()
         MAX_WAIT_TIMEOUT = 150.0  # 최대 대기 시간 (초)
@@ -443,12 +514,6 @@ class NavigationManagerNode(Node):
                             break  # 대기 루프 탈출 -> Action 서버로 Goal 전송
                 else:
                     wait_start_time = None
-                    # [추가] 조건이 계속 미충족이면 N초마다 costmap을 비워
-                    # 잔상/오탐으로 인한 goal occupied 상태를 해소 시도
-                    if (self.get_clock().now() - last_clear_time).nanoseconds / 1e9 >= CLEAR_COSTMAP_INTERVAL:
-                        self.clear_both_costmaps()
-                        last_clear_time = self.get_clock().now()
-
 
             # 10Hz 주기로 체크
             time.sleep(0.1)
@@ -582,7 +647,10 @@ class NavigationManagerNode(Node):
                 self._nav2_monitoring_data.ros_nav_cmd_seq_num = \
                     self._nav2_cmd_data.cmd_seq_num
                 self.get_logger().warn('CANCELED')
-                self._nav2_monitoring_data.ros_nav_driving_abort = True       #### testing...
+
+                if self.nav_stop_command:
+                    self.nav_stop_command = False
+                    self._nav2_monitoring_data.ros_nav_driving_abort = True       #### testing...
                 if self._stop_in_flight:
                     publish_stop_complete = True
                     self._stop_in_flight = False
@@ -724,7 +792,7 @@ def main(args=None) -> None:
     rclpy.init(args=args)
     node = NavigationManagerNode()
 
-    executor = MultiThreadedExecutor(num_threads=6)
+    executor = MultiThreadedExecutor(num_threads=9)
     executor.add_node(node)
 
     try:

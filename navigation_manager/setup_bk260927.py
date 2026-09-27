@@ -31,8 +31,7 @@ setup(
         'console_scripts': [
             # node_executable_name = package_name.python_file:main_func
             # tree 구조에 있는 'navigation_manager_node.py' 파일명과 일치해야 합니다.
-            # [09-27] use_command_services(yaml) 로 토픽 방식(navigation_manager_node) / action·service 방식(navigation_manager_cmd_node) 선택
-            'navigation_manager_node = navigation_manager.navigation_manager_main:main',
+            'navigation_manager_node = navigation_manager.navigation_manager_node:main',
             'nav_stuck_manager_node = navigation_manager.nav_stuck_manager_node:main',
             'roi_range_manager_node = navigation_manager.roi_range_manager_node:main',             
         ],

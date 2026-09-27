@@ -19,7 +19,7 @@ class StuckManagerNode(Node):
         # 파라미터 선언 (타입 명시)
         self.declare_parameter(
             'timeout_sec', 
-            200.0,
+            300.0,
             ParameterDescriptor(type=ParameterType.PARAMETER_DOUBLE, description='Timeout limit in seconds')
         )
         self.declare_parameter(
