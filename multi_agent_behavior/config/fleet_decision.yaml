@@ -140,10 +140,12 @@ fleet_decision_node:
     aging_step_sec: 60.0
     aging_max_level: 2
     # 위치 무진전 보고 (관제 goal_timeout 600 s 보다 먼저)
-    no_progress_report_sec: 300.0
+    no_progress_report_sec: 0.0   # [OP 09-28] 끔 — 무진전 abort 는 nav_stuck_manager(480 s)에 맡긴다 (사용자 결정)
     no_progress_dist_m: 0.3
     # 정적 상한 추적: 같은 자리 재발은 같은 상황 (M-11)
     static_same_spot_m: 0.3
+    # [09-28 현장 이상 2] 해제 지점에서 이만큼 벗어난 적이 있으면 같은 자리 재차단도 새 상황 (replan 재시도 0 부터, 사용자 결정 2.0 m)
+    static_same_spot_leave_m: 2.0
     # 자기 정보 토픽 (M-9)
     own_path_topic: "/plan_truncated_short"
     own_twist_topic: "/cmd_vel"
@@ -245,3 +247,8 @@ fleet_decision_node:
     junction_escape_after_sec: 20.0
     junction_escape_m: 1.2
     junction_escape_cooldown_sec: 40.0
+
+    # [OP 09-28] 관제 명령 우선·자기 기동 허가 (verify/FLEET_V2_FIELD_ISSUE_0928.md).
+    # 관제 pause·도킹·종료 상태에서 fleet 기동 금지·즉시 회수, 무진전 시계는 이번 명령의 활성 시간만, 관제 pause 중 판단 정지.
+    operator_priority_enable: true
+    dock_monitoring_topic: "ros2_dock_monitoring_data"

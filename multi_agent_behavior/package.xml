@@ -16,6 +16,7 @@
   <depend>nav2_msgs</depend>
   <depend>std_srvs</depend>
   <depend>tf2_ros</depend>
+  <depend>docking_monitoring_msgs</depend>   <!-- [OP 09-28] 도킹 중 fleet 기동 금지 -->
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

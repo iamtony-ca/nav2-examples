@@ -14,6 +14,7 @@ from std_msgs.msg import Bool, String, UInt8, UInt16
 from std_srvs.srv import Empty
 from geometry_msgs.msg import Pose, PoseStamped, PolygonStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
+from docking_monitoring_msgs.msg import DockingMonitoring   # [OP 09-28] 도킹 중이면 fleet 기동 금지
 from robot_interfaces.msg import PathAgentCollisionInfo, PathStaticCollisionInfo
 from robot_interfaces.msg import ModifierControl
 # [V2] 자기 자세는 관제 레코드가 아니라 TF 에서 얻는다 (M-9)
@@ -480,6 +481,13 @@ class FleetDecisionNode(Node):
         self.declare_parameter("test_hooks_enable", False)
         self.declare_parameter("respect_nav_pause", False)
         self.declare_parameter("nav_pause_topic", "/nav_pause_flag")
+        # [OP 09-28 현장 사고: 이적재 뒤 출발 시 unwedge 후진] 관제 명령 우선·자기 기동 허가 (verify/FLEET_V2_FIELD_ISSUE_0928.md)
+        #   - 로봇은 관제 명령이 살아 있을 때만 움직인다. 관제 pause·stop·도킹·종료 상태에서는 fleet 이 절대 움직이지 않는다.
+        #   - 허가가 사라지면 진행 중인 fleet 기동(BackUp/Drive/Spin/곡선 후진)을 즉시 거둔다.
+        #   - 무진전 시계는 이번 주행 명령의 활성 시간만 센다(도킹·이적재·충전으로 서 있던 시간, 관제 pause 시간 제외).
+        #   - 관제 pause 중에는 fleet 판단 루프를 모두 쉬고, 해제 때 대기 시계를 pause 길이만큼 밀어 이어서 센다(5 분+ pause 대비).
+        self.declare_parameter("operator_priority_enable", True)
+        self.declare_parameter("dock_monitoring_topic", "ros2_dock_monitoring_data")
         # [V2.35 09-26] 후퇴 도달 판정이 절대값 yield_reach_tol_m(0.4) 뿐이라, 0.4 m 보다 짧은 후퇴 목표는 **출발하자마자 '도달'** 로 끝났다
         # (W·Y 94 %, V2.33 이후 99 % 가 1.5 s 안에 '완료' — 실제로는 안 움직였다). >0 이면 허용 오차를
         # min(yield_reach_tol_m, max(0.05, yield_reach_frac × 목표 거리)) 로 줄인다. 0 = 기존 동작.
@@ -574,6 +582,8 @@ class FleetDecisionNode(Node):
         self.declare_parameter("no_progress_dist_m", 0.3)
         # 정적 상한 추적: 같은 자리 재발은 같은 상황 (M-11)
         self.declare_parameter("static_same_spot_m", 0.3)
+        # [09-28 현장 이상 2] 해제 지점에서 이만큼 벗어난 적이 있으면 '그 자리를 통과했다' — 같은 자리 재차단도 새 상황
+        self.declare_parameter("static_same_spot_leave_m", 2.0)
         # 자기 정보 토픽 (M-9)
         self.declare_parameter("own_path_topic", "/plan_truncated_short")
         self.declare_parameter("own_twist_topic", "/cmd_vel")
@@ -626,6 +636,7 @@ class FleetDecisionNode(Node):
         self.no_progress_report_sec = float(gp("no_progress_report_sec"))
         self.no_progress_dist = float(gp("no_progress_dist_m"))
         self.static_same_spot = float(gp("static_same_spot_m"))
+        self.static_same_spot_leave = float(gp("static_same_spot_leave_m"))
         self.global_frame = str(gp("global_frame"))
         self.base_frame = str(gp("base_frame"))
 
@@ -647,6 +658,9 @@ class FleetDecisionNode(Node):
         self._external_speed_ctrl: Optional[ModifierControl] = None
         self._static_last_hit_xy: Optional[Tuple[float, float]] = None
         self._static_hit_xy: Optional[Tuple[float, float]] = None
+        # [09-28 현장 이상 2] 정적 해제 지점과, 그 뒤 거기서 static_same_spot_leave_m 이상 벗어난 적이 있는지
+        self._static_release_xy: Optional[Tuple[float, float]] = None
+        self._static_left_spot: bool = False
         self._np_anchor: Optional[Tuple[float, float]] = None
         self._np_anchor_t: Optional[Time] = None
         self._v2_prio_reeval_t: Optional[Time] = None
@@ -796,6 +810,13 @@ class FleetDecisionNode(Node):
         self.yield_bt_active_only = bool(self.get_parameter("yield_bt_active_only").value)
         self.respect_nav_pause = bool(self.get_parameter("respect_nav_pause").value)
         self._nav_paused = False
+        self.operator_priority = bool(self.get_parameter("operator_priority_enable").value)
+        self._nav_pause_since: Optional[Time] = None
+        self._docking = False
+        self._active_since: Optional[Time] = None     # 이번 관제 주행 명령의 활성 시각 (무진전 시계 상한)
+        self._man_kind = "yield"                      # 진행 중인 fleet 기동 종류: "yield" | "self"
+        self._maneuver_goal_handle = None             # Drive/Spin 단계 goal 핸들 (취소용)
+        self._guard_revoked_logged = False
         self._nav_pause_denied = 0
         self.yield_reach_frac = float(self.get_parameter("yield_reach_frac").value)
         self._yield_tol = None
@@ -951,6 +972,9 @@ class FleetDecisionNode(Node):
         # [V2.37b] 관제 정지 상태 — 1회성 트리거라 TRANSIENT_LOCAL 로 구독한다(늦게 떠도 현재 상태를 받는다)
         self.create_subscription(Bool, self.get_parameter("nav_pause_topic").value,
                                  self._on_nav_pause, _qos_latch, callback_group=self.cb_group)
+        # [OP] 도킹 상태 (winros_bridge_to_dock 이 0.1 s 마다 발행)
+        self.create_subscription(DockingMonitoring, self.get_parameter("dock_monitoring_topic").value,
+                                 self._on_dock_monitoring, 10, callback_group=self.cb_group)
         self.create_subscription(UInt16, self.get_parameter("bt_error_topic").value,
                                  self._on_bt_error, 20, callback_group=self.cb_group)
         self._clear_global = self.create_client(Empty, "/global_costmap/clear_entirely_global_costmap",
@@ -989,6 +1013,7 @@ class FleetDecisionNode(Node):
         self.create_timer(1.0, self._v2_bt_error_tick, callback_group=self.cb_group) # [V2.4] recovery 선택권
         self.create_timer(0.5, self._v2_yield_beat, callback_group=self.cb_group)    # [V2.1] 후퇴 요청 하트비트
         self.create_timer(0.5, self._v2_recov_cmd_beat, callback_group=self.cb_group)  # [V2.6] 회복 지시 하트비트
+        self.create_timer(0.1, self._op_guard_tick, callback_group=self.cb_group)     # [OP] 허가 상실 시 fleet 기동 즉시 회수
 
 
         # [추가] 현재 일시정지/재계획 시퀀스가 진행 중인지 확인하는 플래그
@@ -1206,6 +1231,28 @@ class FleetDecisionNode(Node):
         # 로봇은 pause 인 채라 start_timeout 만 반복한다 (관제 goal timeout 600 s 까지 통째로 낭비).
         prev = self.current_robot_status
         self.current_robot_status = msg.data
+        # [OP] 종료·대기 상태(IDLE/SUCCEEDED/CANCELED/FAILED)에서 주행 계열로 들어오면 = 새 관제 명령.
+        # 무진전 시계를 여기서 다시 시작한다 (도킹·이적재·충전 동안 서 있던 시간을 넘기지 않는다).
+        # READY(목표 점유 대기, 최대 150 s) → RECEIVED_GOAL(실제 출발) 도 다시 시작한다 — 대기 시간을 무진전으로 넘기지 않는다.
+        if msg.data in self._OP_ACTIVE and (prev not in self._OP_ACTIVE or self._active_since is None
+                                            or (prev == 'READY' and msg.data == 'RECEIVED_GOAL')):
+            self._active_since = self.get_clock().now()
+        # [09-28 현장 이상 2] replan 재시도 횟수는 '한 관제 명령 안' 에서만 센다 (사용자 결정 F-a·F-b).
+        # 새 명령(종료·대기 → 주행 계열, READY → RECEIVED_GOAL)과 goal 종료(IDLE/SUCCEEDED/CANCELED/FAILED) 때
+        # 대기 상태 진행 여부와 상관없이 정적·agent 재시도 추적을 지운다.
+        # 예전에는 대기가 진행 중일 때만 지워서, 정상 통과·완주한 명령의 횟수가 다음 바퀴로 넘어갔다.
+        _new_cmd = (msg.data in self._OP_ACTIVE and prev != msg.data
+                    and (prev not in self._OP_ACTIVE or (prev == 'READY' and msg.data == 'RECEIVED_GOAL')))
+        _goal_end = (msg.data in ('IDLE', 'SUCCEEDED', 'CANCELED', 'FAILED') and prev != msg.data
+                     and prev in self._OP_ACTIVE)
+        if (_new_cmd or _goal_end) and (self._static_replan_retry or self._agent_replan_retry
+                                        or self._static_last_release_t is not None
+                                        or self._agent_last_release_t is not None):
+            self.get_logger().info(
+                f"[retry reset] {'새 명령' if _new_cmd else 'goal 종료'} ({prev} -> {msg.data}) — "
+                f"replan 재시도 추적 초기화 (static {self._static_replan_retry}회, agent {self._agent_replan_retry}회)")
+            self._static_reset_osc()
+            self._agent_reset_osc()
         if self.v2_enable and msg.data in ('RECEIVED_GOAL', 'READY') and prev != msg.data:
             held = (self.is_processing_agent_pause or self.is_processing_replan_pause
                     or self.is_processing_goal_occupied_pause or self.is_processing_last_goal_occupied_pause)
@@ -1278,6 +1325,8 @@ class FleetDecisionNode(Node):
         충돌 메시지 타임아웃과 별개로, replan_flag가 True로 유지되는 경우 일정 시간 후에 자동으로 주행 재개하는 로직
         """
        
+        if self._op_frozen():
+            return                                    # [OP] 관제 pause 중 — 판단 정지 (해제 때 시계를 이어서 센다)
         now = self.get_clock().now()
 
         self._check_nav_stop_watchdog(now)  # [FIX] 통지 유실 시 강제 해제
@@ -1537,8 +1586,18 @@ class FleetDecisionNode(Node):
                     self.get_logger().warn(f"[check_collision_obstacle] Obstacle detected timeout for {dt:.1f}s. Initiating resume sequence.")
                     
                     if self.delay_after_replan == False:
+                        # [09-29 D1-ⓑ] BT 가 recovery 안에 있으면 /request_replan 을 tick 하지 않아 이번 요청은 계산되지 않는다.
+                        #   예전에는 그런 헛 요청도 세서 실제 계산 1~2회로 10/10 → 관제 보고에 닿았다 (L5m_grid r3, op_l2_D).
+                        #   요청은 그대로 낸다 (래치 — recovery 에서 돌아오면 그때 계산). 끝내는 일은 BT recovery 한도·nav_stuck 이 맡는다.
+                        _in_recovery = str(self.current_robot_status).startswith('RECOVERY_')
                         # [FIX] 이 상황에서 몇 번째 replan 인가.
-                        self._static_replan_retry += 1
+                        if not _in_recovery:
+                            self._static_replan_retry += 1
+                        else:
+                            self.get_logger().info(
+                                f"[check_collision_obstacle] BT recovery 중({self.current_robot_status}) — replan 요청은 내되 "
+                                f"시도 횟수에는 넣지 않는다 ({self._static_replan_retry}/{self.static_max_replan_retry})",
+                                throttle_duration_sec=10.0)
                         if (self.static_max_replan_retry > 0
                                 and self._static_replan_retry > self.static_max_replan_retry):
                             self.get_logger().error(
@@ -1553,9 +1612,10 @@ class FleetDecisionNode(Node):
                             self._pause_start_time = None
                             self._replan_flag_false_start_time = None
                             return
-                        self.get_logger().warn(
-                            f"[check_collision_obstacle] replan 시도 "
-                            f"{self._static_replan_retry}/{self.static_max_replan_retry}")
+                        if not _in_recovery:
+                            self.get_logger().warn(
+                                f"[check_collision_obstacle] replan 시도 "
+                                f"{self._static_replan_retry}/{self.static_max_replan_retry}")
                         self._publish_replan()
                         self.delay_after_replan = True
                         if self.delay_after_replan_start_time is None:
@@ -1608,6 +1668,8 @@ class FleetDecisionNode(Node):
 
     def check_collision_agent(self):
         """ Agent 충돌 예측에 대한 상태 머신 (20Hz 주기 실행) """
+        if self._op_frozen():
+            return                                    # [OP] 관제 pause 중 — 판단 정지 (해제 때 시계를 이어서 센다)
         now = self.get_clock().now()
 
         self._check_nav_stop_watchdog(now)  # [FIX] 통지 유실 시 강제 해제
@@ -2212,6 +2274,10 @@ class FleetDecisionNode(Node):
         elif self._pause_start_time is not None:
             self._static_last_elapsed = (now - self._pause_start_time).nanoseconds * 1e-9
         self._static_last_release_t = now
+        # [09-28 현장 이상 2] 해제 지점을 기록한다 — 여기서 static_same_spot_leave_m 벗어나면 통과한 것으로 본다
+        me = self._own_pose()
+        self._static_release_xy = (me[0], me[1]) if me is not None else None
+        self._static_left_spot = False
 
     def _static_pause_start(self, now: Time) -> Time:
         """[FIX] 정적 pause 진입 시각을 정한다.
@@ -2233,6 +2299,16 @@ class FleetDecisionNode(Node):
                                     self._static_hit_xy[1] - self._static_last_hit_xy[1])
                          <= self.static_same_spot)
         self._static_last_hit_xy = self._static_hit_xy
+        # [09-28 현장 이상 2] 해제 뒤 그 자리에서 벗어난 적이 있으면 간격·같은 자리와 무관하게 새 상황이다.
+        # (예전: 같은 자리면 557 s 뒤에도, 한 바퀴 돌고 와서도 재시도 횟수를 이어받아 10회째에 관제 보고·cancel)
+        if self._static_left_spot and self._static_last_release_t is not None:
+            self.get_logger().info(
+                f"[check_collision_obstacle] 직전 해제 뒤 그 자리를 벗어났었다 — 새 상황 "
+                f"(직전 replan 재시도 {self._static_replan_retry}회 초기화).")
+            self._static_replan_retry = 0
+            self._static_last_elapsed = 0.0
+            self._static_left_spot = False
+            return now
         if (self.static_rejoin_window_sec > 0.0
                 and self._static_last_release_t is not None):
             gap = (now - self._static_last_release_t).nanoseconds * 1e-9
@@ -2265,6 +2341,9 @@ class FleetDecisionNode(Node):
         self._static_last_release_t = None
         self._static_last_elapsed = 0.0
         self._static_replan_retry = 0
+        self._static_last_hit_xy = None          # [09-28 현장 이상 2] 같은 자리 기준도 지운다
+        self._static_release_xy = None
+        self._static_left_spot = False
 
     # ---------------- [FIX B-7] agent 쪽 재진입/재시도 추적 (정적 쪽과 같은 형태) ----------------
     def _agent_release(self, now: Time, after_replan: bool = False) -> None:
@@ -2760,7 +2839,8 @@ class FleetDecisionNode(Node):
                          or goal_occ_stalled)
                     and self._backoff_done_for != self._locked_target_id
                     and self._target_dist(agent) <= max(self.yield_backoff_body, self.mutual_block_near if goal_occ_stalled else 0.0)
-                    and self._target_in_front(agent)):
+                    and self._target_in_front(agent)
+                    and self._op_may('_v2_phase1_tick')):       # [OP] 불허면 공지·1회성 표시 없이 다음 분기로
                 self._backoff_done_for = self._locked_target_id
                 self.get_logger().warn(
                     f"[V2 backoff] 로봇 {agent.machine_id} 과 대면 (body {self._target_dist(agent):.2f} m) → "
@@ -2852,6 +2932,8 @@ class FleetDecisionNode(Node):
     def _check_predicted_conflicts(self) -> None:
         """[V2] 내 경로와 이웃 경로가 conflict_dist 안에서 만나고, 둘 다 horizon 안에 그 지점에 닿으며 도착 시각
         차이가 gap 보다 작으면 → 우선순위가 낮은 내가 미리 감속한다 (validator HIT 이전, 예약 영역 앞 대기)."""
+        if self._op_frozen():
+            return                                    # [OP] 관제 pause 중 — 판단 정지
         if not (self.v2_enable and self.predict_enable):
             return
         active = (self.is_processing_agent_pause or self.is_processing_replan_pause
@@ -3053,6 +3135,8 @@ class FleetDecisionNode(Node):
         self.get_logger().warn("[V2 stop-go] 재시도 전에 local costmap 을 비운다 (남은 표식 제거, 실장애물은 즉시 재기록)")
 
     def _v2_maneuver_tick(self) -> None:
+        if self._op_frozen():
+            return                                    # [OP] 관제 pause 중 — 판단 정지
         c = self._man_ctx
         if self._backup_state != "waiting" or c is None or c.get("next") is None:
             return
@@ -3068,6 +3152,9 @@ class FleetDecisionNode(Node):
 
     def _backup_send(self, now: Time, dist: Optional[float] = None) -> None:
         _caller = sys._getframe(1).f_code.co_name
+        if not self._op_gate(_caller):                # [OP] 관제 명령 우선·상태별 허가
+            self._backup_state = "failed"; self._man_ctx = None
+            return
         if dist is None and _caller not in ("_maneuver_next", "_v2_maneuver_tick") \
                 and not self._retreat_gate_check(_caller):
             self._backup_state = "failed"                 # [V2.34] 모든 규칙이 succeeded/failed 로 뒷정리한다
@@ -3106,6 +3193,9 @@ class FleetDecisionNode(Node):
         fut.add_done_callback(self._backup_goal_response)
 
     def _drive_send(self, dist: float) -> None:
+        if not self._op_gate(sys._getframe(1).f_code.co_name):     # [OP]
+            self._maneuver = None; self._backup_state = "failed"; self._man_ctx = None
+            return
         # [V2.23a] 전진 기동도 막혀 있으면 보내지 않는다 (보내도 COLLISION_AHEAD 로 거부된다).
         fb = self._rear_blocked(float(dist), sign=1.0)
         if fb is True:
@@ -3254,6 +3344,8 @@ class FleetDecisionNode(Node):
         return order.index(int(self.my_id))
 
     def _v2_cycle_tick(self) -> None:
+        if self._op_frozen():
+            return                                    # [OP] 관제 pause 중 — 판단 정지
         if not (self.v2_enable and self.cycle_detect_enable):
             return
         now = self.get_clock().now()
@@ -3311,6 +3403,8 @@ class FleetDecisionNode(Node):
             return
         if dt < due:
             return
+        if not self._op_may('_v2_cycle_tick'):          # [OP] 불허면 순환 해소 기록·공지 없이 다음 틱에 다시 본다
+            return
         self._cycle_done[sig] = now
         self._cycle_backoff_active = True
         self._cycle_backoff_static = bool(waiting_static and not waiting_agent)
@@ -3341,6 +3435,15 @@ class FleetDecisionNode(Node):
         me = self._own_pose()
         if me is None:
             return
+        # [09-28 현장 이상 2] 정적 해제 지점에서 벗어난 적이 있는지 (한 번 벗어나면 다시 돌아와도 '통과한 것')
+        if (self._static_release_xy is not None and not self._static_left_spot
+                and self.static_same_spot_leave > 0.0
+                and math.hypot(me[0] - self._static_release_xy[0],
+                               me[1] - self._static_release_xy[1]) >= self.static_same_spot_leave):
+            self._static_left_spot = True
+            self.get_logger().info(
+                f"[check_collision_obstacle] 정적 해제 지점에서 {self.static_same_spot_leave:.1f} m 이상 벗어났다 "
+                f"— 다음 재차단은 새 상황으로 본다 (직전 replan 재시도 {self._static_replan_retry}회).")
         t = self.get_clock().now().nanoseconds * 1e-9
         if self._own_hist and math.hypot(me[0] - self._own_hist[-1][1], me[1] - self._own_hist[-1][2]) < 0.05:
             self._own_hist[-1] = (t, self._own_hist[-1][1], self._own_hist[-1][2])   # 제자리면 시각만 갱신 → 무진전 측정
@@ -3374,11 +3477,20 @@ class FleetDecisionNode(Node):
         if me is None or not self._own_hist:
             return 0.0
         t_now = now.nanoseconds * 1e-9
+        if self.operator_priority:
+            # [OP] 이번 관제 명령의 활성 시간만 센다: 종료 상태면 0, 활성이면 활성 시각 이후만
+            if self.current_robot_status not in self._OP_ACTIVE or self._active_since is None:
+                return 0.0
+            t_floor = self._active_since.nanoseconds * 1e-9
+        else:
+            t_floor = None
         t_leave = t_now
         for (t, x, y) in reversed(self._own_hist):
             if math.hypot(x - me[0], y - me[1]) > dist_m:
                 break
             t_leave = t
+        if t_floor is not None:
+            t_leave = max(t_leave, t_floor)
         return max(0.0, t_now - t_leave)
 
     def _retreat_target(self, dist: float) -> Optional[Tuple[float, float]]:
@@ -3431,6 +3543,8 @@ class FleetDecisionNode(Node):
         return {"steps": [("spin", rel), ("drive", d)], "target": tgt, "cand": name}
 
     def _retreat_along_history(self, now: Time, dist: float, away_from: Optional[Tuple[float, float]] = None) -> bool:
+        if not self._op_gate(sys._getframe(1).f_code.co_name):     # [OP]
+            return False
         if not self._retreat_gate_check(sys._getframe(1).f_code.co_name):
             return False                                  # [V2.34] 호출한 규칙이 '후퇴 못 걸었음' 경로로 정리한다
         if self._yield_bt_ready(now):
@@ -3470,6 +3584,8 @@ class FleetDecisionNode(Node):
             self._maneuver = None
             return
         if kind == "spin":
+            if not self._op_gate('_maneuver_next'):                 # [OP]
+                self._maneuver = None; self._backup_state = "failed"; return
             if not self._spin_client.wait_for_server(timeout_sec=0.5):
                 self.get_logger().error("[V2 retreat] spin 액션 없음"); self._maneuver = None; self._backup_state = "failed"; return
             g = Spin.Goal(); g.target_yaw = float(val)
@@ -3485,10 +3601,12 @@ class FleetDecisionNode(Node):
         gh = fut.result()
         if gh is None or not gh.accepted:
             self.get_logger().error("[V2 retreat] 단계 목표 거부됨"); self._maneuver = None; self._backup_state = "failed"; return
+        self._maneuver_goal_handle = gh               # [OP] 허가 상실 때 취소할 수 있게
         self._backup_state = "running"
         gh.get_result_async().add_done_callback(self._maneuver_result)
 
     def _maneuver_result(self, fut) -> None:
+        self._maneuver_goal_handle = None
         try:
             status = fut.result().status
         except Exception as exc:                                 # noqa: BLE001
@@ -3532,6 +3650,8 @@ class FleetDecisionNode(Node):
 
     def _v2_push_tick(self) -> None:
         """[V2.1] 밀어내기 양보: 우선 로봇이 나 때문에 막혔는데 나는 무진전 → 조정 대기 여부와 무관하게 이력 따라 물러난다."""
+        if self._op_frozen():
+            return                                    # [OP] 관제 pause 중 — 판단 정지
         if not (self.v2_enable and self.push_yield_enable):
             return
         now = self.get_clock().now()
@@ -3615,6 +3735,8 @@ class FleetDecisionNode(Node):
             if self._plan_retreat(self.push_retreat_m, (rp.x, rp.y)) is None:
                 self.get_logger().info(f"[V2 push] 로봇 {mid} 보고/대면이지만 그 로봇에서 멀어지는 후퇴 후보가 없다 → 보류", throttle_duration_sec=10.0)
                 continue
+            if not self._op_may('_v2_push_tick'):        # [OP] 불허면 pause·공지·쿨다운 없이 넘긴다
+                return
             self._push_done[mid] = now
             src = ("관제 cross_agent_id" if reported else
                    "기하(정지한 채 나를 마주봄)" if geo else
@@ -3851,6 +3973,8 @@ class FleetDecisionNode(Node):
         now = self.get_clock().now()
         kind = req.get("kind")
         dist = float(req.get("dist", 0.5))
+        if not self._op_gate('_on_test_retreat'):     # [OP] 규칙과 같게 양보 계열 새 기동으로 판정 (곡선 후진도 여기서 막는다)
+            return
         if kind == "backup":
             if "speed" in req:
                 self.yield_backoff_speed = float(req["speed"])
@@ -3915,11 +4039,164 @@ class FleetDecisionNode(Node):
             return 0.0
         return max(0.0, t_now - st[2])
 
+    # ================= [OP 09-28] 관제 명령 우선 · 자기 기동 허가 =================
+    # 상태별 허가표 (사용자 09-28 결정):
+    #   RECEIVED_GOAL / PLANNING / DRIVING / READY : 양보성·자기 구출성 기동 모두 허용
+    #   PAUSED (fleet 자체 조정, 관제 pause 아님)  : 양보성만 (자기 구출성 금지)
+    #   RECOVERY_RUNNING / SUCCESS / FAILURE        : 양보성만
+    #   IDLE / SUCCEEDED / CANCELED / FAILED       : 금지
+    #   관제 pause(/nav_pause_flag) · 도킹 중       : 상태와 무관하게 전부 금지
+    #   자기 구출성 = unwedge · 교차로 탈출. 그 밖(곡선·직선 후진 양보, 밀어내기, 순환·줄·정면 대치 해소)은 양보성.
+    _OP_ACTIVE = ('READY', 'RECEIVED_GOAL', 'PLANNING', 'DRIVING', 'PAUSED',
+                  'RECOVERY_RUNNING', 'RECOVERY_SUCCESS', 'RECOVERY_FAILURE')
+    _OP_SELF_CALLERS = ('_v2_unwedge_tick', '_junction_escape')
+    # [L3 준비] 시험 hook(_on_test_retreat)은 이어지는 단계가 아니라 새 양보 기동이다 — 직전 기동 종류를 물려받지 않게 뺐다
+    _OP_CONTINUATIONS = ('_maneuver_next', '_v2_maneuver_tick', '_retreat_along_history', '_backup_send')
+    # 관제 pause 해제 때 pause 길이만큼 뒤로 미는 대기 시계들 (얼린 것처럼 이어서 센다)
+    _OP_FREEZE_ATTRS = (
+        '_pause_start_time', '_agent_pause_start_time', '_agent_clear_start_time', 'delay_after_agent_start_time',
+        'delay_after_replan_start_time', 'delay_after_replan_start_time_goal_occupied',
+        '_goal_occupied_false_start_time', '_last_goal_occupied_false_start_time', '_replan_flag_false_start_time',
+        '_v2_pause_since', '_nav_stop_wait_start', '_np_anchor_t', '_active_since',
+        '_jx_since', '_junction_clear_since', '_line_since', '_cycle_since', '_standoff_since', '_standoff_last',
+        '_unwedge_last', '_unwedge_exhausted_at', '_goal_finish_last', '_recov_last', '_recov_cmd_until',
+        '_planner_override_until', '_yield_start_t', '_yield_bt_fail_t', '_backup_started_at', '_man_wd_since',
+        '_static_last_release_t', '_agent_last_release_t', '_jx_escape_last', '_retreat_clear_at')
+
+    def _op_frozen(self) -> bool:
+        """관제 pause 중 — fleet 판단 루프를 쉰다 (STOP·replan·goal 제거·기동을 내지 않는다)."""
+        return self.operator_priority and self._nav_paused
+
+    def _motion_allowed(self, kind: str) -> bool:
+        """fleet 이 스스로 로봇을 움직여도 되는가. kind: 'yield'(양보성) | 'self'(자기 구출성)."""
+        if not self.operator_priority:
+            return True
+        if self._nav_paused or self._docking:
+            return False
+        st = self.current_robot_status
+        if st in ('RECEIVED_GOAL', 'PLANNING', 'DRIVING', 'READY'):
+            return True
+        if st in ('PAUSED', 'RECOVERY_RUNNING', 'RECOVERY_SUCCESS', 'RECOVERY_FAILURE'):
+            return kind == 'yield'
+        return False                                  # IDLE / SUCCEEDED / CANCELED / FAILED / 그 밖
+
+    def _op_gate(self, caller: str, start: bool = True) -> bool:
+        """기동 입구 공통 관문. 새 기동이면 종류를 기록하고, 이어지는 단계면 기록된 종류로 판정한다."""
+        if not self.operator_priority:
+            return True
+        if caller in self._OP_CONTINUATIONS:
+            kind = self._man_kind
+        else:
+            kind = 'self' if caller in self._OP_SELF_CALLERS else 'yield'
+        if not self._motion_allowed(kind):
+            self.get_logger().warn(
+                f"[OP] fleet 기동 불허 — {caller} ({kind}) status {self.current_robot_status}, "
+                f"관제 pause {self._nav_paused}, 도킹 {self._docking}", throttle_duration_sec=10.0)
+            return False
+        if start and caller not in self._OP_CONTINUATIONS:
+            self._man_kind = kind
+        return True
+
+    def _op_may(self, rule: str) -> bool:
+        """[OP 공지 전 확인 · 09-28 L2] 기동 규칙이 공지(decision_state)·pause·시도 횟수 같은 부수 효과를 내기 **전에**
+        허가를 본다. 종류 판정은 전송 단계 관문(_op_gate)과 같다 (rule = 전송 함수를 부르는 규칙 이름).
+        불허면 아무것도 바꾸지 않는다 — 공지·pause·쿨다운·시도 횟수·1회성 표시를 쓰지 않는다.
+        전송 단계 관문은 그대로 둔다 (공지와 전송 사이에 상태가 바뀌는 경우의 마지막 방어선)."""
+        if not self.operator_priority:
+            return True
+        kind = 'self' if rule in self._OP_SELF_CALLERS else 'yield'
+        if self._motion_allowed(kind):
+            return True
+        self.get_logger().info(
+            f"[OP] 기동 조건은 됐지만 불허 — {rule} ({kind}) status {self.current_robot_status}, "
+            f"관제 pause {self._nav_paused}, 도킹 {self._docking} (공지·pause 생략)", throttle_duration_sec=10.0)
+        return False
+
+    def _op_revoke(self, why: str) -> None:
+        """허가가 사라졌다 — 진행 중인 fleet 기동을 즉시 거둔다. stop-and-go 재개 예약도 버린다."""
+        self._man_ctx = None                          # 먼저 지워야 결과 콜백이 stop-and-go 재개를 예약하지 않는다
+        self._maneuver = None
+        self._backup_cancel()
+        gh = self._maneuver_goal_handle
+        if gh is not None:
+            try:
+                gh.cancel_goal_async()
+            except Exception:                                    # noqa: BLE001
+                pass
+            self._maneuver_goal_handle = None
+        if self._yield_active:
+            self._yield_finish(False, f"허가 상실 — {why}")
+        if self._backup_state in ("sending", "running", "waiting"):
+            self._backup_state = "failed"             # 주인 규칙이 실패로 정리한다
+        self.get_logger().error(f"[OP] fleet 기동 회수 — {why}")
+        self._publish_state(f"[OP] maneuver revoked ({why})")
+
+    def _op_busy(self) -> bool:
+        """fleet 기동(BackUp·Drive·곡선 후진·stop-and-go 재개 예약)이 진행 중인가."""
+        return (self._backup_state in ("sending", "running", "waiting") or self._yield_active
+                or self._maneuver is not None or self._man_ctx is not None)
+
+    def _op_guard_tick(self) -> None:
+        if not self.operator_priority:
+            return
+        if not self._op_busy():
+            self._guard_revoked_logged = False
+            return
+        if self._motion_allowed(self._man_kind):
+            return
+        why = ("관제 pause" if self._nav_paused else "도킹 중" if self._docking
+               else f"상태 {self.current_robot_status}")
+        self._op_revoke(why)
+
+    def _on_dock_monitoring(self, msg: DockingMonitoring) -> None:
+        d = bool(msg.ros_dock_docking)
+        if d != self._docking:
+            self.get_logger().info(f"[OP] 도킹 {'시작' if d else '끝'} (ros_dock_docking={d})")
+        self._docking = d
+
+    def _op_unfreeze(self, now: Time) -> None:
+        """관제 pause 해제 — 대기 시계를 pause 길이만큼 밀어 '얼렸다 녹인 것' 처럼 이어서 센다."""
+        if self._nav_pause_since is None:
+            return
+        dt = now - self._nav_pause_since
+        # [09-29] 무진전 시계(_stuck_sec)는 내 위치 이력(_own_hist) 시각으로 잰다. 대기 시계와 같이 얼렸다 녹인다:
+        #   pause 전 기록은 pause 길이만큼 뒤로 밀고, pause 중 기록은 해제 시각으로 모은다 (pause 구간을 한 순간으로 접는다).
+        #   예전에는 _active_since 만 밀려서, pause 직전까지 달리던 로봇도 해제 직후 "활성 시각 이후 전부" 를 무진전으로 셌다
+        #   (sim op_bt_V1 04:31:43: 60 s 관제 pause 해제 1.5 s 뒤 junction-escape "32s 무진전" 후진).
+        _p0 = self._nav_pause_since.nanoseconds * 1e-9
+        _d = dt.nanoseconds * 1e-9
+        _tr = now.nanoseconds * 1e-9
+        if self._own_hist:
+            self._own_hist = deque([((t + _d) if t <= _p0 else _tr, x, y) for (t, x, y) in self._own_hist],
+                                   maxlen=self._own_hist.maxlen)
+        self._nav_pause_since = None
+        shifted = 0
+        for name in self._OP_FREEZE_ATTRS:
+            v = getattr(self, name, None)
+            if isinstance(v, Time):
+                setattr(self, name, v + dt)
+                shifted += 1
+        _sec = dt.nanoseconds * 1e-9
+        _line = f"[OP] 관제 pause 해제 — {_sec:.0f}s 동안 fleet 판단 정지, 대기 시계 {shifted}개를 이어서 센다"
+        if _sec >= 5.0:                               # [09-28 미결 4b 초안] 교차로 흐름제어의 짧은 pause 는 DEBUG
+            self.get_logger().warn(_line)
+        else:
+            self.get_logger().debug(_line)
+
     def _on_nav_pause(self, msg: Bool) -> None:
         """[V2.37b] navigation_manager 가 관제 pause/resume(또는 새 move) 때 1회 발행하는 controller 정지 플래그."""
         if bool(msg.data) != self._nav_paused:
             self.get_logger().info(f"[V2] 관제 정지 플래그 {'켜짐' if msg.data else '꺼짐'} (/nav_pause_flag)")
+        was = self._nav_paused
         self._nav_paused = bool(msg.data)
+        if self.operator_priority and self._nav_paused and not was:
+            self._nav_pause_since = self.get_clock().now()
+            # 관제 pause 는 절대 우선 — 진행 중인 fleet 기동을 즉시 거둔다.
+            # [L1 확인] 거둘 기동이 없으면 아무것도 하지 않는다 (교차로 흐름제어의 짧은 pause 마다 ERROR 로그가 쌓였다)
+            if self._op_busy():
+                self._op_revoke("관제 pause")
+        elif self.operator_priority and was and not self._nav_paused:
+            self._op_unfreeze(self.get_clock().now())
 
     def _retreat_gate_check(self, caller: str) -> bool:
         """[V2.34] 관문 판정 + 기록. 규칙 이름은 호출한 함수 이름에서 딴다.
@@ -4127,6 +4404,8 @@ class FleetDecisionNode(Node):
         self.pub_yield_flag.publish(Bool(data=True))
 
     def _v2_yield_tick(self) -> None:
+        if self._op_frozen():
+            return                                    # [OP] 관제 pause 중 — 판단 정지
         if not (self.v2_enable and self.yield_bt_enable and self._yield_active):
             return
         now = self.get_clock().now()
@@ -4181,6 +4460,8 @@ class FleetDecisionNode(Node):
     def _v2_bt_error_tick(self) -> None:
         """[V2.4] BT 오류 코드로 **노드가** 회복 조치를 고른다 (BT RECOVERY CASE 선택권 이관 1단계).
         같은 창 안에 오류가 몰리고 로봇이 제자리면 ① 코스트맵 클리어 ② 예비 플래너 A ③ 예비 플래너 B ④ 자기 구출."""
+        if self._op_frozen():
+            return                                    # [OP] 관제 pause 중 — 판단 정지
         if not (self.v2_enable and self.bt_error_react):
             return
         now = self.get_clock().now()
@@ -4230,6 +4511,8 @@ class FleetDecisionNode(Node):
 
     def _v2_unwedge_tick(self) -> None:
         """[V2.3] 이웃과 무관한 끼임(회복 루프) 을 스스로 푼다: 조금 물러나 플래너가 시작점을 다시 잡게 한다."""
+        if self._op_frozen():
+            return                                    # [OP] 관제 pause 중 — 판단 정지
         if not (self.v2_enable and self.unwedge_enable):
             return
         now = self.get_clock().now()
@@ -4308,6 +4591,8 @@ class FleetDecisionNode(Node):
             self.get_logger().error("[V2 unwedge] 앞뒤 모두 지도상 막혀 있다 — 구출 기동 없음", throttle_duration_sec=30.0)
             self._unwedge_last = now
             return
+        if not self._op_may('_v2_unwedge_tick'):       # [OP] 불허면 시도 횟수·pause·공지를 쓰지 않는다
+            return                                    # (예전: RECOVERY 중 pause 1 s 로 BT 복구를 붙잡고 시도 1/6 을 썼다)
         self._unwedge_tries += 1
         self._unwedge_last = now
         self._unwedge_active = True
@@ -4354,6 +4639,8 @@ class FleetDecisionNode(Node):
     def _v2_goal_finish_tick(self) -> None:
         """[V2.12] goal 코앞에서 오래 서 있으면 조정 pause 를 풀어 완주를 마치게 한다.
         그 자리를 비워야 뒤가 풀린다 (q10: r1 이 자기 goal 앞에서 107 s 서 있는 동안 r4 가 막혔다)."""
+        if self._op_frozen():
+            return                                    # [OP] 관제 pause 중 — 판단 정지
         if not self.v2_enable or self.goal_finish_sec <= 0.0:
             return
         if not self._near_own_goal(self.goal_finish_m):
@@ -4399,6 +4686,8 @@ class FleetDecisionNode(Node):
         **전부** 막힌다. behavior_server 응답이 한 번 유실되면 그 로봇은 남은 시간 내내 자기 구출을 잃는다.
         기존 감시(`_v2_phase1_tick`)는 조정 대기 중에만 돌고 "waiting" 은 제외한다 — 여기서 모든 상태를 본다.
         """
+        if self._op_frozen():
+            return                                    # [OP] 관제 pause 중 — 판단 정지
         if not self.v2_enable or self.maneuver_watchdog_sec <= 0.0:
             return
         now = self.get_clock().now()
@@ -4539,6 +4828,8 @@ class FleetDecisionNode(Node):
                 f"[V2 junction-escape] 구역 {area} 안에서 멈췄지만 후방 {self._rear_block_at} m 가 막혔다 — 못 뺀다",
                 throttle_duration_sec=20.0)
             return
+        if not self._op_may('_junction_escape'):       # [OP] 불허면 쿨다운·공지 없이 넘긴다
+            return
         self._jx_escape_last = now
         self.get_logger().warn(
             f"[V2 junction-escape] 구역 {area} 안에서 {self._stuck_sec(now):.0f}s 무진전 "
@@ -4551,6 +4842,8 @@ class FleetDecisionNode(Node):
 
     def _v2_junction_exit_tick(self) -> None:
         """[V2.26] 출구가 막혔으면 교차로에 들어가지 않는다 (교차로 안 정지 방지)."""
+        if self._op_frozen():
+            return                                    # [OP] 관제 pause 중 — 판단 정지
         # [V2.26c 09-25] 탈출(V2.26b)만 켠 설정(v229)에서도 이 틱이 돌아야 한다.
         # 전에는 junction_exit_enable 이 꺼져 있으면 여기서 바로 돌아가서 _junction_escape 가 한 번도 불리지 않았다
         # (X1~X3: 발화 0회).
@@ -4614,6 +4907,8 @@ class FleetDecisionNode(Node):
 
     def _v2_standoff_tick(self) -> None:
         """[V2.7] 2대 정면 대치: 둘 다 제자리 + 마주 봄 + 가까움 → 우선순위 낮은 쪽이 물러난다."""
+        if self._op_frozen():
+            return                                    # [OP] 관제 pause 중 — 판단 정지
         if not (self.v2_enable and self.standoff_enable):
             return
         now = self.get_clock().now()
@@ -4663,6 +4958,8 @@ class FleetDecisionNode(Node):
                 (now - self._standoff_last).nanoseconds * 1e-9 < self.standoff_cooldown_sec:
             return
         p = a.current_pose.pose.position
+        if not self._op_may('_v2_standoff_tick'):      # [OP] 불허면 pause·공지·쿨다운 없이 넘긴다
+            return
         self._standoff_last = now
         self.get_logger().warn(
             f"[V2 standoff] 상대 {mid} 와 {self.standoff_after_sec:.0f}s 넘게 맞섰다 → "
@@ -4683,6 +4980,8 @@ class FleetDecisionNode(Node):
     def _check_no_progress(self) -> None:
         """[V2] 위치 무진전 보고: DRIVING 계열인데 no_progress_dist_m 안에 no_progress_report_sec 동안
         머물면 관제에 알린다 (STOP → driving_abort). 관제 goal_timeout(600 s) 보다 먼저."""
+        if self._op_frozen():
+            return                                    # [OP] 관제 pause 중 — 판단 정지
         if not self.v2_enable or self.no_progress_report_sec <= 0.0:
             return
         now = self.get_clock().now()

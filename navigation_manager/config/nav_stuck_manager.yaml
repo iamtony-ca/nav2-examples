@@ -1,4 +1,4 @@
 nav_stuck_manager_node:
   ros__parameters:
-    timeout_sec: 300.0
+    timeout_sec: 480.0   # [09-28] 현장 사본(amhs_260923)과 맞춤 — fleet 대기 조건 450 s 보다 길게 (사용자)
     min_distance_m: 0.2

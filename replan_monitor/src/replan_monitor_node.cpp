@@ -1,15 +1,11 @@
 #include "replan_monitor/replan_monitor_node.hpp"
 #include "nav2_costmap_2d/cost_values.hpp"
 
+namespace replan_monitor
+{
 
 ReplanMonitorNode::ReplanMonitorNode() : Node("replan_monitor_node") 
 {
-    // ADDED: 파라미터 선언 및 초기화
-    this->declare_parameter<std::string>("source_frame", "base_link");
-    this->declare_parameter<std::string>("target_frame", "map");
-    this->get_parameter("source_frame", source_frame_);
-    this->get_parameter("target_frame", target_frame_);
-
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
@@ -20,19 +16,21 @@ ReplanMonitorNode::ReplanMonitorNode() : Node("replan_monitor_node")
     subs_options.callback_group = subs_callback_group_;
 
     path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
+        // "/plan_pruned", rclcpp::QoS(10), std::bind(&ReplanMonitorNode::pathCallback, this, std::placeholders::_1), subs_options);
         "/plan", rclcpp::QoS(10), std::bind(&ReplanMonitorNode::pathCallback, this, std::placeholders::_1), subs_options);
 
     costmap_sub_ = this->create_subscription<nav2_msgs::msg::Costmap>(
         "/global_costmap/costmap_raw", rclcpp::QoS(rclcpp::SystemDefaultsQoS()).transient_local().reliable(), 
         std::bind(&ReplanMonitorNode::costmapCallback, this, std::placeholders::_1), subs_options);
     
+    
     robot_status_sub_ = this->create_subscription<std_msgs::msg::String>(
         "/robot_status", rclcpp::SystemDefaultsQoS(),
         std::bind(&ReplanMonitorNode::robotStatusCallback, this, std::placeholders::_1), subs_options);
 
-
+   
     rclcpp::QoS qos(rclcpp::KeepLast(1));
-    qos.transient_local().reliable();
+    qos.transient_local().reliable();    // DDS latched QoS
     replan_pub_ = this->create_publisher<std_msgs::msg::Bool>("/replan_flag", qos);
 
     timer_ = this->create_wall_timer(
@@ -40,8 +38,7 @@ ReplanMonitorNode::ReplanMonitorNode() : Node("replan_monitor_node")
         std::bind(&ReplanMonitorNode::evaluateReplanCondition, this),
         timer_callback_group_);
 
-    last_replan_time_ = this->now();
-        
+    last_replan_time_ = this->now();    // added    
     RCLCPP_INFO(this->get_logger(), "ReplanMonitorNode initialized. Subscribing to /robot_status.");
 }
 
@@ -52,8 +49,8 @@ void ReplanMonitorNode::pathCallback(const nav_msgs::msg::Path::SharedPtr msg) {
     closest_index = 0;
     obstacle_seen_time_.clear();
     obstacle_distance_history_.clear();
+    // RCLCPP_INFO(this->get_logger(), "ReplanMonitorNode pathCallback");
 }
-
 void ReplanMonitorNode::costmapCallback(const nav2_msgs::msg::Costmap::SharedPtr msg) {
     std::lock_guard<std::mutex> lock(data_mutex_);
     costmap_ = std::make_shared<nav2_costmap_2d::Costmap2D>(
@@ -64,6 +61,7 @@ void ReplanMonitorNode::costmapCallback(const nav2_msgs::msg::Costmap::SharedPtr
     unsigned char* char_map = costmap_->getCharMap();
     memcpy(char_map, &msg->data[0], msg->data.size() * sizeof(unsigned char));
     costmap_frame_ = msg->header.frame_id;
+    // RCLCPP_INFO(this->get_logger(), "ReplanMonitorNode costmapCallback");
 }
 
 bool ReplanMonitorNode::getCurrentPoseFromTF(geometry_msgs::msg::Pose &pose_out) {
@@ -79,10 +77,12 @@ bool ReplanMonitorNode::getCurrentPoseFromTF(geometry_msgs::msg::Pose &pose_out)
         RCLCPP_WARN(this->get_logger(), "TF transform failed: %s", ex.what());
         return false;
     }
+    // RCLCPP_INFO(this->get_logger(), "ReplanMonitorNode getCurrentPoseFromTF");
 }
 
 
-// ADDED: robotStatusCallback 구현
+
+
 void ReplanMonitorNode::robotStatusCallback(const std_msgs::msg::String::SharedPtr msg)
 {
     const std::string& status = msg->data;
@@ -92,17 +92,18 @@ void ReplanMonitorNode::robotStatusCallback(const std_msgs::msg::String::SharedP
     } else {
         is_robot_in_driving_state_.store(false);
     }
+    // RCLCPP_INFO(this->get_logger(), "ReplanMonitorNode robotStatusCallback: %s ", msg->data.c_str());
 }
 
-// REMOVED: updateGoalStatus, navToPoseStatusCallback, navThroughPosesStatusCallback 함수 모두 제거
 
 void ReplanMonitorNode::evaluateReplanCondition() {
-    // CHANGED: 가드 조건을 단순화된 플래그로 확인
+    // RCLCPP_INFO(this->get_logger(), "ReplanMonitorNode evaluateReplanCondition");
+
     if (!is_robot_in_driving_state_) {
         return;
     }
     
-   
+    
     std::shared_ptr<nav2_costmap_2d::Costmap2D> costmap;
     nav_msgs::msg::Path path;
 
@@ -119,7 +120,7 @@ void ReplanMonitorNode::evaluateReplanCondition() {
     if (!getCurrentPoseFromTF(current_pose)) {
         return;
     }
-
+    
     immediate_replan = false;
     std_msgs::msg::Bool flag_msg;
     flag_msg.data = false;
@@ -141,7 +142,8 @@ void ReplanMonitorNode::evaluateReplanCondition() {
     if (!std::isfinite(goal_pose.position.x) || !std::isfinite(goal_pose.position.y)) return;
     size_t blocked = 0;
     for (size_t i = this->closest_index; i < path.poses.size(); ++i) {
-        const auto &pose = path.poses[i].pose;
+      // RCLCPP_INFO(this->get_logger(), "ReplanMonitorNode for_ evaluateReplanCondition");
+      const auto &pose = path.poses[i].pose;
         double dist = std::hypot(pose.position.x - current_pose.position.x, pose.position.y - current_pose.position.y);
         if (dist < passed_pose_ignore_dist_ || dist > lookahead_distance) continue;
         double goal_dist = std::hypot(pose.position.x - goal_pose.position.x, pose.position.y - goal_pose.position.y);
@@ -169,8 +171,10 @@ void ReplanMonitorNode::evaluateReplanCondition() {
                 if (prev_dist - dist > approach_threshold_dist_) is_approaching = true;
                 obstacle_distance_history_[index] = dist;
             }
-            if (duration.seconds() >= obstacle_duration_threshold_sec_ && is_approaching) {
-            // if (duration.seconds() >= obstacle_duration_threshold_sec_) {
+
+            // RCLCPP_INFO(this->get_logger(), "[DEBUG] duration.seconds()=%f ", duration.seconds());
+            // if (duration.seconds() >= obstacle_duration_threshold_sec_ && is_approaching) {
+            if (duration.seconds() >= obstacle_duration_threshold_sec_) { // tempp  
                 blocked++;
             }
         } else {
@@ -182,11 +186,18 @@ void ReplanMonitorNode::evaluateReplanCondition() {
             break;
         }
     }
+    // RCLCPP_INFO(this->get_logger(), "7");
+    // RCLCPP_INFO(this->get_logger(), "▶ flag_msg.data: %s", flag_msg.data ? "true" : "false");
+    // RCLCPP_INFO(this->get_logger(), "[DEBUG] blocked=%ld >= blocked_threshold_=%ld", blocked, blocked_threshold_);
+    // RCLCPP_INFO(this->get_logger(), "(now - last_replan_time_): %f > cooldown_sec_: %.4lf", (now - last_replan_time_).seconds(), cooldown_sec_);
+    // RCLCPP_INFO(this->get_logger(), "last_replan_time_ time source: %d", last_replan_time_);
+
     if (flag_msg.data || (blocked >= blocked_threshold_ && (now - last_replan_time_).seconds() > cooldown_sec_)) {
         std::lock_guard<std::mutex> lock(data_mutex_);
         flag_msg.data = true;
         last_replan_time_ = now;
         replan_pub_->publish(flag_msg);
+        // RCLCPP_INFO(this->get_logger(), "replan_pub_->publish(flag_msg): %s", flag_msg.data ? "true" : "false");
         if (immediate_replan) {
             RCLCPP_WARN(this->get_logger(), "Triggering replan: immediate block detected.");
         } else {
@@ -195,3 +206,5 @@ void ReplanMonitorNode::evaluateReplanCondition() {
     }
 }
 
+
+}  // namespace replan_monitor

@@ -1,0 +1,4 @@
+nav_stuck_manager_node:
+  ros__parameters:
+    timeout_sec: 300.0
+    min_distance_m: 0.2

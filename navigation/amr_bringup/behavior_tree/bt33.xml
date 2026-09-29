@@ -1,0 +1,1682 @@
+
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <!-- [moduler33 09-29 초안] = moduler32(_pause_hold) + 관제 pause gate 3곳. nav2_params 에 아직 연결하지 않았다.
+       설계·검증 계획: amr-gz-sim-example/.../scripts/verify/BT_OP_PAUSE_GATE_0929.md
+       바뀐 곳: ReplanOrReusePathSubtree2(주행 replan) · ReplanOrReusePathSubtree3(fleet pause 중 replan) · NavigateRecovery 의 회복 진입.
+       새 C++ 노드 없음(CheckFlagCondition·KeepRunningUntilFailure·ReactiveFallback·Inverter·LogTextAction 재사용) → amr_bt_nodes 재빌드 불필요. -->
+  <!--
+  ===================================================== -->
+  <!-- Optimized & Parameterized Nav2 BT (v4) –
+  2025-09-10
+       - Replaced hardcoded literals with blackboard_driven cfg_* keys
+       - Kept private temps (_*) and immediate Unset for memory hygiene
+       - Added descriptive names for introspection
+       - Behavior preserved
+  -->
+  <!-- ===================================================== -->
+
+  <!-- ========================== Config ========================== -->
+
+
+  <!-- Central place to define tunables /
+  topics / services / IDs -->
+
+
+  <!--
+  2) Controller / Planner selectors (parameterized defaults) -->
+  <BehaviorTree ID="SelectPluginsSubtree">
+    <Sequence name="SelectPlugins">
+      <PlannerSelector name="SelectPlanner" selected_planner="{selected_planner}"
+        default_planner="{cfg_def_planner}" topic_name="planner_selector" />
+      <ControllerSelector name="SelectController" selected_controller="{selected_controller}"
+        default_controller="{cfg_def_controller}" topic_name="controller_selector" />
+      <!-- <PlannerSelector name="SelectPlanner" selected_planner="{selected_planner}"
+        default_planner="{cfg_def_planner}" topic_name="planner_selector" /> -->
+      <LogTextAction name="LogSelectPluginsSubtree" message="############[Subtree] LogSelectPluginsSubtree..."
+          interval_s="1.0" />  
+    </Sequence>
+  </BehaviorTree>
+
+  <!--
+  3) Path truncate & publish (internal short_path is private and cleared) -->
+  <BehaviorTree ID="TruncateAndPublishSubtree">
+    <Sequence name="TruncateAndPublish">
+      <TruncatePathLocal name="TruncateLong"
+        input_path="{path}"
+        output_path="{pruned_path}"
+        distance_forward="{cfg_trunc_forward_long}"
+        distance_backward="0.0"
+        angular_distance_weight="{cfg_angular_weight}"
+        max_robot_pose_search_dist="{cfg_search_dist_long}"
+        robot_frame="{cfg_robot_frame}"
+        transform_tolerance="{cfg_tf_tolerance}" />
+      <TruncatePathLocal name="TruncateShort"
+        input_path="{pruned_path}"
+        output_path="{truncated_short_path}"
+        distance_forward="{cfg_trunc_forward_short}"
+        distance_backward="0.0"
+        angular_distance_weight="{cfg_angular_weight}"
+        max_robot_pose_search_dist="{cfg_search_dist_short}"
+        robot_frame="{cfg_robot_frame}"
+        transform_tolerance="{cfg_tf_tolerance}" />
+
+      <PathPublisherAction name="PubPrunedPlan" input_path="{pruned_path}"
+        topic_name="/plan_pruned"
+        publish_period="{cfg_publish_period_path_pruned}" node="{node}" />
+      <PathPublisherAction name="PubShortPlan" input_path="{truncated_short_path}"
+        topic_name="/plan_truncated_short"
+        publish_period="{cfg_publish_period}" node="{node}" />
+      <UnsetBlackboard name="Unset_priv_truncated_short_TP" key="truncated_short_path" />
+    </Sequence>
+
+  </BehaviorTree>
+
+  <!--
+  4) Clear local+global costmaps together -->
+  <BehaviorTree ID="ClearCostmapsPairSubtree">
+    <Sequence name="ClearCostmapsPair">
+      <ClearEntireCostmap name="ClearLocal_Pair" service_name="/local_costmap/clear_entirely_local_costmap" />
+      <ClearEntireCostmap name="ClearGlobal_Pair" service_name="/global_costmap/clear_entirely_global_costmap" />
+    </Sequence>
+  </BehaviorTree>
+
+  <!--
+  5) Gate: reuse valid path or replan (publishes error codes on failure) -->
+  <BehaviorTree ID="ReplanOrReusePathSubtree">
+    <Fallback name="PlannerLogic">
+      <Sequence name="CheckPathAndConditions">
+        <IsPathValidCustomCondition name="IsPathValid" path="{path}" />
+        <Inverter name="NotReplanFlag">
+          <!-- <CheckFlagCondition name="ReplanFlag" flag_topic="/request_replan" latch="false"
+            node="{node}" /> -->
+          <CheckFlagCondition name="ReplanFlag" flag_topic="/request_replan" latch="false"
+            node="{node}" />            
+        </Inverter>
+        <Inverter name="NotPlannerChanged">
+          <IsBlackboardChangedCondition name="PlannerChanged" blackboard_entry="{selected_planner}" />
+        </Inverter>
+      </Sequence>
+      <Sequence name="ReplanAndHandleError">
+        <!-- <UnsetBlackboard name="Unset_compute_err_replan" key="compute_path_error_code" /> -->
+        <!-- <SetBlackboard name="set_compute_path_error_code" output_key="compute_path_error_code" value="0" />  -->
+        <LogTextAction name="ReplanLog"
+          message="Path invalid or replan triggered. Re_computing path..." />
+        <Fallback name="PlannerTryOrEscalate">
+          <Sequence>
+            <StringPublisherAction topic_name="/current_planner" message="{selected_planner}" node="{node}"/>
+
+            <!-- <ComputePathThroughPoses name="ComputePathThroughPoses_Main" goals="{goals}" path="{path}"
+              planner_id="{selected_planner}" error_code_id="{compute_path_error_code}" /> -->
+
+            <GetCurrentPoseCustomAction current_pose="{current_pose}"/>
+            <ComputeValidatedPathSyncAction 
+                global_goals="{goals}" 
+                current_pose="{current_pose}"
+                static_planner_server="/static_nav/compute_path_through_poses"
+                dynamic_planner_server="compute_path_through_poses"
+                static_planner_id="StaticGridBased"
+                dynamic_planner_id="{selected_planner}"
+                horizon_distance="10.0"
+                max_deviation="1.6"
+                step_distance="0.2"
+                max_check_length="20.0"
+                
+                count_key="manual_403_count"
+                max_403_retries="2"
+                
+                validated_path="{path}"
+                static_path="{reference_path}"
+                static_error_code_id="{static_compute_error}"
+                dynamic_error_code_id="{compute_path_error_code}"
+                validation_error_code_id="{validation_error_code}" />
+
+
+
+            <SubTree name="Tp_Subtree" ID="TruncateAndPublishSubtree" _autoremap="true" />
+            <!-- <TruncatePathLocal name="TruncateLong"
+              input_path="{path}"
+              output_path="{pruned_path}"
+              distance_forward="{cfg_trunc_forward_long}"
+              distance_backward="0.0"
+              angular_distance_weight="{cfg_angular_weight}"
+              max_robot_pose_search_dist="{cfg_search_dist_long}"
+              robot_frame="{cfg_robot_frame}"
+              transform_tolerance="{cfg_tf_tolerance}" />
+
+            <PathPublisherAction name="PubPrunedPlan" input_path="{pruned_path}"
+              topic_name="/plan_pruned"
+              publish_period="{cfg_publish_period_path_pruned}" node="{node}" /> -->
+          </Sequence>
+            
+          <Sequence name="PlannerEscalate">
+            <LogTextAction name="PlannerCriticalLog"
+              message="[CRITICAL] Planner unrecoverable error: {compute_path_error_code}. Triggering recovery." />
+            <Precondition if="validation_error_code == 405" else="SUCCESS">
+              <Sequence>
+                <LogTextAction message="[ALERT!!!] 403 Detour Error occurred N times during replanning ping-pong! Still attempting recovery..." interval_s="0.0" />
+                <Uint8TopicPublisherAction
+                    topic_name="/stop_command"
+                    value="2"
+                    num_publishes="1"
+                    node="{node}" />
+              </Sequence>
+            </Precondition>
+
+            <ErrorCodePublisherAction name="PubPlannerError" topic_name="/bt_error_code"
+              error_code="{compute_path_error_code}" node="{node}" />
+            <ErrorCodePublisherAction name="PubFollowError" topic_name="/bt_error_code"
+              error_code="{follow_path_error_code}" node="{node}" />
+
+            <!-- 리커버리로 에러를 넘기기 전 쿨다운 시간 -->
+            <Wait name="CooldownBeforeRecovery" wait_duration="0.5" />              
+            <AlwaysFailure name="ForceFailure_Planner" />
+          </Sequence>
+        </Fallback>
+      </Sequence>
+    </Fallback>
+
+  </BehaviorTree>
+
+
+
+  <BehaviorTree ID="ReplanOrReusePathSubtree2">
+    <Fallback name="PlannerLogic">
+      <!-- [moduler33 관제 우선 09-29 · Main] 관제 pause(/nav_pause_flag) 동안에는 경로를 다시 계산하지 않는다.
+           사용자 원칙: 관제의 pause/resume/stop 은 하위 레이어(BT 포함)가 그대로 따른다.
+           실측(sim L5_dense r3 03:50:35~41): 교차로 flow control pause 중에도 replan 이 돌아 403 detour 가 반복됐고,
+           405 승격 → PlannerEscalate 가 /stop_command 2 로 goal 을 스스로 취소했다.
+           - pause 동안 RUNNING 을 돌려준다 (KeepRunningUntilFailure). resume 되면 FAILURE → Fallback 이 아래 원래 논리로 내려간다.
+           - 주행 중이면 PipelineSequence 가 이미 뒤쪽(FollowPath)까지 진행해 있으므로 FollowPath 는 그대로 tick 된다
+             (controller_server 가 /nav_pause_flag 로 제자리 유지). goal 이 pause 인 채 발송된 경우(B2 보류 pause)에는
+             경로 계산 전에서 파이프라인이 기다리므로 FollowPath 가 시작되지 않는다.
+           - CheckFlagCondition(latch=true, TRANSIENT_LOCAL): 래치된 현재 값을 받는다. tick 마다 로그를 찍지 않는다. -->
+      <KeepRunningUntilFailure name="HoldReplanWhileOperatorPaused_Main">
+        <Sequence name="OperatorPausedNoReplan_Main">
+          <CheckFlagCondition name="OperatorPauseFlag_Main" flag_topic="/nav_pause_flag"
+            latch="true" transient_local="true" node="{node}" />
+          <LogTextAction name="OperatorPausedNoReplanLog_Main"
+            message="[OP PAUSE] 관제 pause 중 — 경로 재계산·403 승격 보류" interval_s="5.0" />
+        </Sequence>
+      </KeepRunningUntilFailure>
+      <Sequence name="CheckPathAndConditions">
+        <IsPathValidCustomCondition name="IsPathValid" path="{path}" />
+        <Inverter name="NotReplanFlag">
+          <!-- <CheckFlagCondition name="ReplanFlag" flag_topic="/request_replan" latch="false"
+            node="{node}" /> -->
+          <CheckFlagCondition name="ReplanFlag" flag_topic="/request_replan" latch="false"
+            node="{node}" />            
+        </Inverter>
+        <Inverter name="NotPlannerChanged">
+          <IsBlackboardChangedCondition name="PlannerChanged" blackboard_entry="{selected_planner}" />
+        </Inverter>
+      </Sequence>
+      <Sequence name="ReplanAndHandleError">
+        <!-- <UnsetBlackboard name="Unset_compute_err_replan" key="compute_path_error_code" /> -->
+        <!-- <SetBlackboard name="set_compute_path_error_code" output_key="compute_path_error_code" value="0" />  -->
+        <LogTextAction name="ReplanLog"
+          message="Replan explicitly triggered.. Re_computing path..." />
+        <Fallback name="PlannerTryOrEscalate">
+          <Sequence>
+            <StringPublisherAction topic_name="/current_planner" message="{selected_planner}" node="{node}"/>
+
+            <!-- <ComputePathThroughPoses name="ComputePathThroughPoses_Main" goals="{goals}" path="{path}"
+              planner_id="{selected_planner}" error_code_id="{compute_path_error_code}" /> -->
+
+            <GetCurrentPoseCustomAction current_pose="{current_pose}"/>
+            <ComputeValidatedPathSyncAction 
+                global_goals="{goals}" 
+                current_pose="{current_pose}"
+                static_planner_server="/static_nav/compute_path_through_poses"
+                dynamic_planner_server="compute_path_through_poses"
+                static_planner_id="StaticGridBased"
+                dynamic_planner_id="{selected_planner}"
+                horizon_distance="10.0"
+                max_deviation="1.6"
+                step_distance="0.2"
+                max_check_length="20.0"
+                
+                count_key="manual_403_count"
+                max_403_retries="2"
+                
+                validated_path="{path}"
+                static_path="{reference_path}"
+                static_error_code_id="{static_compute_error}"
+                dynamic_error_code_id="{compute_path_error_code}"
+                validation_error_code_id="{validation_error_code}" />
+
+
+
+            <SubTree name="Tp_Subtree" ID="TruncateAndPublishSubtree" _autoremap="true" />
+
+          </Sequence>
+            
+          <Sequence name="PlannerEscalate">
+            <LogTextAction name="PlannerCriticalLog"
+              message="[CRITICAL] Planner unrecoverable error: {compute_path_error_code}. Triggering recovery." />
+
+            <Precondition if="validation_error_code == 405" else="SUCCESS">
+              <Sequence>
+                <LogTextAction message="[ALERT!!!] 403 Detour Error occurred N times during replanning ping-pong! Still attempting recovery..." interval_s="0.0" />
+                <Uint8TopicPublisherAction
+                    topic_name="/stop_command"
+                    value="2"
+                    num_publishes="1"
+                    node="{node}" />
+              </Sequence>
+            </Precondition>
+
+            <ErrorCodePublisherAction name="PubPlannerError" topic_name="/bt_error_code"
+              error_code="{compute_path_error_code}" node="{node}" />
+            <ErrorCodePublisherAction name="PubFollowError" topic_name="/bt_error_code"
+              error_code="{follow_path_error_code}" node="{node}" />
+
+            <!-- 리커버리로 에러를 넘기기 전 쿨다운 시간 -->
+            <Wait name="CooldownBeforeRecovery" wait_duration="0.5" />              
+            <AlwaysFailure name="ForceFailure_Planner" />
+          </Sequence>
+        </Fallback>
+      </Sequence>
+    </Fallback>
+
+  </BehaviorTree>
+
+
+
+  <BehaviorTree ID="ReplanOrReusePathSubtree3">
+    <Fallback name="PlannerLogic">
+      <!-- [moduler33 관제 우선 09-29 · FleetPause] 관제 pause(/nav_pause_flag) 동안에는 경로를 다시 계산하지 않는다.
+           사용자 원칙: 관제의 pause/resume/stop 은 하위 레이어(BT 포함)가 그대로 따른다.
+           실측(sim L5_dense r3 03:50:35~41): 교차로 flow control pause 중에도 replan 이 돌아 403 detour 가 반복됐고,
+           405 승격 → PlannerEscalate 가 /stop_command 2 로 goal 을 스스로 취소했다.
+           - pause 동안 RUNNING 을 돌려준다 (KeepRunningUntilFailure). resume 되면 FAILURE → Fallback 이 아래 원래 논리로 내려간다.
+           - 주행 중이면 PipelineSequence 가 이미 뒤쪽(FollowPath)까지 진행해 있으므로 FollowPath 는 그대로 tick 된다
+             (controller_server 가 /nav_pause_flag 로 제자리 유지). goal 이 pause 인 채 발송된 경우(B2 보류 pause)에는
+             경로 계산 전에서 파이프라인이 기다리므로 FollowPath 가 시작되지 않는다.
+           - CheckFlagCondition(latch=true, TRANSIENT_LOCAL): 래치된 현재 값을 받는다. tick 마다 로그를 찍지 않는다. -->
+      <KeepRunningUntilFailure name="HoldReplanWhileOperatorPaused_FleetPause">
+        <Sequence name="OperatorPausedNoReplan_FleetPause">
+          <CheckFlagCondition name="OperatorPauseFlag_FleetPause" flag_topic="/nav_pause_flag"
+            latch="true" transient_local="true" node="{node}" />
+          <LogTextAction name="OperatorPausedNoReplanLog_FleetPause"
+            message="[OP PAUSE] 관제 pause 중 — 경로 재계산·403 승격 보류" interval_s="5.0" />
+        </Sequence>
+      </KeepRunningUntilFailure>
+      <Sequence name="CheckPathAndConditions">
+        <Inverter name="NotReplanFlag">
+          <!-- <CheckFlagCondition name="ReplanFlag" flag_topic="/request_replan" latch="false"
+            node="{node}" /> -->
+          <CheckFlagCondition name="ReplanFlag" flag_topic="/request_replan" latch="false"
+            node="{node}" />            
+        </Inverter>
+        <Inverter name="NotPlannerChanged">
+          <IsBlackboardChangedCondition name="PlannerChanged" blackboard_entry="{selected_planner}" />
+        </Inverter>
+      </Sequence>
+      <Sequence name="ReplanAndHandleError">
+        <!-- <UnsetBlackboard name="Unset_compute_err_replan" key="compute_path_error_code" /> -->
+        <!-- <SetBlackboard name="set_compute_path_error_code" output_key="compute_path_error_code" value="0" />  -->
+        <LogTextAction name="ReplanLog"
+          message="Replan explicitly triggered.. Re_computing path..." />
+        <Fallback name="PlannerTryOrEscalate">
+          <Sequence>
+            <StringPublisherAction topic_name="/current_planner" message="{selected_planner}" node="{node}"/>
+
+            <!-- <ComputePathThroughPoses name="ComputePathThroughPoses_Main" goals="{goals}" path="{path}"
+              planner_id="{selected_planner}" error_code_id="{compute_path_error_code}" /> -->
+
+            <GetCurrentPoseCustomAction current_pose="{current_pose}"/>
+            <ComputeValidatedPathSyncAction 
+                global_goals="{goals}" 
+                current_pose="{current_pose}"
+                static_planner_server="/static_nav/compute_path_through_poses"
+                dynamic_planner_server="compute_path_through_poses"
+                static_planner_id="StaticGridBased"
+                dynamic_planner_id="{selected_planner}"
+                horizon_distance="10.0"
+                max_deviation="1.6"
+                step_distance="0.2"
+                max_check_length="20.0"
+                
+                count_key="drive_403_count"
+                max_403_retries="2"
+                
+                validated_path="{path}"
+                static_path="{reference_path}"
+                static_error_code_id="{static_compute_error}"
+                dynamic_error_code_id="{compute_path_error_code}"
+                validation_error_code_id="{validation_error_code}" />
+
+
+
+            <SubTree name="Tp_Subtree" ID="TruncateAndPublishSubtree" _autoremap="true" />
+
+          </Sequence>
+            
+          <Sequence name="PlannerEscalate">
+            <LogTextAction name="PlannerCriticalLog"
+              message="[CRITICAL] Planner unrecoverable error: {compute_path_error_code}. Triggering recovery." />
+
+            <Precondition if="validation_error_code == 405" else="SUCCESS">
+              <Sequence>
+                <LogTextAction message="[ALERT!!!] 403 Detour Error occurred N times during replanning ping-pong! Still attempting recovery..." interval_s="0.0" />
+                <Uint8TopicPublisherAction
+                    topic_name="/stop_command"
+                    value="2"
+                    num_publishes="1"
+                    node="{node}" />
+              </Sequence>
+            </Precondition>
+
+            <ErrorCodePublisherAction name="PubPlannerError" topic_name="/bt_error_code"
+              error_code="{compute_path_error_code}" node="{node}" />
+            <ErrorCodePublisherAction name="PubFollowError" topic_name="/bt_error_code"
+              error_code="{follow_path_error_code}" node="{node}" />
+
+            <!-- 리커버리로 에러를 넘기기 전 쿨다운 시간 -->
+            <Wait name="CooldownBeforeRecovery" wait_duration="0.5" />              
+            <AlwaysFailure name="ForceFailure_Planner" />
+          </Sequence>
+        </Fallback>
+      </Sequence>
+    </Fallback>
+
+  </BehaviorTree>
+
+
+  <!--
+  6) Pause/Resume + FollowPath (with recovery) -->
+  <BehaviorTree ID="FollowWithPauseAndRecoverySubtree">
+    <ReactiveFallback name="PauseAndResume">
+      <Sequence name="PauseBranch">
+        <!-- [09-23] **후퇴 요청이 오면 정지 분기가 tick 을 삼키지 않게 한다.**
+             실측: 정책이 후퇴를 147회 지시했는데 BT 의 GetYieldGoal 은 5회만 돌았다(97 % 유실).
+             원인은 위치다 — 양보 분기는 이 ReactiveFallback 의 **두 번째 자식 안쪽 깊숙이** 있는데,
+             후퇴가 필요한 순간은 대부분 로봇이 막혀 이 PauseBranch 가 성공하는 때다. 그러면 tick 이
+             여기서 멈춰 양보 분기까지 내려가지 않는다. 그래서 컨트롤러에 속도 명령이 한 번도 안 나갔다
+             (후퇴 지시 152건 중 명령 없음 138건, 그중 115건은 pause 도 안 걸린 상태였다).
+             고침: 후퇴 요청 중에는 이 분기를 **즉시 FAILURE** 로 만들어 ReactiveFallback 이 다음 자식
+             (FollowPathRecovery → YieldPathBranch) 으로 넘어가게 한다. Inverter 로 한 줄이면 된다. -->
+        <Inverter name="NotYieldRequested">
+          <YieldFlagFresh name="YieldRequestedTop" flag_topic="/request_yield" node="{node}" max_age_sec="1.5" />  <!-- [V2.36d] 하트비트 → VOLATILE 구독 -->
+        </Inverter>
+        <Fallback name="ExecuteMyDecoratorRegardless">
+          
+          <Sequence name="SuccessPausePath">
+            <Fallback>
+              <CheckPauseResetCondition name="PauseFlag"
+                    flag_topic="/controller_pause_flag"
+                    node="{node}"
+                    latch="1"
+                    transient_local="true"
+                    reset="{controller_pause_reset_seq}" />
+
+              <CheckSafetyPlcCondition name="SafetyPlcFlag"
+                  flag_topic="/ros2_safety_plc_status_data"
+                  node="{node}"
+                  latch="true"
+                  transient_local="0"
+                  reset="false" />
+            </Fallback>
+          </Sequence>
+          
+          <Sequence name="FailurePausePath">
+
+            <RunNTimesDecorator num_ticks="1" name="PauseInit">
+              <SetBlackboardBoolAction name="set_controller_pause_reset_seq" output_key="controller_pause_reset_seq" value="false" /> 
+            </RunNTimesDecorator>
+
+            <AlwaysFailure name="PropagatePauseFailure" />
+          </Sequence>
+        </Fallback>
+        <!-- <SetBlackboardBoolAction name="set_controller_pause_reset_seq" output_key="controller_pause_reset_seq" value="false" /> -->
+
+        <LogTextAction message="[PAUSED] Controller is paused. Halting motion." interval_s="1.0"/>
+
+        <SequenceWithMemory>
+          <CancelControl/>
+
+          <Fallback name="WaitUntilUnpausedAndClear">
+            <Timeout msec="720000" name="PauseTimeout">            
+              <Repeat num_cycles="-1">
+                <Sequence>
+                  <Fallback>
+                    <CheckPauseResetCondition
+                        flag_topic="/controller_pause_flag"
+                        node="{node}"
+                        latch="true"
+                        transient_local="true"
+                        reset="{controller_pause_reset_seq}" />
+
+                    <CheckSafetyPlcCondition name="SafetyPlcFlag"
+                        flag_topic="/ros2_safety_plc_status_data"
+                        node="{node}"
+                        latch="true"
+                        transient_local="0"
+                        reset="false" />
+                  </Fallback>
+                  <Wait wait_duration="0.1" />
+
+
+                  <!-- ★ 추가: 특정 토픽 수신 시 1회 실행하는 액션 트리거 ★ -->
+                  <Fallback name="CheckSpecialActionTrigger_Normal">
+                    <!-- [moduler33 G-Trigger, 09-29 사용자 결정] 관제 pause 중에는 fleet 특수 트리거(goal 제거)를 처리하지 않는다.
+                         관제 pause 면 이 Sequence 가 SUCCESS → Fallback 이 곧바로 끝나 아래 트리거 조건을 tick 하지 않는다.
+                         트리거 조건(latch="false")은 tick 될 때만 값을 소비하므로, pause 직전에 래치된 트리거는 버려지지 않고
+                         resume 뒤 다음 루프에서 처리된다 (하위 레이어는 관제 pause 를 그대로 따른다). -->
+                    <Sequence name="SkipSpecialTriggersWhileOperatorPaused">
+                      <CheckFlagCondition name="OperatorPauseFlag_Trigger" flag_topic="/nav_pause_flag"
+                        latch="true" transient_local="true" node="{node}" />
+                      <LogTextAction message="[OP PAUSE] 관제 pause 중 — fleet 특수 트리거(goal 제거) 보류" interval_s="5.0" />
+                    </Sequence>
+                    <Sequence name="ExecuteRemovePassedGoalsTrigger">
+                      <!-- latch="false"로 설정하여 토픽을 한 번 읽으면 즉시 false로 초기화(1회 실행 보장) -->
+                      <CheckFlagCondition flag_topic="/remove_passed_goals" latch="false" node="{node}" />
+                      <BoolPublisherAction topic_name="/remove_passed_goals" message="false" num_publishes="1" node="{node}"/>
+                      <LogTextAction message="[PAUSED] Special trigger received. Executing action once." interval_s="0.0" />
+                      <ForceSuccess>
+                        <SubTree name="ClearPairInit" ID="ClearCostmapsPairSubtree" _autoremap="true" />
+                      </ForceSuccess>  
+                      <RemovePassedGoalsCustomAction name="RemovePassedGoals_CheckFlagCondition" 
+                       input_goals="{goals}" 
+                       output_goals="{goals}"
+                       radius="1.5" />  
+                      <PublishRemainingGoalsAction 
+                        input_goals="{goals}" 
+                        topic_name="/remaining_goals" 
+                        publish_interval="0.5" /> 
+
+                      <Fallback>
+                        <Sequence>
+                          <StringPublisherAction topic_name="/current_planner" message="{selected_planner}" node="{node}"/>
+
+                          <!-- <ComputePathThroughPoses name="ComputePathThroughPoses_Pause" goals="{goals}" path="{path}"
+                            planner_id="{selected_planner}" error_code_id="{compute_path_error_code}" /> -->
+
+                          <GetCurrentPoseCustomAction current_pose="{current_pose}"/>
+                          <ComputeValidatedPathSyncAction 
+                              global_goals="{goals}" 
+                              current_pose="{current_pose}"
+                              static_planner_server="/static_nav/compute_path_through_poses"
+                              dynamic_planner_server="compute_path_through_poses"
+                              static_planner_id="StaticGridBased"
+                              dynamic_planner_id="{selected_planner}"
+                              horizon_distance="10.0"
+                              max_deviation="1.6"
+                              step_distance="0.2"
+                              max_check_length="20.0"
+                              
+                              count_key="drive_403_count"
+                              max_403_retries="2"
+                              
+                              validated_path="{path}"
+                              static_path="{reference_path}"
+                              static_error_code_id="{static_compute_error}"
+                              dynamic_error_code_id="{compute_path_error_code}"
+                              validation_error_code_id="{validation_error_code}" />
+
+
+                          <SubTree name="Tp_Subtree" ID="TruncateAndPublishSubtree" _autoremap="true" />
+
+                        </Sequence>
+                          
+                        <Sequence name="PlannerEscalate_pause">
+                          <LogTextAction name="PlannerCriticalLog"
+                            message="[CRITICAL] Planner unrecoverable error: {compute_path_error_code}. Triggering recovery." />
+                          <!-- <ErrorCodePublisherAction name="PubPlannerError" topic_name="/bt_error_code"
+                            error_code="{compute_path_error_code}" node="{node}" />
+                          <ErrorCodePublisherAction name="PubFollowError" topic_name="/bt_error_code"
+                            error_code="{follow_path_error_code}" node="{node}" /> -->
+                          <!-- 리커버리로 에러를 넘기기 전 쿨다운 시간 -->
+
+                          <Precondition if="validation_error_code == 405" else="SUCCESS">
+                            <Sequence>
+                              <LogTextAction message="[ALERT!!!] 403 Detour Error occurred N times during replanning ping-pong! Still attempting recovery..." interval_s="0.0" />
+                              <Uint8TopicPublisherAction
+                                  topic_name="/stop_command"
+                                  value="2"
+                                  num_publishes="1"
+                                  node="{node}" />
+                            </Sequence>
+                          </Precondition>
+
+                          <Wait name="CooldownBeforeRecovery" wait_duration="0.2" />              
+                        </Sequence>
+                      </Fallback>
+
+                    </Sequence>
+                    <Sequence name="ExecuteRemoveFirstGoalsTrigger">
+                      <!-- latch="false"로 설정하여 토픽을 한 번 읽으면 즉시 false로 초기화(1회 실행 보장) -->
+                      <CheckFlagCondition flag_topic="/remove_first_goals" latch="false" node="{node}" />
+                      <!-- [moduler32] 여기서 /remove_passed_goals 를 내리고 있었다(복붙 오류).
+                           그 결과 /remove_first_goals 의 TRANSIENT_LOCAL 래치를 아무도
+                           내리지 않아, 코드베이스 전체에 이 토픽의 false 발행이 없었다. -->
+                      <BoolPublisherAction topic_name="/remove_first_goals" message="false" num_publishes="1" node="{node}"/>
+                      <ForceSuccess>
+                        <SubTree name="ClearPairInit_2" ID="ClearCostmapsPairSubtree" _autoremap="true" />
+                      </ForceSuccess>  
+                      <LogTextAction message="[PAUSED] Special trigger received. Executing action once." interval_s="0.0" />
+                      <RemoveFirstGoalsAction name="RemoveFirstGoal" input_goals="{goals}" remaining_goals="{goals}" />
+                      <PublishRemainingGoalsAction 
+                        input_goals="{goals}" 
+                        topic_name="/remaining_goals" 
+                        publish_interval="0.5" /> 
+
+                      <Fallback>
+                        <Sequence>
+                          <StringPublisherAction topic_name="/current_planner" message="{selected_planner}" node="{node}"/>
+
+                          <!-- <ComputePathThroughPoses name="ComputePathThroughPoses_Pause" goals="{goals}" path="{path}"
+                            planner_id="{selected_planner}" error_code_id="{compute_path_error_code}" /> -->
+
+                          <GetCurrentPoseCustomAction current_pose="{current_pose}"/>
+                          <ComputeValidatedPathSyncAction 
+                              global_goals="{goals}" 
+                              current_pose="{current_pose}"
+                              static_planner_server="/static_nav/compute_path_through_poses"
+                              dynamic_planner_server="compute_path_through_poses"
+                              static_planner_id="StaticGridBased"
+                              dynamic_planner_id="{selected_planner}"
+                              horizon_distance="10.0"
+                              max_deviation="1.6"
+                              step_distance="0.2"
+                              max_check_length="20.0"
+                              
+                              count_key="drive_403_count"
+                              max_403_retries="2"
+                              
+                              validated_path="{path}"
+                              static_path="{reference_path}"
+                              static_error_code_id="{static_compute_error}"
+                              dynamic_error_code_id="{compute_path_error_code}"
+                              validation_error_code_id="{validation_error_code}" />
+
+
+                          <SubTree name="Tp_Subtree_2" ID="TruncateAndPublishSubtree" _autoremap="true" />
+
+                        </Sequence>
+                          
+                        <Sequence name="PlannerEscalate_pause">
+                          <LogTextAction name="PlannerCriticalLog"
+                            message="[CRITICAL] Planner unrecoverable error: {compute_path_error_code}. Triggering recovery." />
+                          <!-- <ErrorCodePublisherAction name="PubPlannerError" topic_name="/bt_error_code"
+                            error_code="{compute_path_error_code}" node="{node}" />
+                          <ErrorCodePublisherAction name="PubFollowError" topic_name="/bt_error_code"
+                            error_code="{follow_path_error_code}" node="{node}" /> -->
+                          <!-- 리커버리로 에러를 넘기기 전 쿨다운 시간 -->
+
+                          <Precondition if="validation_error_code == 405" else="SUCCESS">
+                            <Sequence>
+                              <LogTextAction message="[ALERT!!!] 403 Detour Error occurred N times during replanning ping-pong! Still attempting recovery..." interval_s="0.0" />
+                              <Uint8TopicPublisherAction
+                                  topic_name="/stop_command"
+                                  value="2"
+                                  num_publishes="1"
+                                  node="{node}" />
+                            </Sequence>
+                          </Precondition>
+
+
+                          <Wait name="CooldownBeforeRecovery" wait_duration="0.2" />              
+                        </Sequence>
+                      </Fallback>
+
+                    </Sequence>
+
+                    <!-- 토픽이 안 들어왔거나, 액션이 끝난 경우 루프가 멈추지 않도록 무조건 성공 반환 -->
+                    <AlwaysSuccess />
+                  </Fallback>
+                  <!--  추가 끝  -->
+
+
+
+                  <!-- [moduler32] pause 중 경로 계산 실패가 pause 를 무너뜨리지 않게 한다.
+                       [무엇이 문제였나 - sim 실측으로 재현]
+                       ReplanOrReusePathSubtree3 은 경로 계산이 실패하면 PlannerEscalate 의
+                       <AlwaysFailure name="ForceFailure_Planner"/> 로 **반드시 FAILURE** 를 낸다.
+                       그 FAILURE 가 이 Sequence -> 위의 Sequence -> Repeat -> Timeout 을 타고
+                       올라가 Fallback(WaitUntilUnpausedAndClear) 의 다음 자식인
+                       UnpauseCleanupSequence 를 실행시킨다. 거기서
+                         <BoolPublisherAction topic_name="/controller_pause_flag" message="false"/>
+                       를 쏘고 AlwaysFailure 로 PauseBranch 를 빠져나간다.
+                       즉 **BT 가 fleet_decision 의 pause 를 몰래 풀어버린다.**
+
+                       [왜 이게 치명적인가]
+                       goal 이 막혀 있으면 경로 계산은 당연히 실패한다. 그런데 그게 곧
+                       "pause 해제" 로 이어지므로, fleet_decision 이 goal 점유를 보고 건 pause 가
+                       3초 만에 깨진다. 그 뒤 fleet_decision 은 자기 pause 가 풀린 줄 모른 채
+                       25초를 계속 세고, 10/15/20초에 /remove_passed_goals, /remove_first_goals 를
+                       쏘지만 BT 는 이미 회복(IntelligentRecovery)으로 넘어가 PauseBranch 가
+                       tick 되지 않으므로 **아무도 받지 않는다.**
+
+                       sim 실측(2026-09-16, 중간 goal 을 정적 상자로 막고 2-goal 주행):
+                         Goal is occupied. Forcing Pause      5회
+                         Goal Occupied detected timeout 25.0s 4회
+                         [UNPAUSED] Pause released            5회   <- 매번 BT 가 풀었다
+                         IntelligentRecovery 진입             24회
+                         Special trigger received             0회   <- goal 제거가 한 번도 실행 안 됨
+                       로그 순서(324ms 안에 연쇄):
+                         planner_server: GridBased plugin failed to plan ... exceeded maximum iterations
+                         ComputeValidatedPathSyncAction: Dynamic Planner Failure. code 402
+                         BT Log: [CRITICAL] Planner unrecoverable error ... Triggering recovery
+                         BT Log: [UNPAUSED] Pause released
+                         BT Log: [!!! RECOVERY !!!] Main navigation failed
+
+                       [고치는 방법]
+                       pause 루프 안의 경로 재계산은 "풀렸을 때 쓸 경로를 미리 준비" 하는 것이
+                       목적이지, 실패가 pause 종료 사유는 아니다. ForceSuccess 로 감싸
+                       실패를 삼킨다. pause 해제는 원래 의도대로 CheckPauseResetCondition 이
+                       FAILURE 를 낼 때(= 누군가 resume 을 발행했을 때)만 일어난다.
+
+                       [영향 범위]
+                       - 정상 해제 경로는 그대로다. resume 이 오면 Fallback(393) 이 FAILURE 를
+                         내고 같은 UnpauseCleanupSequence 를 타고 나간다.
+                       - 상한은 PauseTimeout 720000ms 가 계속 지킨다.
+                       - MainTree 의 SetReplanOrReuse(주행 중)는 건드리지 않는다. 거기서는
+                         경로 계산 실패가 회복으로 가는 것이 맞다.
+                       - 402(플래너 실패)는 403 카운터를 올리지 않으므로 405 승격과 무관하다
+                         (실측에서 403/405 모두 0건). -->
+                  <ForceSuccess name="KeepPauseDespitePlannerFailure">
+                    <Sequence name="SetReplanOrReuse">
+                      <!-- <UnsetBlackboard name="Unset_compute_path_error_code" key="compute_path_error_code" /> -->
+                      <SetBlackboardUShortAction name="set_compute_path_error_code" output_key="compute_path_error_code" value="0" /> 
+                      <SubTree name="ReplanOrReuse2" ID="ReplanOrReusePathSubtree3" _autoremap="true" />
+                    </Sequence>
+                  </ForceSuccess>
+                </Sequence>
+              </Repeat>
+            </Timeout>
+
+            <Sequence name="UnpauseCleanupSequence">
+              <BoolPublisherAction topic_name="/controller_pause_flag" message="false" num_publishes="1" node="{node}"/>
+
+              <LogTextAction message="[UNPAUSED] Pause released. Clearing costmaps before resuming FollowPath..." interval_s="1.0"/>
+              <SubTree name="ClearPair_Unpause" ID="ClearCostmapsPairSubtree" _autoremap="true" />
+              <AlwaysFailure name="ForceFailureToExitPauseBranch" />
+            </Sequence>
+            
+          </Fallback>
+        </SequenceWithMemory>
+      </Sequence>
+      <RecoveryNode number_of_retries="1" name="FollowPathRecovery">
+        <PipelineSequence name="FollowAndMonitorPipe">
+          <LogTextAction name="FollowLog"
+            message="Path valid. Truncating, publishing, then following." interval_s="1.0" />
+          <SubTree name="Tp_Subtree_3" ID="TruncateAndPublishSubtree" _autoremap="true" />
+
+          <!-- ==================== [sim 실험군 v2.1 yield, 2026-09-20] ====================
+               조정 계층(fleet_decision v2) 이 /request_yield 를 올리면, 따라갈 경로를 **후퇴 경로**로 바꾼다.
+               사용자 지적(09-20): 직선 BackUp 은 곡선 후진을 못 한다. recovery maneuver 와 같은 재료
+               (ReverseReedsShepp 플래너 + ReverseRPP 컨트롤러) 를 쓰면 costmap 을 보고 곡선 후진 경로가 나온다.
+               후퇴 목표는 조정 계층이 고른다 — 기본은 **이미 지나온 goal**(점유돼 있으면 더 앞의 goal),
+               없으면 자기 주행 이력 위의 점. 컨트롤러는 fleet_decision 이 controller_selector 토픽으로 바꾼다.
+               경로만 바꾸므로 이 ReactiveFallback 의 비동기 자식은 여전히 FollowPath 하나다. -->
+          <Fallback name="YieldOrNormalPath">
+            <Sequence name="YieldPathBranch">
+              <!-- [09-20 16:20 수정] latch/transient_local 이면 **옛 true 가 새 BT 에 다시 전달**돼 노드가 요청하지도 않은
+                   후퇴를 계속 돌았다(실측: 노드 요청 4회 vs BT 후퇴 28회, 완주 0·abort 100). 노드가 2 Hz 하트비트로
+                   true 를 계속 보내는 동안만 참이 되도록 비래치로 바꾼다. -->
+              <YieldFlagFresh name="YieldRequested" flag_topic="/request_yield" node="{node}" max_age_sec="1.5" />  <!-- [V2.36d] 하트비트 → VOLATILE 구독 -->
+              <GetYieldGoalAction name="GetYieldGoal" topic_name="/yield_goal"
+                node="{node}" timeout_sec="3.0" goal="{yield_goal}" />
+              <!-- [09-20 사용자] recovery 가 RecoveryGridBased1/2 로 폴백하듯, 후퇴 경로도 **플래너 2개**로.
+                   A: ReverseReedsShepp(정밀, tolerance 0.25) → 실패하면 B: ReverseAStar(ammr_navfn A*, 기구학 제약 없음) 로 다시 푼다 — 현장 recovery 와 같은 구조. 둘 다 실패하면 조정 계층이 직선 BackUp 으로 되돌린다. -->
+              <Fallback name="YieldPlanFallback">
+                <ComputePathToPose name="ComputeYieldPathA" goal="{yield_goal}" path="{yield_path}"
+                  planner_id="{cfg_reverse_planner}" error_code_id="{recovery_compute_path_error_code}" />
+                <Sequence name="YieldPlanB">
+                  <LogTextAction name="YieldPlanBLog"
+                    message="[YIELD] A(후진 Hybrid) 실패 → A* 플래너로 후퇴 경로 재시도" interval_s="2.0" />
+                  <ComputePathToPose name="ComputeYieldPathB" goal="{yield_goal}" path="{yield_path}"
+                    planner_id="{cfg_reverse_planner_b}" error_code_id="{recovery_compute_path_error_code}" />
+                </Sequence>
+              </Fallback>
+              <!-- [09-20 사용자] "아주 약간만 이동하면 되니 1.0 m 혹은 더 짧게 truncate" — 후진 경로를 그대로 다 따라가지 않고
+                   로봇 앞(경로 방향) cfg_yield_trunc 만큼만 잘라서 따라간다. 짧을수록 후진 위험·탐색 부담이 준다. -->
+              <TruncatePathLocal name="TruncateYield" input_path="{yield_path}" output_path="{pruned_path}"
+                distance_forward="{cfg_yield_trunc}" distance_backward="0.0"
+                angular_distance_weight="{cfg_angular_weight}"
+                max_robot_pose_search_dist="{cfg_search_dist_short}"
+                robot_frame="{cfg_robot_frame}" transform_tolerance="{cfg_tf_tolerance}" />
+              <PathPublisherAction name="PubYieldPlan" input_path="{pruned_path}"
+                topic_name="/plan_yield" publish_period="{cfg_publish_period_path_pruned}" node="{node}" />
+              <LogTextAction name="YieldLog"
+                message="[YIELD] 후퇴 경로 주행 (ReverseReedsShepp + ReverseRPP)" interval_s="1.0" />
+            </Sequence>
+            <AlwaysSuccess name="NoYield" />
+          </Fallback>
+          <Sequence name="FollowSequence">
+            <!-- <UnsetBlackboard name="Unset_follow_err_follow" key="follow_path_error_code" /> -->
+            <!-- <SetBlackboard name="set_follow_path_error_code" output_key="follow_path_error_code" value="0" />  -->
+            <LogTextAction name="FollowBanner" message="############ FollowPath #########" />
+            <Fallback name="TryFollow">
+              <Sequence>
+                <FollowPath name="FollowPath_Main" path="{pruned_path}"
+                  controller_id="{selected_controller}"
+                  goal_checker_id="{cfg_goal_checker}" progress_checker_id="{cfg_progress_checker}"
+                  error_code_id="{follow_path_error_code}" />
+
+                <!-- <UnsetBlackboard name="Unset_path" key="path" />
+                <LogTextAction name="FollowDone" message="############ Done FollowPath #########" /> -->
+              </Sequence>
+              <Sequence name="ControllerEscalate">
+                <LogTextAction name="ControllerCriticalLog"
+                  message="[CRITICAL] Controller unrecoverable error: {follow_path_error_code}. Triggering recovery." />
+                <ErrorCodePublisherAction name="PubPlannerError_Follow" topic_name="/bt_error_code"
+                  error_code="{compute_path_error_code}" node="{node}" />
+                <ErrorCodePublisherAction name="PubFollowError_Follow" topic_name="/bt_error_code"
+                  error_code="{follow_path_error_code}" node="{node}" />
+                <AlwaysFailure name="ForceFailure_Controller" />
+              </Sequence>
+            </Fallback>
+          </Sequence>
+        </PipelineSequence>
+        <Sequence name="FollowRecoveryCtx">
+          <WouldAControllerRecoveryHelp name="WouldControllerHelp"
+            error_code="{follow_path_error_code}" />
+          <ClearEntireCostmap name="ClearLocalCostmap_FollowCtx"
+            service_name="/local_costmap/clear_entirely_local_costmap" />
+        </Sequence>
+      </RecoveryNode>
+    </ReactiveFallback>
+
+  </BehaviorTree>
+
+  <!--
+  7) Remove N goals (reused routine) -->
+  <BehaviorTree ID="RemoveGoalsSubtree">
+    <RetryUntilSuccessful name="RemoveGoalsRetry" num_attempts="{num_goals_to_remove}">
+      <Sequence name="RemoveGoalsSeq">
+        <LogTextAction name="RemoveGoalLog" message="[Subtree] Removing a goal point..."
+          interval_s="1.0" />
+        <RemoveFirstGoalsAction name="RemoveFirstGoal" input_goals="{goals}"
+          remaining_goals="{goals}" />
+      </Sequence>
+    </RetryUntilSuccessful>
+  </BehaviorTree>
+
+  <!--
+  8) Maneuver routine (internals privatized with '_' prefix + cleaned after use) -->
+  <BehaviorTree ID="ManeuverSubtree_bk">
+    <Sequence name="ManeuverSeq">
+      <Sequence name="ManeuverCore">
+        <LogTextAction name="ManeuverLog"
+          message="[Subtree] Executing Maneuver with planner: {planner_id} and controller: {controller_id}"
+          interval_s="1.0" />
+        <SetBlackboardUShortAction name="set_recovery_compute_path_error_code" output_key="recovery_compute_path_error_code" value="0" /> 
+        <SetBlackboardUShortAction name="set_recovery_follow_path_error_code" output_key="recovery_follow_path_error_code" value="0" />
+
+        <GetNextFewGoalsAction name="ExtractNextGoals" num_goals="2" input_goals="{goals}"
+          output_goals="{few_goals}" />
+        <!-- <UnsetBlackboard name="Unset_recovery_compute_err" key="recovery_compute_path_error_code" /> -->
+        <!-- <SetBlackboard name="set_compute_path_error_code" output_key="compute_path_error_code" value="0" />  -->
+        <Fallback>
+          <Sequence>
+            <ComputePathThroughPoses name="ComputeAltPath" goals="{few_goals}" path="{alt_path}"
+              planner_id="{planner_id}" error_code_id="{recovery_compute_path_error_code}" />
+            <TruncatePathLocal name="TruncateAltShort"
+              input_path="{alt_path}"
+              output_path="{short_path}"
+              distance_forward="0.45"
+              distance_backward="0.0"
+              angular_distance_weight="{cfg_angular_weight}"
+              max_robot_pose_search_dist="{cfg_search_dist_mnv}"
+              robot_frame="{cfg_robot_frame}"
+              transform_tolerance="{cfg_tf_tolerance}" />
+            <SetTruncatedGoalFromPath name="EmitAltGoal" short_path="{short_path}"
+              alt_goal="{alt_goal}" />
+            <ComputePathToPose name="ComputeShortToAltGoal" goal="{alt_goal}" path="{short_path}"
+              planner_id="{planner_id}" error_code_id="{recovery_compute_path_error_code}" />
+
+            <!-- smoother testingg -->
+            <Precondition name="SmootherPreconditionManeuver"
+                if="planner_id == cfg_recov_planner_B" else="SUCCESS">
+              <SmoothPath name="SmootherManeuver" unsmoothed_path="{short_path}" smoothed_path="{short_path}" smoother_id="simple_smoother" />  
+            </Precondition>
+
+            <PathPublisherAction name="PubShortPlan" input_path="{short_path}"
+                  topic_name="/plan_truncated_short"
+                  publish_period="{cfg_publish_period}" node="{node}" />  
+          </Sequence>
+
+          <Sequence>
+            <LogTextAction name="PlannerCriticalLog"
+              message="[CRITICAL] Planner unrecoverable error: {recovery_compute_path_error_code}. Triggering recovery." />
+            <ErrorCodePublisherAction name="PubPlannerError" topic_name="/bt_error_code"
+              error_code="{recovery_compute_path_error_code}" node="{node}" />
+            <ErrorCodePublisherAction name="PubFollowError" topic_name="/bt_error_code"
+              error_code="{recovery_follow_path_error_code}" node="{node}" />
+            <Wait name="CooldownBeforeRecovery" wait_duration="0.5" />              
+            <AlwaysFailure name="ForceFailure_Planner" />            
+          </Sequence>
+
+        </Fallback>
+
+
+        <Fallback name="TryFollowManeuver">
+          <Sequence>
+            <FollowPath name="FollowShort" path="{short_path}" controller_id="{controller_id}"
+                  goal_checker_id="{cfg_relaxed_checker}" progress_checker_id="{cfg_progress_checker_recovery}"
+                  error_code_id="{recovery_follow_path_error_code}" />
+            <RemovePassedGoals name="RecoveryPassedGoals1" input_goals="{goals}" output_goals="{goals}"
+                  radius="{cfg_remove_passed_radius}" />        
+          </Sequence>
+          <Sequence>
+            <ErrorCodePublisherAction topic_name="/bt_error_code" error_code="{recovery_follow_path_error_code}" node="{node}" />
+            <RemovePassedGoals name="RecoveryPassedGoals2" input_goals="{goals}" output_goals="{goals}"
+                  radius="{cfg_remove_passed_radius}" />
+            <AlwaysFailure />
+          </Sequence>
+        </Fallback>
+
+
+
+        <LogTextAction name="ManeuverDoneLog" message="[Subtree] Maneuver completed successfully."
+          interval_s="1.0" />
+        <!-- Free private temps immediately -->
+        <UnsetBlackboard name="Unset_priv_few_goals_M" key="few_goals" />
+        <UnsetBlackboard name="Unset_priv_alt_path_M" key="alt_path" />
+        <UnsetBlackboard name="Unset_priv_short_path_M" key="short_path" />
+        <UnsetBlackboard name="Unset_priv_alt_goal_M" key="alt_goal" />
+        
+      </Sequence>
+
+    </Sequence>
+
+  </BehaviorTree>
+
+
+
+
+  <BehaviorTree ID="ManeuverSubtree">
+    <ReactiveFallback name="ManeuverPauseAndResume">
+      
+
+  <!-- [1] Pause 브랜치 -->
+      <!-- [moduler31] 회복 구간의 pause 처리. moduler30 까지는 <AlwaysFailure/> 로 비활성이었다.
+
+           [왜 필요한가]
+           (a) 회복 중에는 pause 가 아예 먹지 않았다.
+               RecoveryNode(NavigateRecovery)는 child0 이 FAILURE 가 되면 child0 을 halt 하고
+               이후 child1(IntelligentRecoverySubtree)만 tick 한다
+               (nav2_behavior_tree/plugins/control/recovery_node.cpp). 그래서 child0 안에 있는
+               주 경로 PauseBranch 가 회복 중에는 평가되지 않는다. 회복 서브트리에는 pause 처리
+               노드가 하나도 없어서, 다중로봇 조정(fleet_decision)이 회복 중인 로봇을 세울 수 없었다.
+           (b) 관제 pause 는 controller_server 레벨(nav_pause_flag)이라 로봇은 멈추지만, BT 는
+               FollowShort 를 계속 RUNNING 으로 본다. moduler30 이 추가한 Timeout(30초)은
+               BT.CPP 의 실시간 타이머라 pause 를 인식하지 않고 계속 센다.
+               sim 실측(Timeout 을 8초로 줄여 재현): pause 를 +2.5초에 걸어 로봇이 완전히 멈춰
+               있었는데도 8.21초에 ABORTED 로 만료됐다.
+
+           [왜 이런 모양인가 - OR 를 한 브랜치에 넣으면 안 된다]
+           CheckPauseCondition 은 tick() 안에서 spin_some() 을 돌려 메시지를 처리한다.
+           **tick 되지 않으면 자기 토픽을 아예 볼 수 없다.**
+           그런데 Fallback / ReactiveFallback / Parallel 은 모두 첫 SUCCESS 에서 단락한다
+           (BehaviorTree.CPP: reactive_fallback.cpp 는 SUCCESS 에서 즉시 return,
+            parallel_node.cpp 는 임계값 검사가 자식 루프 "안"에 있다).
+           그래서 두 조건을 한 Fallback 에 넣으면, 앞의 것이 true 인 동안 뒤의 것은 호출조차
+           되지 않아 관제 resume 을 영원히 못 본다. sim 에서 실제로 영구 hold 가 재현됐다.
+
+           그래서 pause 출처마다 **별도 브랜치**로 둔다. fleet 가 풀리면 [1] 이 FAILURE 로
+           떨어지고 [2] 가 즉시 tick 되어 다시 살아난다.
+
+           [hold 에 상한(Timeout)을 두려 했으나 이 자리에서는 성립하지 않는다 - 시도했다가 뺐다]
+     ReactiveFallback 은 매 tick 첫 자식부터 다시 평가한다. 그런데 TimeoutNode 는
+     FAILURE 를 반환할 때 timeout_started_ 를 false 로 되돌린다
+     (BehaviorTree.CPP/src/decorators/timeout_node.cpp). 그래서 만료되어 빠져나가도
+     바로 다음 tick 에서 타이머가 새로 시작되고, 같은 길이의 hold 가 무한 반복된다.
+     sim 실측: guard 를 12초로 줄이고 pause 를 풀지 않았더니 60초가 지나도 끝나지 않았다.
+     이름값을 못 하는 안전장치는 없느니만 못하므로 넣지 않았다.
+
+     [남는 위험]
+     pause 플래그가 낡은 값으로 true 에 잠기면 회복이 무한 대기한다. 다만 이는 주 경로의
+     PauseBranch 가 이미 갖고 있는 성질과 같다(그쪽도 /controller_pause_flag 를 그대로
+     믿고 대기한다). moduler31 이 새로 만드는 위험은 아니다. 제대로 없애려면 pause 상태를
+     하나의 권위 있는 값으로 합치고 TTL 을 두어야 하는데, 그건 BT 밖의 일이다.
+
+     [주의] 주 경로의 PauseBranch 를 그대로 복사하면 안 된다. 그쪽은 재계획과 costmap
+           clear 까지 수행하는데, 회복이 쓰고 있는 short_path / alt_goal / few_goals 블랙보드를
+           건드려 회복 상태가 깨진다. 여기서는 "정지하고 대기" 만 한다. 정지 자체는
+           ReactiveFallback 이 ManeuverSeq 를 halt 하면서 FollowShort 에 cancel 이 전달돼 이뤄진다. -->
+
+      <!-- [1] 다중로봇 조정(fleet_decision)이 건 pause -->
+      <KeepRunningUntilFailure name="HoldWhileFleetPaused">
+        <Sequence name="FleetPausedTick">
+          <CheckPauseCondition name="ManeuverFleetPause"
+                flag_topic="/controller_pause_flag"
+                latch="true" transient_local="true" node="{node}" />
+          <LogTextAction name="ManeuverFleetPausedLog"
+                message="[PAUSED] Recovery held by fleet. FollowShort halted, timeout not counting."
+                interval_s="1.0" />
+        </Sequence>
+      </KeepRunningUntilFailure>
+
+      <!-- [2] 관제 서버가 건 pause (winros_bridge DRIVING_PAUSE -> navigation_manager) -->
+      <KeepRunningUntilFailure name="HoldWhileServerPaused">
+        <Sequence name="ServerPausedTick">
+          <CheckPauseCondition name="ManeuverServerPause"
+                flag_topic="/nav_pause_flag"
+                latch="true" transient_local="true" node="{node}" />
+          <LogTextAction name="ManeuverServerPausedLog"
+                message="[PAUSED] Recovery held by server. FollowShort halted, timeout not counting."
+                interval_s="1.0" />
+        </Sequence>
+      </KeepRunningUntilFailure>
+
+
+
+      <!-- [2] 주행 브랜치: 기존 Maneuver 로직 (Pause가 아닐 때만 실행됨) -->
+      <Sequence name="ManeuverSeq">
+        <Sequence name="ManeuverCore">
+          <LogTextAction name="ManeuverLog"
+            message="[Subtree] Executing Maneuver with planner: {planner_id} and controller: {controller_id}"
+            interval_s="1.0" />
+          
+          <SetBlackboardUShortAction name="set_recovery_compute_path_error_code" output_key="recovery_compute_path_error_code" value="0" /> 
+          <SetBlackboardUShortAction name="set_recovery_follow_path_error_code" output_key="recovery_follow_path_error_code" value="0" />
+
+          <GetNextFewGoalsAction name="ExtractNextGoals" num_goals="2" input_goals="{goals}" output_goals="{few_goals}" />
+          
+          <!-- Planning Fallback (에러 처리 포함) -->
+          <Fallback name="ManeuverPlanningFallback">
+            <Sequence name="ManeuverPlanningPath">
+              <ComputePathThroughPoses name="ComputeAltPath" goals="{few_goals}" path="{alt_path}"
+                planner_id="{planner_id}" error_code_id="{recovery_compute_path_error_code}" />
+              <TruncatePathLocal name="TruncateAltShort" input_path="{alt_path}" output_path="{short_path}"
+                distance_forward="0.45" robot_frame="{cfg_robot_frame}" transform_tolerance="{cfg_tf_tolerance}" />
+              <SetTruncatedGoalFromPath name="EmitAltGoal" short_path="{short_path}" alt_goal="{alt_goal}" />
+              <ComputePathToPose name="ComputeShortToAltGoal" goal="{alt_goal}" path="{short_path}"
+                planner_id="{planner_id}" error_code_id="{recovery_compute_path_error_code}" />
+              <!-- smoother testingg -->
+              <Precondition name="SmootherPreconditionManeuver"
+                  if="planner_id == cfg_recov_planner_B" else="SUCCESS">
+                <SmoothPath name="SmootherManeuver" unsmoothed_path="{short_path}" smoothed_path="{short_path}" smoother_id="simple_smoother" />  
+              </Precondition>
+
+              <PathPublisherAction name="PubShortPlan" input_path="{short_path}" topic_name="/plan_truncated_short"
+                    publish_period="{cfg_publish_period}" node="{node}" />  
+            </Sequence>
+
+            <Sequence name="ManeuverPlannerErrorHandle">
+              <LogTextAction name="PlannerCriticalLog"
+                message="[CRITICAL] Planner unrecoverable error: {recovery_compute_path_error_code}. Triggering recovery." />
+              <ErrorCodePublisherAction name="PubPlannerError" topic_name="/bt_error_code"
+                error_code="{recovery_compute_path_error_code}" node="{node}" />
+              <ErrorCodePublisherAction name="PubFollowError" topic_name="/bt_error_code"
+                error_code="{recovery_follow_path_error_code}" node="{node}" />
+              <Wait name="CooldownBeforeRecovery" wait_duration="0.5" />              
+              <AlwaysFailure name="ForceFailure_Planner" />            
+            </Sequence>
+          </Fallback>
+
+          <!-- FollowPath Fallback (에러 처리 포함) -->
+          <Fallback name="TryFollowManeuver">
+            <Sequence>
+              <!-- [moduler30] FollowShort 에 Timeout 추가 (30초)
+                   FollowShort 는 (a) alt_goal 0.10m 이내 도달(super_relaxed_goal_checker) 또는
+                   (b) 15초에 0.2m 미만 이동(progress_checker_recovery) 두 조건에서만 끝난다.
+                   그 사이 - 목표에 수렴하지 않으면서 0.2m 이상은 움직이는 운동(제자리 선회,
+                   작은 원 궤도) - 이면 둘 다 성립하지 않아 영원히 RUNNING 으로 남는다.
+                   실제로 현장에서 이 상태로 1시간 이상 정지한 사례가 있었다.
+                   alt_path 를 0.45m 로 절단한 목표이므로 정상이면 수 초면 끝난다.
+                   30초를 넘기면 실패로 올려보내, 설계된 에스컬레이션
+                   (RoundRobin -> PlanB(RecoveryGridBased2) -> ... -> 기본 주행 복귀)이
+                   정상 동작하게 한다. Timeout 은 자식을 halt 하므로 FollowPath 액션에
+                   cancel 이 전달되어 controller_server 가 로봇을 정지시킨다. -->
+              <Timeout msec="30000" name="FollowShortTimeout">
+                <FollowPath name="FollowShort" path="{short_path}" controller_id="{controller_id}"
+                      goal_checker_id="{cfg_relaxed_checker}" progress_checker_id="{cfg_progress_checker_recovery}"
+                      error_code_id="{recovery_follow_path_error_code}" />
+              </Timeout>
+              <RemovePassedGoals name="RecoveryPassedGoals1" input_goals="{goals}" output_goals="{goals}"
+                    radius="{cfg_remove_passed_radius}" />        
+            </Sequence>
+            <Sequence>
+              <ErrorCodePublisherAction topic_name="/bt_error_code" error_code="{recovery_follow_path_error_code}" node="{node}" />
+              <RemovePassedGoals name="RecoveryPassedGoals2" input_goals="{goals}" output_goals="{goals}"
+                    radius="{cfg_remove_passed_radius}" />
+              <AlwaysFailure />
+            </Sequence>
+          </Fallback>
+
+          <LogTextAction name="ManeuverDoneLog" message="[Subtree] Maneuver completed successfully." interval_s="1.0" />
+          
+          <!-- 자원 정리 -->
+          <UnsetBlackboard name="Unset_priv_few_goals_M" key="few_goals" />
+          <UnsetBlackboard name="Unset_priv_alt_path_M" key="alt_path" />
+          <UnsetBlackboard name="Unset_priv_short_path_M" key="short_path" />
+          <UnsetBlackboard name="Unset_priv_alt_goal_M" key="alt_goal" />
+        </Sequence>
+      </Sequence>
+    </ReactiveFallback>
+  </BehaviorTree>
+
+
+
+
+
+
+
+
+
+
+  <!--
+  9) Intelligent recovery aggregator -->
+  <BehaviorTree ID="IntelligentRecoverySubtree">
+    <Sequence name="ShortRecoverySequenceTotal1">
+      <LogTextAction name="RecoveryBanner"
+        message="[!!! RECOVERY !!!] Main navigation failed. Initiating intelligent recovery logic."
+        interval_s="1.0" />
+      <!-- <Fallback name="FailureTypeCheck">
+        <LogTextAction name="WouldPlannerHelpBanner"
+          message="[!!! RECOVERY !!!] WouldAPlannerRecoveryHelp" interval_s="1.0" />
+        <WouldAPlannerRecoveryHelp name="WouldPlannerHelp" error_code="{compute_path_error_code}" />
+        <WouldAControllerRecoveryHelp name="WouldControllerHelp"
+          error_code="{follow_path_error_code}" />
+        <LogTextAction name="DoneWouldController"
+          message="[!!! RECOVERY !!!] Done WouldAControllerRecoveryHelp" interval_s="1.0" />
+      </Fallback> -->
+
+      <Fallback name="IntelligentRecoverySelector">
+
+        <Sequence name="NoValidPathCase">
+          <Precondition name="NoValidPathPrecondition"
+            if="compute_path_error_code == cfg_err_no_valid" else="FAILURE">
+            <Sequence name="NoValidPathActions">
+              <LogTextAction name="NoValidPathLog"
+                message="[RECOVERY CASE 0] 'No valid path' detected. Resolving..." interval_s="1.0" />
+              <Fallback name="NoValidPathResolution">
+                <Sequence name="GoalOccupiedBranch">
+                  <IsGoalsOccupiedCondition
+                    name="IsGoalSafe"
+                    goals="{goals}"
+                    costmap_topic="{cfg_costmap_topic}"
+                    occupied_cost_threshold="{cfg_occupied_threshold}"
+                    occupied_goals="{obstructed_goals}"
+                    unoccupied_goals="{unoccupied_goals}" />
+                  <LogTextAction name="GoalOccupiedLog"
+                    message=" -> Cause: Goal occupied. Waiting or removing goals." interval_s="1.0" />
+                    <ProgressAwareRoundRobinControl name="GoalOccupiedRecovery">                    
+                      <Wait name="WaitToClear" wait_duration="{cfg_wait_default}" />
+                      <RemovePassedGoalsCustomAction name="SoftPassGoal1" 
+                       input_goals="{goals}" 
+                       output_goals="{goals}"
+                       radius="1.5" />  
+                       <!-- radius="{cfg_recovery_remove_radius}" />                       -->
+                      <RemovePassedGoalsCustomAction name="SoftPassGoal2" 
+                       input_goals="{goals}" 
+                       output_goals="{goals}"
+                       radius="2.0" />   
+                      <RemoveFirstGoalsAction name="RemoveFirstGoal" input_goals="{goals}" remaining_goals="{goals}" />
+
+                    </ProgressAwareRoundRobinControl>
+                </Sequence>
+
+                <Sequence name="PathBlockedBranch">
+                  <LogTextAction name="PathBlockedLog"
+                    message=" -> Cause: Path blocked but goal clear. Clearing costmaps + maneuver."
+                    interval_s="1.0" />
+                  <ProgressAwareRoundRobinControl name="PathBlockedRecovery">
+                    <SubTree name="ClearPair" ID="ClearCostmapsPairSubtree" _autoremap="true" />
+                    <SubTree name="Maneuver_PlanA" ID="ManeuverSubtree" _autoremap="true"
+                      planner_id="{cfg_recov_planner_A}" controller_id="{cfg_recov_controller}" />
+                  </ProgressAwareRoundRobinControl>
+                </Sequence>
+              </Fallback>
+            </Sequence>
+          </Precondition>
+        </Sequence>
+
+
+        <Sequence name="StartOccupiedPathCase">
+          <Precondition name="StartOccupiedPrecondition"
+            if="compute_path_error_code == cfg_err_start_occ" else="FAILURE">
+            <Sequence name="StartOccupiedActions">
+              <LogTextAction name="StartOccupiedLog"
+                message="[RECOVERY CASE] 'StartOccupiedPathCase' detected. Trying maneuvers..."
+                interval_s="1.0" />
+              <ProgressAwareRoundRobinControl name="StartOccupiedRecovery">
+                <SubTree name="Maneuver_PlanA_Start" ID="ManeuverSubtree" _autoremap="true"
+                  planner_id="{cfg_recov_planner_A}" controller_id="{cfg_recov_controller}" />
+                <SubTree name="Maneuver_PlanB_Start" ID="ManeuverSubtree" _autoremap="true"
+                  planner_id="{cfg_recov_planner_B}" controller_id="{cfg_recov_controller}" />
+              </ProgressAwareRoundRobinControl>
+            </Sequence>
+          </Precondition>
+        </Sequence>
+
+        <Sequence name="GoalOccupiedPathCase">
+          <Precondition name="GoalOccupiedPrecondition"
+            if="compute_path_error_code == cfg_err_goal_occ" else="FAILURE">
+            <Sequence name="GoalOccupiedActions">
+              <IsGoalsOccupiedCondition
+                name="IsGoalSafe_GoalCase"
+                goals="{goals}"
+                costmap_topic="{cfg_costmap_topic}"
+                occupied_cost_threshold="{cfg_occupied_threshold}"
+                occupied_goals="{obstructed_goals}"
+                unoccupied_goals="{unoccupied_goals}" />
+              <LogTextAction name="GoalOccupiedLog2"
+                message=" -> Cause: Goal occupied. Waiting or removing goals." interval_s="1.0" />
+              <ProgressAwareRoundRobinControl name="GoalOccupiedRecovery2">
+                <Wait name="WaitToClear2" wait_duration="{cfg_wait_default}" />
+                <!-- <SubTree name="RemoveGoals_3_GoalCase" ID="RemoveGoalsSubtree" _autoremap="true" num_goals_to_remove="3" /> -->
+                <RemovePassedGoalsCustomAction name="SoftPassGoal1" 
+                  input_goals="{goals}" 
+                  output_goals="{goals}"
+                  radius="1.5" />  
+                  <!-- radius="{cfg_recovery_remove_radius}" />                       -->
+                <RemovePassedGoalsCustomAction name="SoftPassGoal2" 
+                  input_goals="{goals}" 
+                  output_goals="{goals}"
+                  radius="2.0" />   
+                <RemoveFirstGoalsAction name="RemoveFirstGoal" input_goals="{goals}" remaining_goals="{goals}" />
+
+
+              </ProgressAwareRoundRobinControl>
+            </Sequence>
+          </Precondition>
+        </Sequence>
+
+
+        <Sequence name="ExceededMaximumIterationCase">
+          <Precondition name="ExceededMaximumIterationCasePrecondition"
+            if="compute_path_error_code == cfg_err_excc_max_iter" else="FAILURE">
+            <Sequence name="ExceededMaximumIterationCaseActions">
+              <LogTextAction name="ExceededMaximumIterationCaseLog"
+                message="[RECOVERY CASE 0] 'Exceeded Maximum Iteration Case' detected. Resolving..." interval_s="1.0" />
+              <Fallback name="ExceededMaximumIterationCaseResolution">
+                <Sequence name="GoalOccupiedExceededMaximumIterationBranch">
+                  <IsGoalsOccupiedCondition
+                    name="IsGoalSafe"
+                    goals="{goals}"
+                    costmap_topic="{cfg_costmap_topic}"
+                    occupied_cost_threshold="{cfg_occupied_threshold}"
+                    occupied_goals="{obstructed_goals}"
+                    unoccupied_goals="{unoccupied_goals}" />
+                  <LogTextAction name="GoalOccupiedLog"
+                    message=" -> Cause: Goal occupied. Waiting or removing goals." interval_s="1.0" />
+
+                  <ProgressAwareRoundRobinControl name="GoalOccupiedRecoveryExceededMaximumIteration">                    
+                    <Wait name="WaitToClear" wait_duration="{cfg_wait_default}" />
+                    <RemovePassedGoalsCustomAction name="SoftPassGoal1" 
+                       input_goals="{goals}" 
+                       output_goals="{goals}"
+                       radius="1.5" />  
+                       <!-- radius="{cfg_recovery_remove_radius}" />                       -->
+                    <RemovePassedGoalsCustomAction name="SoftPassGoal2" 
+                       input_goals="{goals}" 
+                       output_goals="{goals}"
+                       radius="2.0" />                       
+                    <RemoveFirstGoalsAction name="RemoveFirstGoal" input_goals="{goals}" remaining_goals="{goals}" />
+
+                  </ProgressAwareRoundRobinControl>
+                </Sequence>
+
+                <Sequence name="ExceededMaximumIterationBranch">
+                  <LogTextAction name="ExceededMaximumIterationLog"
+                    message=" -> Cause: Exceeded Maximum Iteration but goal clear. Clearing costmaps + maneuver."
+                    interval_s="1.0" />
+                  <ProgressAwareRoundRobinControl name="ExceededMaximumIterationRecovery">
+                    <SubTree name="ClearPair_2" ID="ClearCostmapsPairSubtree" _autoremap="true" />
+                    <SubTree name="Maneuver_PlanA_2" ID="ManeuverSubtree" _autoremap="true"
+                      planner_id="{cfg_recov_planner_A}" controller_id="{cfg_recov_controller}" />
+                    <SubTree name="Maneuver_PlanB_Default" ID="ManeuverSubtree" _autoremap="true"
+                        planner_id="{cfg_recov_planner_B}" controller_id="{cfg_recov_controller}" />  
+                  </ProgressAwareRoundRobinControl>
+                </Sequence>
+              </Fallback>
+            </Sequence>
+          </Precondition>
+        </Sequence>
+
+
+
+        <Sequence name="FailProgressCase">
+          <Precondition name="FailProgressPrecondition"
+            if="follow_path_error_code == cfg_err_fail_prog" else="FAILURE">
+            <Sequence name="FailProgressActions">
+              <LogTextAction name="FailProgressLog"
+                message="[RECOVERY CASE] 'FailProgressCase' detected. Trying maneuvers..."
+                interval_s="1.0" />
+              <ProgressAwareRoundRobinControl name="FailProgressRecovery">
+                <SubTree name="Maneuver_PlanA_FailProgress" ID="ManeuverSubtree" _autoremap="true"
+                  planner_id="{cfg_recov_planner_A}" controller_id="{cfg_recov_controller}" />
+                <SubTree name="Maneuver_PlanB_FailProgress" ID="ManeuverSubtree" _autoremap="true"
+                  planner_id="{cfg_recov_planner_B}" controller_id="{cfg_recov_controller}" />
+              </ProgressAwareRoundRobinControl>
+            </Sequence>
+          </Precondition>
+        </Sequence>
+
+        <!-- <Sequence name="RobotIsStuckCase">
+          <CheckFlagCondition name="IsStuckFlag" flag_topic="/progress_checker/is_stuck"
+            latch="false" node="{node}" />
+          <LogTextAction name="RobotStuckLog"
+            message="[RECOVERY CASE 1] Robot appears stuck. Executing maneuver." interval_s="1.0" />
+          <ProgressAwareRoundRobinControl name="RobotIsStuckRecoveryActions">
+            <SubTree name="Maneuver_PlanA_Stuck" ID="ManeuverSubtree" _autoremap="true"
+              planner_id="{cfg_recov_planner_A}" controller_id="{cfg_recov_controller}" />
+            <SubTree name="Maneuver_PlanB_Stuck" ID="ManeuverSubtree" _autoremap="true"
+              planner_id="{cfg_recov_planner_B}" controller_id="{cfg_recov_controller}" />
+          </ProgressAwareRoundRobinControl>
+        </Sequence> -->
+
+
+        <Sequence name="DynamicPlannerFailCase">
+          <Precondition name="DynamicPlannerFailCasePrecondition"
+            if="validation_error_code == 402" else="FAILURE">
+            <Sequence name="DynamicPlannerFailCaseActions">
+              <LogTextAction name="DynamicPlannerFailnCaseLog"
+                message="[RECOVERY CASE 0] 'Exceeded Maximum Iteration Case' detected. Resolving..." interval_s="1.0" />
+              <Fallback name="DynamicPlannerFailCaseResolution">
+                <Sequence name="GoalOccupiedDynamicPlannerFailBranch">
+                  <IsGoalsOccupiedCondition
+                    name="IsGoalSafe"
+                    goals="{goals}"
+                    costmap_topic="{cfg_costmap_topic}"
+                    occupied_cost_threshold="{cfg_occupied_threshold}"
+                    occupied_goals="{obstructed_goals}"
+                    unoccupied_goals="{unoccupied_goals}" />
+                  <LogTextAction name="GoalOccupiedLog"
+                    message=" -> Cause: Goal occupied. Waiting or removing goals." interval_s="1.0" />
+
+                  <ProgressAwareRoundRobinControl name="GoalOccupiedRecoveryExceededMaximumIteration">                    
+                    <Wait name="WaitToClear" wait_duration="{cfg_wait_default}" />
+                    <RemovePassedGoalsCustomAction name="SoftPassGoal1_1" 
+                       input_goals="{goals}" 
+                       output_goals="{goals}"
+                       radius="1.5" />  
+                       <!-- radius="{cfg_recovery_remove_radius}" />                       -->
+                    <RemovePassedGoalsCustomAction name="SoftPassGoal2_2" 
+                       input_goals="{goals}" 
+                       output_goals="{goals}"
+                       radius="2.0" />                       
+                    <RemoveFirstGoalsAction name="RemoveFirstGoal" input_goals="{goals}" remaining_goals="{goals}" />
+
+                  </ProgressAwareRoundRobinControl>
+                </Sequence>
+
+                <Sequence name="DynamicPlannerFailBranch">
+                  <LogTextAction name="DynamicPlannerFailLog"
+                    message=" -> Cause: Exceeded Maximum Iteration but goal clear. Clearing costmaps + maneuver."
+                    interval_s="1.0" />
+                  <ProgressAwareRoundRobinControl name="DynamicPlannerFailRecovery">
+                    <SubTree name="ClearPair_3" ID="ClearCostmapsPairSubtree" _autoremap="true" />
+                    <SubTree name="Maneuver_PlanA_3" ID="ManeuverSubtree" _autoremap="true"
+                      planner_id="{cfg_recov_planner_A}" controller_id="{cfg_recov_controller}" />
+                    <SubTree name="Maneuver_PlanB_Default_2" ID="ManeuverSubtree" _autoremap="true"
+                        planner_id="{cfg_recov_planner_B}" controller_id="{cfg_recov_controller}" />  
+                  </ProgressAwareRoundRobinControl>
+                </Sequence>
+              </Fallback>
+            </Sequence>
+          </Precondition>
+        </Sequence>
+
+
+        <Sequence name="DynamicPlannerFailCase406">
+          <Precondition name="DynamicPlannerFailCase406Precondition"
+            if="validation_error_code == 406" else="FAILURE">
+            <Sequence name="DynamicPlannerFailCase406Actions">
+              <LogTextAction name="DynamicPlannerFailnCaseLog"
+                message="[RECOVERY CASE 0] 'Exceeded Maximum Iteration Case' detected. Resolving..." interval_s="1.0" />
+              <Fallback name="DynamicPlannerFailCase406Resolution">
+                <Sequence name="GoalOccupiedDynamicPlannerFailBranch">
+                  <IsGoalsOccupiedCondition
+                    name="IsGoalSafe"
+                    goals="{goals}"
+                    costmap_topic="{cfg_costmap_topic}"
+                    occupied_cost_threshold="{cfg_occupied_threshold}"
+                    occupied_goals="{obstructed_goals}"
+                    unoccupied_goals="{unoccupied_goals}" />
+                  <LogTextAction name="GoalOccupiedLog"
+                    message=" -> Cause: Goal occupied. Waiting or removing goals." interval_s="1.0" />
+
+                  <ProgressAwareRoundRobinControl name="GoalOccupiedRecoveryExceededMaximumIteration">                    
+                    <Wait name="WaitToClear" wait_duration="{cfg_wait_default}" />
+                    <RemovePassedGoalsCustomAction name="SoftPassGoal1_1" 
+                       input_goals="{goals}" 
+                       output_goals="{goals}"
+                       radius="1.5" />  
+                       <!-- radius="{cfg_recovery_remove_radius}" />                       -->
+                    <RemovePassedGoalsCustomAction name="SoftPassGoal2_2" 
+                       input_goals="{goals}" 
+                       output_goals="{goals}"
+                       radius="2.0" />                       
+                    <RemoveFirstGoalsAction name="RemoveFirstGoal" input_goals="{goals}" remaining_goals="{goals}" />
+
+                  </ProgressAwareRoundRobinControl>
+                </Sequence>
+
+                <Sequence name="DynamicPlannerFail406Branch">
+                  <LogTextAction name="DynamicPlannerFail406Log"
+                    message=" -> Cause: Exceeded Maximum Iteration but goal clear. Clearing costmaps + maneuver."
+                    interval_s="1.0" />
+                  <ProgressAwareRoundRobinControl name="DynamicPlannerFail406Recovery">
+                    <SubTree name="ClearPair_4" ID="ClearCostmapsPairSubtree" _autoremap="true" />
+                    <SubTree name="Maneuver_PlanA_4" ID="ManeuverSubtree" _autoremap="true"
+                      planner_id="{cfg_recov_planner_A}" controller_id="{cfg_recov_controller}" />
+                    <SubTree name="Maneuver_PlanB_Default_3" ID="ManeuverSubtree" _autoremap="true"
+                        planner_id="{cfg_recov_planner_B}" controller_id="{cfg_recov_controller}" />  
+                  </ProgressAwareRoundRobinControl>
+                </Sequence>
+              </Fallback>
+            </Sequence>
+          </Precondition>
+        </Sequence>
+
+
+
+
+
+        <Sequence name="DefaultFailureCase">
+          <LogTextAction name="DefaultFailureLog"
+            message="[RECOVERY CASE 2] Default failure. Running general recovery sequence."
+            interval_s="1.0" />
+          <ProgressAwareRoundRobinControl name="DefaultFailureRecoveryActions">
+            <Sequence name="Sequence_DefaultFailureRecoveryActions">
+              <SubTree name="ClearPair_Default" ID="ClearCostmapsPairSubtree" _autoremap="true" />
+              <Wait name="DefaultWait" wait_duration="{cfg_wait_default}" />
+            </Sequence>
+            <Sequence>
+              <!-- <LogTextAction name="DefaultFailureLog_Maneuver_PlanA_Default"
+                message="############## 1 Default failure. Running general recovery sequence."
+                interval_s="0.0" /> -->
+              <SubTree name="Maneuver_PlanA_Default" ID="ManeuverSubtree" _autoremap="true"
+                planner_id="{cfg_recov_planner_A}" controller_id="{cfg_recov_controller}" />
+            </Sequence>
+            <Sequence>
+              <!-- <LogTextAction name="DefaultFailureLog_Maneuver_PlanB_Default"
+                message="############## 2 Default failure. Running general recovery sequence."
+                interval_s="0.0" /> -->
+              <SubTree name="Maneuver_PlanB_Default_4" ID="ManeuverSubtree" _autoremap="true"
+                planner_id="{cfg_recov_planner_B}" controller_id="{cfg_recov_controller}" />
+            </Sequence>
+          </ProgressAwareRoundRobinControl>
+        </Sequence>
+
+      </Fallback>
+    </Sequence>
+
+  </BehaviorTree>
+
+
+  <!-- =========================== Main Tree =========================== -->
+  <BehaviorTree ID="MainTree">
+    <!-- [V2.36 09-26] 곡선 후진 가지를 **최상단**으로 올린다.
+         실측(YH1): 후진 요청 90회 중 BT 가 기존 후진 가지(YieldPathBranch)에 들어간 것은 0회다. 이전 모든 판(W·Y·YM·DG)도 그 가지의 주행 로그가 0이었다.
+         원인은 위치다. 기존 가지는 '주 경로가 유효할 때'의 주행 파이프라인 안쪽에 있는데, 후진이 필요한 순간은
+         대부분 주 경로 계획이 실패해 IntelligentRecovery 쪽에 있을 때다(요청 시 상태 RECOVERY_RUNNING/SUCCESS 가 대부분).
+         그래서 요청 플래그가 와도(flag=true 확인) tick 이 그 가지까지 내려가지 않았다.
+         고침: ReactiveFallback(후진 가지, 기존 NavigateRecovery). 요청이 오면 주행·회복을 멈추고 곡선 후진을 먼저 한다.
+         재료는 기존과 같다(현장 recovery 구조): ReverseReedsShepp → 실패 시 ReverseAStar → 잘라서 → MPPI 추종.
+         - 후진 가지는 ForceFailure 로 감싼다. 성공을 돌려주면 이 트리 전체가 '주행 완료' 로 끝나기 때문이다. 끝나면 원래 주행으로 돌아간다.
+         - 추종은 ReactiveSequence(플래그, 목표 불변, FollowPath). 플래그(2 Hz 하트비트)가 끊기면 1.5 s 안에 멈추고,
+           노드가 후퇴 목표를 다음 후보로 바꾸면 가지를 끝내 다음 tick 에 새 목표로 다시 계획한다.
+         - [V2.36b/c] 플래그는 현장 CheckFlagCondition 대신 sim 전용 YieldFlagFresh 로 본다. CheckFlagCondition 의 비래치 모드는
+           메시지를 tick 한 번에 소비해 ReactiveSequence 가 곧바로 추종을 끊는다(구성요소 시험에서 드러남).
+         - [V2.36d 사용자] QoS: 1회성 트리거는 TRANSIENT_LOCAL, 주기 하트비트는 VOLATILE. /request_yield·/yield_goal 은 후퇴 중 2 Hz
+           하트비트라 VOLATILE 로 주고받고, DDS 발행 시각으로 만료시킨다(플래그 1.5 s, 목표 1.0 s).
+         - 도달 뒤에는 플래그가 꺼질 때까지 제자리에서 기다린다. 노드가 도달을 확인하고 플래그를 내린다. -->
+    <ReactiveFallback name="YieldTopOrNavigate">
+      <ForceFailure name="YieldTopNeverSucceeds">
+        <Sequence name="YieldTopBranch">
+          <YieldFlagFresh name="YieldRequestedMain" flag_topic="/request_yield" node="{node}" max_age_sec="1.5" />
+          <GetYieldGoalAction name="GetYieldGoalTop" topic_name="/yield_goal"
+            node="{node}" timeout_sec="1.0" goal="{yield_goal}" />
+          <ControllerSelector name="SelectYieldController" selected_controller="{yield_controller}"
+            default_controller="RecoveryFollowPath1" topic_name="controller_selector" />
+          <Fallback name="YieldTopPlanFallback">
+            <ComputePathToPose name="ComputeYieldTopA" goal="{yield_goal}" path="{yield_path}"
+              planner_id="{cfg_reverse_planner}" error_code_id="{recovery_compute_path_error_code}" />
+            <Sequence name="YieldTopPlanB">
+              <LogTextAction name="YieldTopPlanBLog"
+                message="[YIELD-TOP] A(후진 Hybrid) 실패 → A* 로 후퇴 경로 재시도" interval_s="2.0" />
+              <ComputePathToPose name="ComputeYieldTopB" goal="{yield_goal}" path="{yield_path}"
+                planner_id="{cfg_reverse_planner_b}" error_code_id="{recovery_compute_path_error_code}" />
+            </Sequence>
+          </Fallback>
+          <TruncatePathLocal name="TruncateYieldTop" input_path="{yield_path}" output_path="{yield_short}"
+            distance_forward="{cfg_yield_trunc}" distance_backward="0.0"
+            angular_distance_weight="{cfg_angular_weight}"
+            max_robot_pose_search_dist="{cfg_search_dist_short}"
+            robot_frame="{cfg_robot_frame}" transform_tolerance="{cfg_tf_tolerance}" />
+          <PathPublisherAction name="PubYieldTopPlan" input_path="{yield_short}"
+            topic_name="/plan_yield" publish_period="{cfg_publish_period_path_pruned}" node="{node}" />
+          <LogTextAction name="YieldTopLog"
+            message="[YIELD-TOP] 곡선 후진 주행 시작" interval_s="0.0" />
+          <ReactiveSequence name="FollowYieldWhileRequested">
+            <YieldFlagFresh name="YieldStillRequested" flag_topic="/request_yield" node="{node}" max_age_sec="1.5" />
+            <GetYieldGoalAction name="YieldGoalUnchanged" topic_name="/yield_goal" node="{node}"
+              timeout_sec="1.0" same_as="{yield_goal}" goal="{yield_goal_now}" />
+            <FollowPath name="FollowYieldTop" path="{yield_short}" controller_id="{yield_controller}"
+              goal_checker_id="relaxed_goal_checker" progress_checker_id="progress_checker_recovery"
+              error_code_id="{recovery_follow_path_error_code}" />
+          </ReactiveSequence>
+          <LogTextAction name="YieldTopDoneLog"
+            message="[YIELD-TOP] 곡선 후진 도착 — 노드가 요청을 내릴 때까지 대기" interval_s="0.0" />
+          <ReactiveSequence name="HoldWhileRequested">
+            <YieldFlagFresh name="YieldHold" flag_topic="/request_yield" node="{node}" max_age_sec="1.5" />
+            <GetYieldGoalAction name="YieldGoalUnchangedHold" topic_name="/yield_goal" node="{node}"
+              timeout_sec="1.0" same_as="{yield_goal}" goal="{yield_goal_now}" />
+            <Wait name="YieldHoldWait" wait_duration="30.0" />
+          </ReactiveSequence>
+        </Sequence>
+      </ForceFailure>
+    <RecoveryNode number_of_retries="20" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <!-- <SubTree name="Config" ID="ConfigSubtree" _autoremap="true" /> -->
+
+        <!-- <RunNTimesDecorator num_ticks="1" name="ConfigOnce">
+
+        </RunNTimesDecorator> -->
+
+
+
+
+        <RunNTimesDecorator num_ticks="1" name="Initilizing...">
+          <Sequence>
+            <Sequence name="InitSequence">
+              <LogTextAction name="InitLog" message="Initializing..." interval_s="0.0" />
+              <ForceSuccess>
+                <!-- <ClearEntireCostmap name="ClearGlobal_Init" service_name="/global_costmap/clear_entirely_global_costmap" /> -->
+                 <SubTree name="ClearPairInit" ID="ClearCostmapsPairSubtree" _autoremap="true" />
+              </ForceSuccess>  
+              <!-- Canonical keys cleared -->
+              <UnsetBlackboard name="Unset_path" key="path" />
+              <UnsetBlackboard name="Unset_pruned_path" key="pruned_path" />
+              <UnsetBlackboard name="Unset_compute_path_error_code" key="compute_path_error_code" />
+              <UnsetBlackboard name="Unset_follow_path_error_code" key="follow_path_error_code" />
+              <UnsetBlackboard name="Unset_obstructed_goals" key="obstructed_goals" />
+              <UnsetBlackboard name="Unset_unoccupied_goals" key="unoccupied_goals" />
+              <!-- Defensive clear for any leftover private temps from prior runs -->
+              <UnsetBlackboard name="Unset_priv_truncated_short" key="truncated_short_path" />
+              <UnsetBlackboard name="Unset_priv_few_goals" key="few_goals" />
+              <UnsetBlackboard name="Unset_priv_alt_path" key="alt_path" />
+              <UnsetBlackboard name="Unset_priv_short_path" key="short_path" />
+              <UnsetBlackboard name="Unset_priv_alt_goal" key="alt_goal" />
+
+              <UnsetBlackboard name="Unset_drive_403_count" key="drive_403_count" />
+              <UnsetBlackboard name="Unset_manual_403_count" key="manual_403_count" />
+
+
+            </Sequence>
+
+            <Sequence name="Config">
+              <LogTextAction name="SetInitLog" message="Set Initializing..." interval_s="0.0" />
+              <!-- rates -->
+              <SetBlackboard name="Cfg_replan_hz" output_key="cfg_replan_hz" value="10.0" />
+              <!-- truncation & geometry -->
+              <SetBlackboard name="Cfg_trunc_fwd_long" output_key="cfg_trunc_forward_long" value="50.0" />
+              <SetBlackboard name="Cfg_trunc_fwd_short" output_key="cfg_trunc_forward_short" value="4.0" />
+              <SetBlackboard name="Cfg_ang_weight" output_key="cfg_angular_weight" value="0.2" />
+              <SetBlackboard name="Cfg_search_long" output_key="cfg_search_dist_long" value="2.0" />
+              <SetBlackboard name="Cfg_search_short" output_key="cfg_search_dist_short" value="2.0" />
+              <SetBlackboard name="Cfg_search_maneuver" output_key="cfg_search_dist_mnv" value="1.0" />
+              <SetBlackboard name="Cfg_robot_frame" output_key="cfg_robot_frame" value="base_link" />
+              <SetBlackboard name="Cfg_tf_tol" output_key="cfg_tf_tolerance" value="0.3" />
+              <!-- publishers -->
+              <SetBlackboard name="Cfg_pub_period_path_pruned" output_key="cfg_publish_period_path_pruned" value="0.5" />
+              <SetBlackboard name="Cfg_pub_period" output_key="cfg_publish_period" value="0.1" />
+              <SetBlackboard name="Cfg_topic_pruned" output_key="cfg_topic_pruned" value="/plan_pruned" />
+              <SetBlackboard name="Cfg_topic_short" output_key="cfg_topic_short"
+                value="/plan_truncated_short" />
+              <!-- services -->
+              <SetBlackboard name="Cfg_srv_clear_local" output_key="cfg_srv_clear_local"
+                value="local_costmap/clear_entirely_local_costmap" />
+              <SetBlackboard name="Cfg_srv_clear_global" output_key="cfg_srv_clear_global"
+                value="global_costmap/clear_entirely_global_costmap" />
+              <!-- waits -->
+              <SetBlackboard name="Cfg_wait_initial" output_key="cfg_wait_initial" value="0.1" />
+              <SetBlackboard name="Cfg_wait_pause" output_key="cfg_wait_pause" value="0.1" />
+              <SetBlackboard name="Cfg_wait_default" output_key="cfg_wait_default" value="2.0" />
+              <SetBlackboard name="Cfg_wait_agent" output_key="cfg_wait_agent" value="5.0" />
+              <!-- filters / radii -->
+              <SetBlackboard name="Cfg_remove_radius" output_key="cfg_remove_passed_radius" value="0.5" />
+              <SetBlackboard name="Cfg_recovery_remove_radius" output_key="cfg_recovery_remove_radius" value="2.0" />
+              <!-- occupancy check -->
+              <SetBlackboard name="Cfg_costmap_topic" output_key="cfg_costmap_topic"
+                value="local_costmap/costmap_raw" />
+              <SetBlackboard name="Cfg_agent_costmap_topic" output_key="cfg_agent_costmap_topic"
+                value="/local_costmap/agent_layer/raw_costmap" />
+
+              <SetBlackboard name="Cfg_occupied_th" output_key="cfg_occupied_threshold" value="253" />
+              <!-- controller/planner defaults -->
+              <SetBlackboard name="Cfg_def_controller" output_key="cfg_def_controller"
+                value="FollowPath" />
+              <SetBlackboard name="Cfg_def_planner" output_key="cfg_def_planner" value="GridBased" />
+              <SetBlackboard name="Cfg_reverse_planner" output_key="cfg_reverse_planner" value="ReverseReedsShepp" />
+              <SetBlackboard name="Cfg_reverse_planner_b" output_key="cfg_reverse_planner_b" value="ReverseAStar" />
+              <!-- [09-22] MPPI 후퇴용: 1.2 m 는 MPPI 의 PathFollowCritic/GoalCritic threshold_to_consider(1.4) 보다 **짧다**.
+                   경로 전체가 임계 안이라 경로 추종 항목이 사실상 꺼지고 목표점 항목만 남아, 경로를 따라 후진하지 않고
+                   목표점 쪽으로 가려다 제자리에 머문다(실측: 후퇴 지시 뒤 20 s 동안 89 %가 0.2 m 미만 이동).
+                   임계값을 넘기도록 2.0 m 로 늘린다. -->
+              <SetBlackboard name="Cfg_yield_trunc" output_key="cfg_yield_trunc" value="1.0" />
+              <SetBlackboard name="Cfg_recov_planner_A" output_key="cfg_recov_planner_A"
+                value="RecoveryGridBased1" />
+              <SetBlackboard name="Cfg_recov_planner_B" output_key="cfg_recov_planner_B"
+                value="RecoveryGridBased2" />
+              <SetBlackboard name="Cfg_recov_controller" output_key="cfg_recov_controller"
+                value="RecoveryFollowPath1" />
+              <!-- checker IDs -->
+              <SetBlackboard name="Cfg_goal_checker" output_key="cfg_goal_checker"
+                value="precise_goal_checker" />
+              <SetBlackboard name="Cfg_progress_checker" output_key="cfg_progress_checker"
+                value="progress_checker" />
+              <SetBlackboard name="Cfg_progress_checker_recovery" output_key="cfg_progress_checker_recovery"
+                value="progress_checker_recovery" />  
+              <SetBlackboard name="Cfg_relaxed_checker" output_key="cfg_relaxed_checker"
+                value="super_relaxed_goal_checker" />
+              
+              <SetBlackboardBoolAction name="Cfg_reset_controller_pause" output_key="controller_pause_reset_seq" value="true" />
+              <!-- <Script code="controller_pause_reset_seq := 0"/> -->
+              <!-- <SetBlackboard name="set_controller_pause_reset_seq" output_key="controller_pause_reset_seq"
+                value="true" />  -->
+
+
+              <BoolPublisherAction topic_name="/controller_pause_flag" message="false" num_publishes="1" node="{node}"/>
+
+
+              <!-- error code constants -->
+              <SetBlackboardUShortAction name="set_compute_path_error_code" output_key="compute_path_error_code" value="0" /> 
+              <SetBlackboardUShortAction name="set_follow_path_error_code" output_key="follow_path_error_code" value="0" />
+              <!-- <SetBlackboard name="Cfg_err_no_valid" output_key="cfg_err_no_valid" value="308" />
+              <SetBlackboard name="Cfg_err_start_occ" output_key="cfg_err_start_occ" value="305" />
+              <SetBlackboard name="Cfg_err_goal_occ" output_key="cfg_err_goal_occ" value="306" /> -->
+              <SetBlackboardUShortAction name="Cfg_err_no_valid" output_key="cfg_err_no_valid" value="308" />
+              <SetBlackboardUShortAction name="Cfg_err_start_occ" output_key="cfg_err_start_occ" value="305" />
+              <SetBlackboardUShortAction name="Cfg_err_goal_occ" output_key="cfg_err_goal_occ" value="306" />
+              <SetBlackboardUShortAction name="Cfg_err_excc_max_iter" output_key="cfg_err_excc_max_iter" value="307" />
+              <SetBlackboardUShortAction name="Cfg_err_fail_prog" output_key="cfg_err_fail_prog" value="105" />
+            </Sequence>
+            <Wait name="InitialtWait" wait_duration="{cfg_wait_initial}" />
+          </Sequence>  
+        </RunNTimesDecorator>
+        <!-- <Wait name="InitialtWait" wait_duration="{cfg_wait_initial}" /> -->
+
+
+
+
+        <SubTree name="SelectPlugins" ID="SelectPluginsSubtree" _autoremap="true" />
+        <!-- <RemovePassedGoals name="CullPassedGoals" input_goals="{goals}" output_goals="{goals}"
+          radius="{cfg_remove_passed_radius}" /> -->
+        
+
+        <RateController name="ReplanGateRate" hz="{cfg_replan_hz}">
+          <Sequence name="SetReplanOrReuse">
+            <!-- <UnsetBlackboard name="Unset_compute_path_error_code" key="compute_path_error_code" /> -->
+            <SetBlackboardUShortAction name="set_compute_path_error_code" output_key="compute_path_error_code" value="0" /> 
+            <SubTree name="ReplanOrReuse" ID="ReplanOrReusePathSubtree2" _autoremap="true" />
+            <!-- <LogTextAction name="test_plan1" message="#################ReplanOrReusePathSubtree2 #########" interval_s="0.0" /> -->
+          </Sequence>
+        </RateController>
+
+        <RemovePassedGoals name="CullPassedGoals" input_goals="{goals}" output_goals="{goals}"
+          radius="{cfg_remove_passed_radius}" />   
+        <!-- <RemovePassedGoalAction name="CullPassedGoal" input_goals="{goals}" output_goals="{goals}"
+          radius="{cfg_remove_passed_radius}" />          -->
+        
+        <PublishRemainingGoalsAction 
+              input_goals="{goals}" 
+              topic_name="/remaining_goals" 
+              publish_interval="0.2" />
+
+        <!-- <LogTextAction name="test_plan2" message="#################PublishRemainingGoalsAction #########" interval_s="0.0" /> -->
+
+        <Sequence>
+          <!-- <UnsetBlackboard name="Unset_follow_path_error_code" key="follow_path_error_code" /> -->
+          <SetBlackboardUShortAction name="set_follow_path_error_code" output_key="follow_path_error_code" value="0" /> 
+          <SubTree name="FollowWithPauseAndRecovery" ID="FollowWithPauseAndRecoverySubtree" _autoremap="true" />
+        </Sequence>
+      </PipelineSequence>
+      <Sequence>
+        <!-- [moduler33 관제 우선 09-29 · RecoveryEntry] 관제 pause 동안에는 회복(IntelligentRecovery)에 들어가지 않는다.
+             회복에는 goal 제거(RemovePassedGoalsCustom·RemoveFirstGoals), costmap clear, maneuver 가 있다 —
+             관제가 붙잡은 명령을 하위 레이어가 바꾸면 안 된다. pause 동안 RUNNING, resume 되면 SUCCESS 로 회복을 시작한다.
+             - 들어갈 때만 막는다(비반응형 Sequence 의 첫 자식). 이미 돌던 회복을 도중에 halt 하지 않는 이유:
+               ProgressAwareRoundRobinControl 은 halt 되면 순번을 0 으로 되돌려 회복 순서가 처음부터 다시 돈다.
+               회복 안의 maneuver 는 ManeuverSubtree 의 HoldWhileServerPaused 가 이미 관제 pause 로 붙잡는다.
+             - ReactiveFallback: 관제 pause 아님 → Inverter SUCCESS → 즉시 통과. pause 면 KeepRunningUntilFailure 가 RUNNING. -->
+        <ReactiveFallback name="RecoveryEntryOperatorPauseGate">
+          <Inverter name="NotOperatorPaused_Recovery">
+            <CheckFlagCondition name="OperatorPauseFlag_Recovery" flag_topic="/nav_pause_flag"
+              latch="true" transient_local="true" node="{node}" />
+          </Inverter>
+          <KeepRunningUntilFailure name="HoldRecoveryWhileOperatorPaused">
+            <Sequence name="OperatorPausedNoRecovery">
+              <CheckFlagCondition name="OperatorPauseFlag_RecoveryHold" flag_topic="/nav_pause_flag"
+                latch="true" transient_local="true" node="{node}" />
+              <LogTextAction name="OperatorPausedNoRecoveryLog"
+                message="[OP PAUSE] 관제 pause 중 — 회복(goal 제거·maneuver) 진입 보류" interval_s="5.0" />
+            </Sequence>
+          </KeepRunningUntilFailure>
+        </ReactiveFallback>
+        <ForceSuccess>
+          <SubTree name="IntelligentRecovery" ID="IntelligentRecoverySubtree" _autoremap="true" />
+        </ForceSuccess>
+        
+        <Sequence name= "ResetAfterRecovery">
+          <SetBlackboardUShortAction name="set_compute_path_error_code" output_key="compute_path_error_code" value="0" /> 
+          <SetBlackboardUShortAction name="set_follow_path_error_code" output_key="follow_path_error_code" value="0" /> 
+          <ControllerSelector name="SelectController_Reset"
+            selected_controller="{selected_controller}" default_controller="{cfg_def_controller}"
+            topic_name="controller_selector" />
+          <PlannerSelector name="SelectPlanner_Reset" selected_planner="{selected_planner}"
+            default_planner="{cfg_def_planner}" topic_name="planner_selector" />
+          <LogTextAction name="ResetWaitLog" message="ResetWait Starting..." interval_s="0.0" />
+          <Wait name="ResetWait" wait_duration="{cfg_wait_default}" />
+          <UnsetBlackboard name="Unset_path" key="path" />
+
+          <UnsetBlackboard name="Unset_priv_few_goals_M" key="few_goals" />
+          <UnsetBlackboard name="Unset_priv_alt_path_M" key="alt_path" />
+          <UnsetBlackboard name="Unset_priv_short_path_M" key="short_path" />
+          <UnsetBlackboard name="Unset_priv_alt_goal_M" key="alt_goal" />
+          
+          <!-- <BoolPublisherAction topic_name="/request_replan" message="true" num_publishes="1" node="{node}"/> -->
+        </Sequence>
+        <LogTextAction name="RecoverySequenceDone" message="RecoverySequenceDone..." interval_s="0.0" />
+      </Sequence>
+    </RecoveryNode>
+    </ReactiveFallback>
+  </BehaviorTree>
+</root>

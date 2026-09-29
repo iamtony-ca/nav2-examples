@@ -97,7 +97,7 @@ private:
 
   bool isBlockedCellKernel(unsigned int mx, unsigned int my) const;
 
-  void validateWithFootprint(const std::vector<geometry_msgs::msg::PoseStamped> & gpath);
+  // void validateWithFootprint(const std::vector<geometry_msgs::msg::PoseStamped> & gpath);
   void validateWithPoints(const std::vector<geometry_msgs::msg::PoseStamped> & gpath);
   void validatePathOptimized(const std::vector<geometry_msgs::msg::PoseStamped> & gpath, const geometry_msgs::msg::Pose& target_goal, bool is_last_goal); // [NEW] bool 인자 추가
 

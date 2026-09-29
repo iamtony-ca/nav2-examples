@@ -33,7 +33,6 @@ ament_target_dependencies(
   velocity_modifier_node
   rclcpp
   geometry_msgs
-  std_msgs
   robot_interfaces
   rosidl_default_runtime
 )

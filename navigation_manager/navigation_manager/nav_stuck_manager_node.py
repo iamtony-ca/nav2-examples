@@ -8,7 +8,8 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from geometry_msgs.msg import PoseStamped
-from std_msgs.msg import String, UInt8
+from std_msgs.msg import String, UInt8, Bool
+from rclpy.qos import QoSProfile, HistoryPolicy, DurabilityPolicy
 from rcl_interfaces.msg import ParameterDescriptor, ParameterType
 
 
@@ -42,6 +43,10 @@ class StuckManagerNode(Node):
         self.is_tracking = False
         self.reference_pose = None
         self.reference_time = None
+        # [09-28 관제 우선] 관제 pause(/nav_pause_flag) 동안은 무진전 시계를 멈춘다 (사용자 결정).
+        # fleet 자체 pause(controller_pause_flag)는 이 플래그를 올리지 않으므로 지금처럼 센다.
+        self.nav_paused = False
+        self.nav_pause_since = None
 
         # Callback Groups (멀티스레드 병렬 처리용)
         self.status_cb_group = MutuallyExclusiveCallbackGroup()
@@ -63,6 +68,19 @@ class StuckManagerNode(Node):
             callback_group=self.pose_cb_group
         )
         self.pub_stop = self.create_publisher(UInt8, 'stop_command', 10)
+        # navigation_manager 가 TRANSIENT_LOCAL·depth 1 로 발행한다 — 늦게 붙어도 현재 pause 상태를 받는다.
+        qos_nav_pause = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.sub_nav_pause = self.create_subscription(
+            Bool,
+            '/nav_pause_flag',
+            self.nav_pause_callback,
+            qos_nav_pause,
+            callback_group=self.status_cb_group
+        )
 
         self.get_logger().info(
             f'Stuck Detector Initialized. '
@@ -89,6 +107,33 @@ class StuckManagerNode(Node):
                     self.reference_pose = None
                     self.reference_time = None
 
+    PAUSE_LOG_MIN_SEC = 5.0          # [09-28 미결 4 초안] 이보다 짧은 관제 pause 의 시계 정지·해제는 DEBUG 로만 남긴다
+
+    def nav_pause_callback(self, msg: Bool):
+        """[09-28] 관제 pause 동안 시계를 멈추고, 해제되면 pause 길이만큼 기준 시각을 뒤로 민다."""
+        paused = bool(msg.data)
+        with self.state_lock:
+            if paused == self.nav_paused:
+                return
+            now = self.get_clock().now()
+            self.nav_paused = paused
+            if paused:
+                self.nav_pause_since = now
+                # [09-28 미결 4 초안] 교차로 흐름제어의 짧은 pause(0.1~1 s)도 같은 경로라 교차로마다 두 줄씩 남았다.
+                # 시작은 DEBUG 로, 해제 줄에서 길이가 PAUSE_LOG_MIN_SEC 이상일 때만 INFO 로 남긴다 (동작은 같다).
+                self.get_logger().debug('관제 pause: 무진전 시계를 멈춥니다.')
+                return
+            since, self.nav_pause_since = self.nav_pause_since, None
+            if since is not None and self.reference_time is not None:
+                paused_dur = now - since
+                self.reference_time = self.reference_time + paused_dur
+                sec = paused_dur.nanoseconds / 1e9
+                line = f'관제 pause 해제: {sec:.1f}초를 빼고 이어서 셉니다.'
+                if sec >= self.PAUSE_LOG_MIN_SEC:
+                    self.get_logger().info(line)
+                else:
+                    self.get_logger().debug(line)
+
     def pose_callback(self, msg: PoseStamped):
         """실시간 Pose를 받아 이동 거리를 계산하고 Timeout을 판별합니다."""
         
@@ -105,6 +150,10 @@ class StuckManagerNode(Node):
                 return
 
             current_pose = msg.pose
+
+            # [09-28] 관제 pause 중에는 판정하지 않는다 (시계는 해제 때 이어서 센다)
+            if self.nav_paused:
+                return
 
             if self.reference_pose is None or self.reference_time is None:
                 self.reference_pose = current_pose

@@ -1,3 +1,4 @@
+import copy
 import os
 import yaml
 import tempfile
@@ -14,18 +15,27 @@ def replace_keys_recursively(data, rewrites):
                 data[k] = rewrites[k]  # 값 덮어쓰기 (타입 완벽 보존)
             elif isinstance(v, dict):
                 replace_keys_recursively(v, rewrites)
+        # [FIX CFG-1] 위 루프는 params 에 **이미 있는** 키만 덮어쓴다. 그래서
+        # common_ammr.yaml 에 로봇을 추가해도 params 에 자리(블록)가 없는 로봇은
+        # 빠졌다 (22대 등록 → 6대만 반영, 나머지는 machine_id 0). robot_ids 를 가진
+        # 노드 아래에는 목록의 모든 로봇 블록을 보장해서 common_ammr.yaml 이 실제로
+        # 단일 소스가 되게 한다. params 파일의 기존 블록은 죽은 기본값으로 남는다.
+        if 'robot_ids' in data:
+            for bot_id in rewrites.get('robot_ids') or []:
+                if bot_id in rewrites and rewrites[bot_id] is not None:
+                    data[bot_id] = copy.deepcopy(rewrites[bot_id])
 
 def generate_launch_description():
     replan_dir = get_package_share_directory('replan_monitor')
-    fleet_config_dir = get_package_share_directory('amr_fleet_config')
+    fleet_config_dir = get_package_share_directory('ammr_common_config')
     
     # 1. 공통 YAML 읽기
-    with open(os.path.join(fleet_config_dir, 'config', 'common_fleet.yaml'), 'r') as f:
+    with open(os.path.join(fleet_config_dir, 'config', 'common_ammr.yaml'), 'r') as f:
         common_data = yaml.safe_load(f)['common_settings']
 
     # 2. 덮어쓸 파라미터 딕셔너리 (문자열 변환 없이 파이썬 타입 그대로 유지!)
     fleet_rewrites = {
-        'self_machine_id': common_data['machine_id'],
+        'self_machine_id': common_data['my_machine_id'],
         'robot_ids': common_data['robot_ids']
     }
     for bot_id in common_data['robot_ids']:

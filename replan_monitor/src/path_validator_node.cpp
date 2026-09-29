@@ -538,6 +538,30 @@ void PathValidatorNode::robotStatusCallback(const std_msgs::msg::String::SharedP
     ready_escape_logged_.store(false);
   }
 
+  // [09-29 D1-ⓒ] RECOVERY_* 로 들어가는 순간 저장해 둔 경로를 버린다.
+  //   BT 가 recovery 에 들어가면 주행 루프는 /plan_truncated_short 를 더 내지 않는데, 예전에는 RECOVERY_* 를 활성 상태로 보아
+  //   pause 직전의 옛 경로를 계속 검사했다. 그 HIT 가 fleet static pause 를 붙들고, fleet pause 는 BT recovery maneuver
+  //   (새 짧은 경로를 같은 토픽으로 낸다)를 "Recovery held by fleet" 로 붙잡는 순환이 생겼다
+  //   (sim L5m_grid r3 09-29 06:26~06:29: 교차로 안쪽 벽 모서리 HIT 179회 → 10/10 관제 보고).
+  //   버린 뒤에는 recovery maneuver 가 내는 새 경로를 다시 검사한다 (막히면 그때 다시 HIT).
+  {
+    auto is_recovery = [](const std::string & x) { return x.rfind("RECOVERY_", 0) == 0; };
+    if (is_recovery(s) && !is_recovery(last_robot_status_)) {
+      bool had_path = false;
+      {
+        std::lock_guard<std::mutex> lock(path_mutex_);
+        had_path = !latest_global_path_.empty();
+        latest_global_path_.clear();
+      }
+      if (had_path) {
+        RCLCPP_INFO(this->get_logger(),
+          "[Validator] %s -> %s: recovery 진입, 저장된 옛 경로를 버린다 (recovery 경로가 오면 다시 검사)",
+          last_robot_status_.c_str(), s.c_str());
+      }
+    }
+    last_robot_status_ = s;
+  }
+
 // 다른 상태(IDLE, CHARGING 등 미션 완전히 종료/대기)인 경우 데이터 초기화
   if (!valid_state) {
     {

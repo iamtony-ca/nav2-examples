@@ -3,13 +3,13 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/twist.hpp>
-#include <robot_interfaces/msg/modifier_control.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <robot_interfaces/msg/modifier_control.hpp>
 
 #include <mutex> // <atomic> 대신 <mutex>를 포함
 #include <limits>
 #include <memory>
-#include <cmath>
+#include <cmath>  // for std::adb, std::copysign
 
 namespace velocity_modifier
 {
@@ -18,7 +18,7 @@ class VelocityModifierNode : public rclcpp::Node
 {
 public:
   using ModifierControl = robot_interfaces::msg::ModifierControl;
-  using String = std_msgs::msg::String;
+  using String = std_msgs::msg::String; // 타입 별칭 추가
 
   explicit VelocityModifierNode(const rclcpp::NodeOptions & options);
 
@@ -40,13 +40,14 @@ private:
   std::mutex data_mutex_;
 
   // 일반 멤버 변수
-  double speed_limit_linear_ = std::numeric_limits<double>::max();
-  double speed_limit_angular_ = std::numeric_limits<double>::max();
-  double speed_scale_ = 1.0;
+  double speed_limit_linear_;
+  double speed_limit_angular_;
+  double speed_scale_;
+
 
   // 새로운 모드를 위한 변수
-  double ratio_limit_linear_ = std::numeric_limits<double>::max();
-  double ratio_limit_angular_ = std::numeric_limits<double>::max();
+  double ratio_limit_linear_;
+  double ratio_limit_angular_;
 
   // 어떤 모드가 활성화되었는지 나타내는 Enum
   enum class SpeedMode {
@@ -54,16 +55,14 @@ private:
     STANDARD_SCALE,
     RATIO_LIMIT_SCALE
   };
-  SpeedMode current_mode_ = SpeedMode::STANDARD_LIMIT;  
+  SpeedMode current_mode_ = SpeedMode::STANDARD_LIMIT;
 
 
-  double min_abs_linear_vel_ = 0.05;
-  double min_abs_angular_vel_ = 0.05;
-  
-  // 비율 보정 시 적용될 상한선 
-  double ratio_scaling_max_linear_vel_ = 0.35;
-  double ratio_scaling_max_angular_vel_ = 0.25;
-  
+  double min_abs_linear_vel_;
+  double min_abs_angular_vel_;
+  double ratio_scaling_max_linear_vel_;
+  double ratio_scaling_max_angular_vel_;
+
   bool recovery_mode_ = false;
 
 };

@@ -23,6 +23,15 @@ def replace_keys_recursively(data, rewrites):
                 data[k] = copy.deepcopy(rewrites[k])
             elif isinstance(v, dict):
                 replace_keys_recursively(v, rewrites)
+        # [FIX CFG-1] 위 루프는 params 에 **이미 있는** 키만 덮어쓴다. 그래서
+        # common_ammr.yaml 에 로봇을 추가해도 params 에 자리(블록)가 없는 로봇은
+        # 빠졌다 (22대 등록 → 6대만 반영, 나머지는 machine_id 0). robot_ids 를 가진
+        # 노드 아래에는 목록의 모든 로봇 블록을 보장해서 common_ammr.yaml 이 실제로
+        # 단일 소스가 되게 한다. params 파일의 기존 블록은 죽은 기본값으로 남는다.
+        if 'robot_ids' in data:
+            for bot_id in rewrites.get('robot_ids') or []:
+                if bot_id in rewrites and rewrites[bot_id] is not None:
+                    data[bot_id] = copy.deepcopy(rewrites[bot_id])
 
 
 def _overlay_and_include(context, *args, **kwargs):

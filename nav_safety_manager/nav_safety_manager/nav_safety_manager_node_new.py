@@ -6,6 +6,8 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.task import Future
 
 # 메시지 및 서비스 임포트
+from rcl_interfaces.srv import SetParameters
+from rclpy.parameter import Parameter
 from std_msgs.msg import Bool, String
 from std_srvs.srv import SetBool  # 요청을 위해 SetBool 사용 (data=True/False)
 from safety_plc_monitoring_msgs.msg import SafetyPlcMonitoring
@@ -26,19 +28,24 @@ class NavSafetyManagerNode(Node):
     def __init__(self):
         super().__init__('nav_safety_manager_node')
 
-        # --- declare ---
+        # 설정 변수 (N초, M초)
         self.declare_parameter('plc_false_duration_sec', 5.0)
         self.declare_parameter('collision_clear_duration_sec', 3.0)
         self.declare_parameter('target_polygon_name', 'PolygonSafety')
-        self.declare_parameter('verify_max_retry', 3)
-        self.declare_parameter('verify_settle_sec', 1.0)
-        
-        # --- get ---
+
         self.N_sec = self.get_parameter('plc_false_duration_sec').value
         self.M_sec = self.get_parameter('collision_clear_duration_sec').value
         self.target_polygon = self.get_parameter('target_polygon_name').value
-        self.max_retry = self.get_parameter('verify_max_retry').value
-        self.verify_settle_sec = self.get_parameter('verify_settle_sec').value
+
+        # footprint_padding 토글용
+        self.declare_parameter('local_costmap_node', '/local_costmap/local_costmap')
+        self.declare_parameter('narrow_footprint_padding', 0.005)  # 영역 축소 시
+        self.declare_parameter('normal_footprint_padding', 0.01)   # 영역 원복 시
+
+        self.local_costmap_node = self.get_parameter('local_costmap_node').value
+        self.narrow_padding = self.get_parameter('narrow_footprint_padding').value
+        self.normal_padding = self.get_parameter('normal_footprint_padding').value
+
 
         # 동시성 처리를 위한 그룹
         self.cb_group = ReentrantCallbackGroup()
@@ -93,21 +100,19 @@ class NavSafetyManagerNode(Node):
             callback_group=self.cb_group
         )
 
+        # footprint_padding 용 SetParameters client (SetArea와 별개)
+        self.padding_cli = self.create_client(
+            SetParameters,
+            f'{self.local_costmap_node}/set_parameters',
+            callback_group=self.cb_group
+        )
+
+
         # 내부 상태 변수
         self.latest_plc_data = None
         self.latest_collision_msg = None
         self.latest_nav_status = None
-        # (변경) range1~range8 최신값을 리스트로 보관 (데이터 없으면 None)
-        self.narrow_status = None
-        
-        # (추가) set_area 결과 기대 패턴 [range1, range2, ..., range8]
-        self.EXPECTED_RANGES = {
-            0: [True,  False, True,  False, True,  False, False, True ],  # set_area(0)
-            1: [False, True,  False, True,  False, True,  True,  False],  # set_area(1)
-        }
-        # sanity check: 두 패턴은 서로 정확히 반전 관계여야 함
-        assert self.EXPECTED_RANGES[0] == [not x for x in self.EXPECTED_RANGES[1]]
-        
+        self.narrow_status = False
 
         # 상태 머신 제어 변수
         self.current_phase = 0 
@@ -119,37 +124,29 @@ class NavSafetyManagerNode(Node):
         self.state_start_time = None
         self.service_future = None # 서비스 중복 호출 방지
 
-        
-        # (추가) 반영 검증 상태
-        self.verifying = False
-        self.pending_req_value = None   # 마지막으로 요청한 값(0 또는 1)
-        self.verify_start_time = None
-        self.retry_count = 0
-      
 
-                # (변경) 선언된 파라미터 전체 로깅
-        self.get_logger().info('===== NavSafetyManagerNode Parameters =====')
-        self.get_logger().info(f'  plc_false_duration_sec      : {self.N_sec}s')
-        self.get_logger().info(f'  collision_clear_duration_sec: {self.M_sec}s')
-        self.get_logger().info(f'  target_polygon_name         : {self.target_polygon}')
-        self.get_logger().info(f'  verify_max_retry            : {self.max_retry}')
-        self.get_logger().info(f'  verify_settle_sec           : {self.verify_settle_sec}s')
-        self.get_logger().info('===========================================')
+        # ==================== 시작 시 전체 파라미터 로깅 ====================
+        self.get_logger().info(
+            '\n'
+            '==================== NavSafetyManager Params ====================\n'
+            f'  plc_false_duration_sec       : {self.N_sec} s\n'
+            f'  collision_clear_duration_sec : {self.M_sec} s\n'
+            f'  target_polygon_name          : {self.target_polygon}\n'
+            f'  local_costmap_node           : {self.local_costmap_node}\n'
+            f'  narrow_footprint_padding     : {self.narrow_padding} m\n'
+            f'  normal_footprint_padding     : {self.normal_padding} m\n'
+            '================================================================='
+        )
 
     # =========================================
     # 1. Data Callbacks (데이터 갱신만 담당)
     # =========================================
     def plc_callback(self, msg):
-        if (msg.protective_front is False) or (msg.protective_rear is False):
+        if (msg.protective_front is False) or (msg.protective_rear is False) :
             self.latest_plc_data = False
-        else:
+        else :
             self.latest_plc_data = True
-    
-        # (변경) range1~range8 전체를 리스트로 저장
-        self.narrow_status = [
-            msg.range1, msg.range2, msg.range3, msg.range4,
-            msg.range5, msg.range6, msg.range7, msg.range8,
-        ]
+        self.narrow_status = msg.range1
 
 
     def collision_callback(self, msg):
@@ -165,25 +162,13 @@ class NavSafetyManagerNode(Node):
     # =========================================
     def control_loop(self):
         # 서비스 호출 중이면 로직 일시 중지 (순차 처리 보장)
-        # 1) 서비스 응답 처리 -> 성공 시 '반영 검증' 단계 진입
         if self.service_future is not None:
             if self.service_future.done():
-                ok = self.handle_service_result(self.service_future)
+                self.handle_service_result(self.service_future)
                 self.service_future = None
-                if ok and self.pending_req_value is not None:
-                    self.verifying = True
-                    self.verify_start_time = self.get_clock().now()
-                elif not ok:
-                    self._retry_or_giveup()   # 서비스 콜 자체 실패 -> 재시도
-                return                        # (변경) 이번 틱 종료, 검증 우선
             else:
-                self.get_logger().warn('Waiting for Service...', throttle_duration_sec=2.0)
-                return
-    
-        # 2) (추가) 반영 검증 단계 — nav 상태와 무관하게 수행
-        if self.verifying:
-            self._verify_loop()
-            return
+                self.get_logger().warn('Service Server Status unknown. Waiting for Service...', throttle_duration_sec=2.0)
+                return # 응답 대기 중
 
 
         # 네비게이션 상태에 따른 로직 분기
@@ -193,9 +178,14 @@ class NavSafetyManagerNode(Node):
                 #     self.send_async_request(1) # Service Request False -> large area
                 # elif self.narrow_status == False :
                 #     # 네비게이션이 비활성 상태일 때는 PLC 모니터링만 수행
+                #     self.get_logger().info(f'Nav Status: {self.latest_nav_status}. Only monitoring PLC.', throttle_duration_sec=2.0)
+                #     self.current_phase = 0 # PLC 모니터링 단계로 리셋
+                #     self.state_start_time = None # 타이머 초기화
+
+                # 네비게이션이 비활성 상태일 때는 PLC 모니터링만 수행
                 self.get_logger().info(f'Nav Status: {self.latest_nav_status}. Only monitoring PLC.', throttle_duration_sec=2.0)
                 self.current_phase = 0 # PLC 모니터링 단계로 리셋
-                self.state_start_time = None # 타이머 초기화
+                self.state_start_time = None # 타이머 초기화                
                 return
         elif self.latest_nav_status is None:
             # 네비게이션 상태 정보가 없으면 로직 진행하지 않음
@@ -215,8 +205,10 @@ class NavSafetyManagerNode(Node):
                 # 시간 체크
                 elapsed = (self.get_clock().now() - self.state_start_time).nanoseconds / 1e9
                 if elapsed >= self.N_sec:
-                    self.get_logger().warn(f'[Phase 0] PLC False for {self.N_sec}s! Requesting Service TRUE.')
+                    self.get_logger().warn(f'[Phase 0] PLC False for {self.N_sec}s! Requesting Service TRUE. Decreasing PLC Area')
                     self.send_async_request(0) # Service Request True
+                    self.set_local_padding(self.narrow_padding)   # 0.005
+
                     self.current_phase = 1 # 다음 단계로
                     self.state_start_time = None # 타이머 초기화
             else:
@@ -249,8 +241,9 @@ class NavSafetyManagerNode(Node):
                 
                 elapsed = (self.get_clock().now() - self.state_start_time).nanoseconds / 1e9
                 if elapsed >= self.M_sec:
-                    self.get_logger().info(f'[Phase 2] Safety Cleared for {self.M_sec}s! Requesting Service FALSE.')
+                    self.get_logger().info(f'[Phase 2] Safety Cleared for {self.M_sec}s! Requesting Service FALSE. Increasing PLC Area')
                     self.send_async_request(1) # Service Request False
+                    self.set_local_padding(self.normal_padding)   # 0.01
                     self.current_phase = 0 # 처음으로 리셋
                     self.state_start_time = None
             else:
@@ -302,19 +295,11 @@ class NavSafetyManagerNode(Node):
 
         req = SetArea.Request()
         req.input = req_data
-        self.pending_req_value = req_data        # (추가) 검증 기준값 저장
-      
         
         self.get_logger().info(f'Sending Service Request: {req_data}')
-        if req_data == 0:
-          self.get_logger().info(f'Sending Service Request: Set Narrow')
-        elif req_data == 1:
-          self.get_logger().info(f'Sending Service Request: Clear Narrow')
         self.service_future = self.cli.call_async(req)
         # 콜백은 control_loop에서 future.done()으로 확인합니다.
 
-
-  
     def handle_service_result(self, future):
         """
         서비스 응답 처리
@@ -323,63 +308,40 @@ class NavSafetyManagerNode(Node):
             response = future.result()
             # self.get_logger().info(f'[Result] Service success: {response.success}, Msg: {response.message}')
             self.get_logger().info(f'[Result] Service success: {response.output}')
-            return True
         except Exception as e:
             self.get_logger().error(f'[Result] Service call failed: {e}')
-            return False
 
-
-    def _verify_loop(self):
-        """range1~range8가 기대 패턴으로 바뀌었는지 검증. 미반영이면 재시도."""
-        # range 갱신까지 settle 시간 대기
-        elapsed = (self.get_clock().now() - self.verify_start_time).nanoseconds / 1e9
-        if elapsed < self.verify_settle_sec:
+    def set_local_padding(self, value: float):
+        """local_costmap의 footprint_padding 을 동적으로 변경 (비동기, 독립 future)."""
+        if not self.padding_cli.wait_for_service(timeout_sec=1.0):
+            self.get_logger().warn('local_costmap set_parameters service not available!')
             return
-    
-        # (변경) PLC 데이터가 아직 없으면 비교하지 않고 대기 (재시도 횟수 낭비 방지)
-        if self.narrow_status is None:
-            self.get_logger().warn('[Verify] PLC range 데이터 수신 대기 중...',
-                                   throttle_duration_sec=2.0)
-            return
-    
-        expected = self.EXPECTED_RANGES[self.pending_req_value]
-        actual = self.narrow_status   # = [range1..range8]
-    
-        if actual == expected:
-            self.get_logger().info(
-                f'[Verify] set_area({self.pending_req_value}) 반영 확인 '
-                f'(ranges={actual})')
-            self._finish_verify(success=True)
-        else:
-            self.get_logger().warn(
-                f'[Verify] 미반영 (ranges={actual}, 기대={expected})')
-            self._retry_or_giveup()
 
-    
-    
-    def _retry_or_giveup(self):
-        """검증 실패/서비스 실패 시 N회까지 동일 값 재전송, 초과 시 포기."""
-        if self.retry_count < self.max_retry:
-            self.retry_count += 1
-            self.get_logger().warn(
-                f'[Verify] set_area({self.pending_req_value}) 재시도 '
-                f'{self.retry_count}/{self.max_retry}')
-            self.verify_start_time = self.get_clock().now()   # settle 재적용
-            self.send_async_request(self.pending_req_value)   # 동일 값 재전송
-            # future가 생성되면 다음 틱 control_loop 상단 가드가 다시 처리
+        param = Parameter(
+            name='footprint_padding',          # local_costmap 노드의 top-level param
+            type_=Parameter.Type.DOUBLE,
+            value=float(value),
+        )
+        req = SetParameters.Request()
+        req.parameters = [param.to_parameter_msg()]
+
+        future = self.padding_cli.call_async(req)
+        future.add_done_callback(
+            lambda f: self._on_padding_done(f, value)
+        )
+
+    def _on_padding_done(self, future, value: float):
+        try:
+            response = future.result()
+        except Exception as e:
+            self.get_logger().error(f'footprint_padding set failed: {e}')
+            return
+
+        if response.results and response.results[0].successful:
+            self.get_logger().info(f'local_costmap footprint_padding -> {value:.3f}')
         else:
-            self.get_logger().error(
-                f'[Verify] set_area({self.pending_req_value}) '
-                f'{self.max_retry}회 재시도 후 반영 실패. 포기.')
-            self._finish_verify(success=False)
-    
-    
-    def _finish_verify(self, success: bool):
-        self.verifying = False
-        self.verify_start_time = None
-        self.retry_count = 0
-        self.pending_req_value = None
-        # if not success:  # 필요 시 알람/상태 롤백 훅을 여기에
+            reason = response.results[0].reason if response.results else 'empty response'
+            self.get_logger().error(f'footprint_padding set rejected: {reason}')
 
 
 

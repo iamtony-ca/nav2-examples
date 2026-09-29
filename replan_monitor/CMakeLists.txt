@@ -1,13 +1,15 @@
 cmake_minimum_required(VERSION 3.8)
 project(replan_monitor)
 
-# ── C++17 & warnings ────────────────────────────────────────────────
+# ---------- C++ 표준 ----------
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
 endif()
+
+# ---------- 경고 옵션 (선택) ----------
 add_compile_options(-Wall -Wextra -Wpedantic)
 
-# ── Dependencies ───────────────────────────────────────────────────
+# ---------- ROS2 의존성 ----------
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -18,64 +20,84 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
-find_package(multi_agent_msgs REQUIRED)
-# find_package(nav2_common REQUIRED)
-# (nav2_common, launch, launch_ros는 여기선 필요X)
+find_package(nav2_common REQUIRED)
+find_package(robot_interfaces REQUIRED)
 
-# ── Exports (라이브러리 배포 시 권장) ─────────────────────────────
-ament_export_include_directories(include)
-ament_export_dependencies(
-  rclcpp std_msgs nav_msgs geometry_msgs
-  tf2 tf2_ros tf2_geometry_msgs nav2_msgs nav2_costmap_2d 
+# launch 패키지는 실행 파일이 아니라 launch 파일을
+# share 디렉터리에 복사하기 위해 필요.
+# find_package(launch REQUIRED)
+# find_package(launch_ros REQUIRED)
+
+# ---------- 헤더 디렉터리 ----------
+include_directories(
+  include
 )
 
-# ── Include dirs ───────────────────────────────────────────────────
-include_directories(include)
-
-# ── (옵션) 기존 replan_monitor_node 라이브러리 ────────────────────
-# 실제로 사용하는 소스가 있을 때만 유지하세요. 없으면 이 블록 통째로 제거.
+# -------------------------------------------------------------
+#  1) 공통 라이브러리 (replan_monitor_node)
+# -------------------------------------------------------------
 add_library(replan_monitor_node SHARED
   src/replan_monitor_node.cpp
 )
-ament_target_dependencies(replan_monitor_node
-  rclcpp std_msgs nav_msgs geometry_msgs nav2_costmap_2d tf2_ros
-)
+
 target_include_directories(replan_monitor_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 
-# ── (옵션) 기존 main ───────────────────────────────────────────────
-add_executable(replan_monitor_main
-  src/main.cpp
-)
-target_link_libraries(replan_monitor_main
-  replan_monitor_node
-)
-ament_target_dependencies(replan_monitor_main
-  rclcpp std_msgs nav_msgs geometry_msgs nav2_costmap_2d tf2_ros
+ament_target_dependencies(replan_monitor_node
+  rclcpp
+  std_msgs
+  nav_msgs
+  geometry_msgs
+  nav2_costmap_2d
 )
 
-# ── path_validator_node ────────────────────────────────────────────
+# -------------------------------------------------------------
+#  2) 실행 파일 : replan_monitor_main
+#    - 위 라이브러리를 링크
+# -------------------------------------------------------------
+add_executable(replan_monitor_main src/main.cpp)
+
+target_link_libraries(replan_monitor_main
+  replan_monitor_node   # 라이브러리 연결
+)
+
+ament_target_dependencies(replan_monitor_main
+  rclcpp
+  std_msgs
+  nav_msgs
+  geometry_msgs
+  nav2_costmap_2d
+  nav2_msgs
+)
+
+# -------------------------------------------------------------
+#  3) 실행 파일 : path_validator_node
+#    - 자체 소스 (두 파일) 로 빌드
+# -------------------------------------------------------------
 add_executable(path_validator_node
   src/path_validator_node.cpp
   src/path_validator_main.cpp
 )
+
 ament_target_dependencies(path_validator_node
   rclcpp
-  nav_msgs
   std_msgs
+  nav_msgs
   geometry_msgs
   tf2
   tf2_ros
   tf2_geometry_msgs
   nav2_msgs
   nav2_costmap_2d
-  multi_agent_msgs
+  robot_interfaces
 )
 
-# ── Install ────────────────────────────────────────────────────────
-# 주의: RUNTIME은 "실행 파일" 경로입니다. (주석 수정)
+# -------------------------------------------------------------
+#  설치 (install) 설정
+# -------------------------------------------------------------
+# 라이브러리와 실행 파일 모두 lib/에 배치
 install(TARGETS
   replan_monitor_node
   replan_monitor_main
@@ -85,10 +107,12 @@ install(TARGETS
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
+# 헤더 파일 설치
 install(DIRECTORY include/
-  DESTINATION include/
+  DESTINATION include
 )
 
+# launch, config 디렉터리 설치 (옵션)
 install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )
@@ -97,143 +121,5 @@ install(DIRECTORY config
   DESTINATION share/${PROJECT_NAME}
 )
 
+# ament 패키지 선언
 ament_package()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# cmake_minimum_required(VERSION 3.8)
-# project(replan_monitor)
-
-# # ───── Use C++17 standard ─────
-# if(NOT CMAKE_CXX_STANDARD)
-#   set(CMAKE_CXX_STANDARD 17)
-# endif()
-
-# # ───── Dependencies ─────
-# find_package(ament_cmake REQUIRED)
-# find_package(rclcpp REQUIRED)
-# find_package(std_msgs REQUIRED)
-# find_package(nav_msgs REQUIRED)
-# find_package(geometry_msgs REQUIRED)
-# find_package(nav2_costmap_2d REQUIRED)
-# find_package(nav2_common REQUIRED)
-# find_package(tf2 REQUIRED)
-# find_package(tf2_ros REQUIRED)
-# find_package(tf2_geometry_msgs REQUIRED)
-# find_package(nav2_msgs REQUIRED)
-# # find_package(launch REQUIRED)
-# # find_package(launch_ros REQUIRED)
-
-
-# include_directories(include)
-
-# # ───── Build library (replan_monitor_node) ─────
-# add_library(replan_monitor_node SHARED
-#   src/replan_monitor_node.cpp
-# )
-
-# ament_target_dependencies(replan_monitor_node
-#   rclcpp
-#   std_msgs
-#   nav_msgs
-#   geometry_msgs
-#   nav2_costmap_2d
-# )
-
-# target_include_directories(replan_monitor_node PUBLIC
-#   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-#   $<INSTALL_INTERFACE:include>
-# )
-
-# # ───── Build main executable using the library ─────
-# add_executable(replan_monitor_main src/main.cpp)
-
-# # FIXED: link to actual library target name, not project name
-# target_link_libraries(replan_monitor_main
-#   replan_monitor_node
-# )
-
-# ament_target_dependencies(replan_monitor_main
-#   rclcpp
-#   std_msgs
-#   nav_msgs
-#   geometry_msgs
-#   nav2_costmap_2d
-# )
-
-
-# # Executable for path_validator_node
-# add_executable(path_validator_node
-#   src/path_validator_node.cpp
-#   src/path_validator_main.cpp
-# )
-
-# ament_target_dependencies(path_validator_node
-#   rclcpp
-#   nav_msgs
-#   std_msgs
-#   geometry_msgs
-#   tf2
-#   tf2_ros
-#   tf2_geometry_msgs
-#   nav2_msgs
-#   nav2_costmap_2d
-# )
-
-# # install(TARGETS path_validator_node
-# #   RUNTIME DESTINATION lib/${PROJECT_NAME}
-# # )
-
-
-
-
-
-
-
-# # ───── Install targets ─────
-# install(TARGETS
-#   replan_monitor_node
-#   replan_monitor_main
-#   path_validator_node
-#   ARCHIVE DESTINATION lib
-#   LIBRARY DESTINATION lib
-#   RUNTIME DESTINATION lib/${PROJECT_NAME}  # <-- .so 실행 파일
-# )
-
-# # ───── Install headers ─────
-# install(DIRECTORY include/
-#   DESTINATION include)
-
-# # ───── Install launch files (optional) ─────
-# install(DIRECTORY launch
-#   DESTINATION share/${PROJECT_NAME}
-# )
-
-# install(DIRECTORY config
-#   DESTINATION share/${PROJECT_NAME}
-# )
-
-
-# ament_package()

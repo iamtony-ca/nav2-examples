@@ -3,6 +3,7 @@
 #include <nav2_costmap_2d/footprint.hpp>
 
 #include <sstream>
+#include <iomanip> // std::fixed, std::setprecision 사용을 위해 필요할 수 있습니다.
 
 using std::placeholders::_1;
 
@@ -28,7 +29,7 @@ std::vector<geometry_msgs::msg::Point32> PathValidatorNode::toPoint32(
 
 // [NEW] Implementation of helper to get footprint from loaded map
 std::vector<geometry_msgs::msg::Point32> 
-PathValidatorNode::getFootprintForAgent(const multi_agent_msgs::msg::MultiAgentInfo & a) const
+PathValidatorNode::getFootprintForAgent(const robot_interfaces::msg::MultiAgentInfo & a) const
 {
     auto it = agent_footprints_.find(a.machine_id);
     if (it == agent_footprints_.end()) {
@@ -98,6 +99,8 @@ PathValidatorNode::PathValidatorNode()
   // MultiAgent 구독
   this->declare_parameter<std::string>("agents_topic", "/multi_agent_infos");
   this->declare_parameter("agents_freshness_timeout_ms", 800);
+  // [FIX] 이웃 캐시 보존 시간. 병합만 하고 만료가 없으면 떠난 로봇이 영원히 남는다.
+  this->declare_parameter("agent_cache_ttl_sec", 5.0);
   this->declare_parameter("agent_match_dilate_m", 0.1); // 0.05
 
   // Nav2 footprint 스타일
@@ -171,6 +174,7 @@ PathValidatorNode::PathValidatorNode()
 
   agents_topic_               = this->get_parameter("agents_topic").as_string();
   agents_freshness_timeout_ms_= this->get_parameter("agents_freshness_timeout_ms").as_int();
+  agent_cache_ttl_sec_        = this->get_parameter("agent_cache_ttl_sec").as_double();
   agent_match_dilate_m_       = this->get_parameter("agent_match_dilate_m").as_double();
 
   // Nav2 footprint / radius
@@ -292,7 +296,7 @@ PathValidatorNode::PathValidatorNode()
         subs_options);
   }
 
-  agents_sub_ = this->create_subscription<multi_agent_msgs::msg::MultiAgentInfoArray>(
+  agents_sub_ = this->create_subscription<robot_interfaces::msg::MultiAgentInfoArray>(
       agents_topic_,
       rclcpp::QoS(10).best_effort(),
       std::bind(&PathValidatorNode::agentsCallback, this, _1),
@@ -319,11 +323,11 @@ PathValidatorNode::PathValidatorNode()
 
   // ===== Publishers =====
   {
-    static_collision_pub_ = this->create_publisher<multi_agent_msgs::msg::PathStaticCollisionInfo>(
+    static_collision_pub_ = this->create_publisher<robot_interfaces::msg::PathStaticCollisionInfo>(
         "/path_static_collision_info", rclcpp::QoS(10).reliable());
   }
   if (publish_agent_collision_) {
-    agent_collision_pub_ = this->create_publisher<multi_agent_msgs::msg::PathAgentCollisionInfo>(
+    agent_collision_pub_ = this->create_publisher<robot_interfaces::msg::PathAgentCollisionInfo>(
         agent_collision_topic_, rclcpp::QoS(10).reliable());
   }
 
@@ -465,19 +469,47 @@ void PathValidatorNode::agentMaskCallback(const nav2_msgs::msg::Costmap::SharedP
 
 // ===================== Agents handling =====================
 
-void PathValidatorNode::agentsCallback(const multi_agent_msgs::msg::MultiAgentInfoArray::SharedPtr msg)
+void PathValidatorNode::agentsCallback(const robot_interfaces::msg::MultiAgentInfoArray::SharedPtr msg)
 {
   std::lock_guard<std::mutex> lock(agents_mutex_);
   last_agents_ = msg;
   last_agents_stamp_ = msg->header.stamp;
+
+  // [FIX] 통째로 들고 있지 않고 machine_id 별로 누적한다. (agent_cache_ 주석 참고)
+  if (!msg->header.frame_id.empty() && msg->header.frame_id != global_frame_) {
+    return;   // 좌표계가 다르면 받지 않는다 (예전에는 조회 시점에 걸렀다)
+  }
+
+  const rclcpp::Time now = this->now();
+  for (const auto & a : msg->agents) {
+    if (!a.header.frame_id.empty() && a.header.frame_id != global_frame_) continue;
+    agent_cache_[a.machine_id] = a;
+    agent_seen_at_[a.machine_id] = now;
+  }
+
+  // 소식이 끊긴 이웃은 버린다. 병합만 하면 떠난 로봇의 몇 분 전 자세/경로로
+  // 계속 판단하게 되므로, 만료가 병합의 필수 짝이다.
+  for (auto it = agent_seen_at_.begin(); it != agent_seen_at_.end(); ) {
+    if ((now - it->second).seconds() > agent_cache_ttl_sec_) {
+      RCLCPP_WARN(this->get_logger(),
+        "[agents] agent %u 소식 끊김 (%.1fs). 캐시에서 제거한다.",
+        static_cast<unsigned>(it->first), agent_cache_ttl_sec_);
+      agent_cache_.erase(it->first);
+      it = agent_seen_at_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 void PathValidatorNode::robotStatusCallback(const std_msgs::msg::String::SharedPtr msg)
 {
   const std::string & s = msg->data;
   // PLANNING, DRIVING, PAUSED 인 경우에만 충돌 검사를 활성화
-  bool valid_state = (s == "PLANNING" || s == "DRIVING" || s == "PAUSED" || s == "RECEIVED_GOAL" || s == "RECOVERY_FAILURE" || s == "RECOVERY_RUNNING" || s == "RECOVERY_SUCCESS");
+  bool valid_state = (s == "PLANNING" || s == "DRIVING" || s == "PAUSED" || s == "READY" || s == "RECEIVED_GOAL" || s == "RECOVERY_FAILURE" || s == "RECOVERY_RUNNING" || s == "RECOVERY_SUCCESS");
   is_robot_in_driving_state_.store(valid_state);
+  
+  is_robot_in_ready_state_.store(s == "READY");
 
 // 다른 상태(IDLE, CHARGING 등 미션 완전히 종료/대기)인 경우 데이터 초기화
   if (!valid_state) {
@@ -581,7 +613,7 @@ void PathValidatorNode::validatePathOptimized(const std::vector<geometry_msgs::m
   const unsigned char phase1_thr = 253; 
   
   // [Phase 1] 경로 중심선 기준 좌우로 몇 미터까지 훑어볼 것인가? (맨해튼 버퍼)
-  const double phase1_buffer_m = 0.001; //0.1;   
+  const double phase1_buffer_m = 0.001;  //0.1;   
   
   // [Phase 2] 정밀 검사 시 '충돌(Hit)'로 판정할 코스트 (완전한 물리적 충돌: 254 고정)
   const unsigned char phase2_thr = 254; 
@@ -594,7 +626,7 @@ void PathValidatorNode::validatePathOptimized(const std::vector<geometry_msgs::m
 
   // [NEW: Phase 2] 로봇 다각형(Footprint)을 물리적으로 확장할 여유 패딩 (m)
   // 예: 0.02 ~ 0.05를 주면 실제 로봇보다 해당 수치만큼 부풀려진 크기로 충돌을 검사합니다.
-  const double phase2_footprint_padding_m = 0.0001; //0.02; 
+  const double phase2_footprint_padding_m = 0.01; // 0.0001; //0.02; 
 
   // =========================================================
 
@@ -917,12 +949,14 @@ std::vector<PathValidatorNode::AgentHit> PathValidatorNode::findNearestAgent(
 {
   std::vector<AgentHit> out;
   std::lock_guard<std::mutex> lk(agents_mutex_);
-  if (!last_agents_) return out;
+  if (agent_cache_.empty()) return out;   // [FIX] 누적 캐시를 본다
 
   double min_dist_overall = 1e9;
-  const multi_agent_msgs::msg::MultiAgentInfo* true_owner = nullptr;
+  const robot_interfaces::msg::MultiAgentInfo* true_owner = nullptr;
 
-  for (const auto & a : last_agents_->agents) {
+  // [FIX] 맵을 직접 순회한다. 임시 벡터로 복사하면 true_owner 포인터가 매달린다.
+  for (const auto & kv : agent_cache_) {
+    const auto & a = kv.second;
     if (a.machine_id == self_machine_id_) continue;
 
     // 1. 현재 위치 거리
@@ -1210,6 +1244,89 @@ void PathValidatorNode::validationTimerCallback()
     return; // 남은 Goal이 없으면 검사 스킵
   }
 
+
+
+
+  // =========================================================
+  // [NEW] READY 상태 전용 로직: 경로(gpath) 없이 '모든' 타겟 Goal 점유 여부 검사
+  // =========================================================
+  if (is_robot_in_ready_state_.load()) {
+    geometry_msgs::msg::Pose cur_pose;
+    if (!getCurrentPoseFromTF(cur_pose)) return;
+
+    bool is_any_goal_occupied = false;
+    bool is_agent = false;
+    bool is_occupied_goal_last = false;
+    geometry_msgs::msg::Pose occupied_goal_pose;
+    std::vector<AgentHit> hits;
+
+    // Costmap 락을 한 번만 잡아서 성능 최적화
+    std::shared_ptr<nav2_costmap_2d::Costmap2D> cm;
+    { std::lock_guard<std::mutex> lock(costmap_mutex_); cm = costmap_; }
+
+    std::shared_ptr<nav2_costmap_2d::Costmap2D> agent_cm;
+    if (compare_agent_mask_) {
+      std::lock_guard<std::mutex> lock(agent_mask_mutex_); 
+      agent_cm = agent_mask_; 
+    }
+
+    // [핵심] 모든 Remaining Goals를 순회하며 장애물이 있는지 검사
+    std::vector<geometry_msgs::msg::PoseStamped> goals_snapshot;
+    {
+      std::lock_guard<std::mutex> lock(goals_mutex_);
+      goals_snapshot = current_remaining_goals_;
+    }
+
+    for (size_t i = 0; i < goals_snapshot.size(); ++i) {
+      const auto& current_check_goal = goals_snapshot[i].pose;
+      
+      // 로봇과 현재 검사 중인 Goal 사이의 거리
+      double dist_robot_to_goal = std::hypot(
+          current_check_goal.position.x - cur_pose.position.x,
+          current_check_goal.position.y - cur_pose.position.y);
+
+      // 0.25m 이내면 내 발밑이므로 안전(스킵)
+      if (dist_robot_to_goal <= 0.25) continue;
+
+      // Static & Agent 마스크 독립 검사
+      bool is_static_blocked = isGoalBlocked(cm, current_check_goal, goal_doorstep_static_m_, 253);
+      bool is_agent_blocked  = agent_cm ? isGoalBlocked(agent_cm, current_check_goal, goal_doorstep_agent_m_, static_cast<unsigned char>(agent_cost_threshold_)) : false;
+
+      if (is_static_blocked || is_agent_blocked) {
+        is_any_goal_occupied = true;
+        occupied_goal_pose = current_check_goal;
+        is_occupied_goal_last = (i == goals_snapshot.size() - 1); // 지금 막힌 Goal이 마지막 Goal인가?
+
+        if (is_agent_blocked) {
+          hits = findNearestAgent(current_check_goal.position.x, current_check_goal.position.y, 0.524);
+          if (!hits.empty()) is_agent = true;
+        }
+        
+        // 막힌 곳을 하나라도 발견하면 즉시 순회 중단
+        break; 
+      }
+    }
+
+    // 3. 검사 결과 퍼블리시
+    if (is_any_goal_occupied) {
+      if (is_agent) {
+        publishAgentCollisionList(hits, true, is_occupied_goal_last, occupied_goal_pose);
+      } else {
+        triggerReplan("READY state: One of the target goals is occupied", true, is_occupied_goal_last, 
+                      occupied_goal_pose.position.x, occupied_goal_pose.position.y, occupied_goal_pose);
+      }
+    } else {
+      publishSafeStatus();
+    }
+    
+    return; // READY 상태이므로 여기서 조기 종료!
+  }
+
+
+
+
+
+
   // =========================================================
   // [Phase 1.5] 타겟 락온(Target Lock-on) 유지 방어!
   // =========================================================
@@ -1218,13 +1335,14 @@ void PathValidatorNode::validationTimerCallback()
         target_goal.position.x - locked_goal_pose_.position.x,
         target_goal.position.y - locked_goal_pose_.position.y);
         
-    if (dist_moved > 0.2) {
+    // if (dist_moved > 0.2) {
+    if (dist_moved > 0.15) {
       RCLCPP_INFO(this->get_logger(), 
-        "[Phase 1.5] Target goal changed (Moved %.2fm). Releasing Lock-on.", dist_moved);
+        "[Validator][Phase 1.5] Target goal changed (Moved %.2fm). Releasing Lock-on.", dist_moved);
       goal_occupied_flag_ = false; // Goal이 변경됨 -> 락온 해제
     } else {
       RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, 
-        "[Phase 1.5] Lock-on active. Checking locked goal pose...");
+        "[Validator][Phase 1.5] Lock-on active. Checking locked goal pose...");
 
       std::shared_ptr<nav2_costmap_2d::Costmap2D> cm;
       { std::lock_guard<std::mutex> lock(costmap_mutex_); cm = costmap_; }
@@ -1271,17 +1389,17 @@ void PathValidatorNode::validationTimerCallback()
 
         if (is_agent) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, 
-              "[Phase 1.5] Locked Goal is still occupied by an AGENT.");
+              "[Validator][Phase 1.5] Locked Goal is still occupied by an AGENT.");
             publishAgentCollisionList(hits, true, is_last_goal, locked_goal_pose_);
         } else {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, 
-              "[Phase 1.5] Locked Goal is still occupied by STATIC obstacle.");
+              "[Validator][Phase 1.5] Locked Goal is still occupied by STATIC obstacle.");
             triggerReplan("Locked Goal still occupied", true, is_last_goal, locked_goal_pose_.position.x, locked_goal_pose_.position.y, locked_goal_pose_);        
         }
         return; // 여기서 리턴해야 밑의 gpath.empty() 조기 종료 로직에 빠지지 않음!
       } else {
         RCLCPP_INFO(this->get_logger(), 
-          "[Phase 1.5] Locked Goal is now CLEAR! Releasing Lock-on.");
+          "[Validator][Phase 1.5] Locked Goal is now CLEAR! Releasing Lock-on.");
         goal_occupied_flag_ = false; // 장애물 치워짐
       }
     }
@@ -1292,7 +1410,7 @@ void PathValidatorNode::validationTimerCallback()
   // =========================================================
   if (gpath.empty()) {
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
-      "[Phase 2] Global path is empty and no Lock-on. Publishing Safe Status.");
+      "[Validator][Phase 2] Global path is empty and no Lock-on. Publishing Safe Status.");
     publishSafeStatus();
     return;
   }
@@ -1302,13 +1420,13 @@ void PathValidatorNode::validationTimerCallback()
   const double since_agent = (now - last_agent_block_time_).seconds();
   if (since_agent >= 0.0 && since_agent < agent_block_hold_sec_) {
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, 
-      "[Phase 2] Suppressed by Agent Hold Time (%.2f / %.2f)", since_agent, agent_block_hold_sec_);
+      "[Validator][Phase 2] Suppressed by Agent Hold Time (%.2f / %.2f)", since_agent, agent_block_hold_sec_);
     return;
   }
 
   // 검증 로직 실행 (하이브리드 검사 진행)
   RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
-    "[Phase 2] Running path validation (Footprint check: %s, Is Last Goal: %s)", 
+    "[Validator][Phase 2] Running path validation (Footprint check: %s, Is Last Goal: %s)", 
     use_footprint_check_ ? "true" : "false", is_last_goal ? "true" : "false");
 
   if (use_footprint_check_) {
@@ -1523,7 +1641,7 @@ double PathValidatorNode::speedAlong(const geometry_msgs::msg::Twist & tw, doubl
   return v * std::cos(heading_rad);
 }
 
-bool PathValidatorNode::pathTubeCoversPoint(const multi_agent_msgs::msg::MultiAgentInfo & a,
+bool PathValidatorNode::pathTubeCoversPoint(const robot_interfaces::msg::MultiAgentInfo & a,
                                             double wx, double wy,
                                             double stride_m, double dilate_m,
                                             int max_poses, double /*frame_yaw*/,
@@ -1592,19 +1710,17 @@ std::vector<PathValidatorNode::AgentHit> PathValidatorNode::whoCoversPoint(doubl
   std::vector<AgentHit> out;
 
   std::lock_guard<std::mutex> lk(agents_mutex_);
-  if (!last_agents_) return out;
+  if (agent_cache_.empty()) return out;   // [FIX] 누적 캐시를 본다
 
+  // 관제 링크 자체가 끊겼는지 확인 (마지막 수신 패킷 기준)
   if ((this->now() - last_agents_stamp_).nanoseconds() >
        static_cast<int64_t>(agents_freshness_timeout_ms_) * 1000000LL) {
     return out;
   }
+  // 좌표계 검사는 agentsCallback 의 병합 시점으로 옮겼다.
 
-  if (!last_agents_->header.frame_id.empty() &&
-      last_agents_->header.frame_id != global_frame_) {
-    return out;
-  }
-
-  for (const auto & a : last_agents_->agents) {
+  for (const auto & kv : agent_cache_) {
+    const auto & a = kv.second;
     // [add] 대상이 나 자신이면 연산에서 완전히 제외하고 건너뜀
     if (a.machine_id == self_machine_id_) {
       continue;
@@ -1705,7 +1821,7 @@ void PathValidatorNode::publishAgentCollisionList(const std::vector<AgentHit> & 
 {
   if (!publish_agent_collision_ || !agent_collision_pub_) return;
 
-  multi_agent_msgs::msg::PathAgentCollisionInfo msg;
+  robot_interfaces::msg::PathAgentCollisionInfo msg;
   msg.header.stamp = this->now();
   msg.header.frame_id = global_frame_;
 
@@ -1713,13 +1829,26 @@ void PathValidatorNode::publishAgentCollisionList(const std::vector<AgentHit> & 
   msg.is_last_goal_occupied = is_last_goal_occupied;
   msg.target_goal = target_goal;
 
+  msg.is_status_ready = is_robot_in_ready_state_.load();
+
+
   if (hits.empty()) {
     msg.note.push_back("non_collision");
     agent_collision_pub_->publish(msg);
+
+    // [LOG 추가] 에이전트가 없어져서 Clear 상태를 쏠 때를 알려주는 INFO 로그 (2초에 한 번만 출력)
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+      "[AgentCollision] Clear - No agents detected. Published 'non_collision'.");
     return;
   }
 
-  std::string agent_ids = "";
+
+
+
+  // std::string agent_ids = "";
+
+
+  std::ostringstream oss; // [코드 개선] std::string += 보다 성능과 포맷팅에 유리한 ostringstream 사용
   for (const auto & h : hits) {
     msg.machine_id.push_back(h.machine_id);
     msg.type_id.push_back(h.type_id);
@@ -1727,13 +1856,26 @@ void PathValidatorNode::publishAgentCollisionList(const std::vector<AgentHit> & 
     msg.y.push_back(h.y);
     msg.ttc_first.push_back(h.ttc_first);
     msg.note.push_back(h.note);
-    agent_ids += std::to_string(h.machine_id) + "(" + h.type_id + ") ";    
+    // agent_ids += std::to_string(h.machine_id) + "(" + h.type_id + ") ";    
+
+    // [LOG 보강] ID뿐만 아니라 예상 충돌 시간(TTC)도 함께 기록하여 위험도 파악
+    oss << h.machine_id << "(" << h.type_id << ", TTC:" << std::fixed << std::setprecision(1) << h.ttc_first << "s) ";
   }
+
+  std::string agent_ids = oss.str();
 
   if (!hits.empty()) {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-      "Publishing Agent Collision Info: [ %s] (Total: %zu hits)", 
-      agent_ids.c_str(), hits.size());
+      "[AgentCollision] HIT! Agents: [%s] (Total: %zu) | GoalOcc: %s | LastGoalOcc: %s", 
+      agent_ids.c_str(), 
+      hits.size(),
+      is_goal_occupied ? "TRUE" : "FALSE",
+      is_last_goal_occupied ? "TRUE" : "FALSE");
+
+
+    // RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+    //   "Publishing Agent Collision Info: [ %s] (Total: %zu hits)", 
+    //   agent_ids.c_str(), hits.size());
   }
 
   agent_collision_pub_->publish(msg);
@@ -1741,7 +1883,7 @@ void PathValidatorNode::publishAgentCollisionList(const std::vector<AgentHit> & 
 
     // 배타적 퍼블리시: 에이전트가 확실하므로 일반(Static) 장애물 토픽은 False로 pub.
   if (static_collision_pub_) {
-    multi_agent_msgs::msg::PathStaticCollisionInfo static_msg;
+    robot_interfaces::msg::PathStaticCollisionInfo static_msg;
     static_msg.header.stamp = this->now();
     static_msg.header.frame_id = global_frame_;
     static_msg.replan_request = false;
@@ -1761,13 +1903,17 @@ void PathValidatorNode::triggerReplan(const std::string & reason, bool is_goal_o
 
   const double since_agent = (now - last_agent_block_time_).seconds();
   if (since_agent >= 0.0 && since_agent < agent_block_hold_sec_) {
+    // [LOG 추가] 에이전트가 방금 지나가서 생긴 잔상(Ghost)을 무시할 때 출력 (스팸 방지를 위해 DEBUG 사용)
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+      "[StaticCollision] Suppressed by Agent Hold Time (%.2fs < %.2fs)", since_agent, agent_block_hold_sec_);
+
     return;
   }
 
   // if ((now - last_replan_time_).seconds() <= cooldown_sec_) return;
   last_replan_time_ = now;
 
-  multi_agent_msgs::msg::PathStaticCollisionInfo m;
+  robot_interfaces::msg::PathStaticCollisionInfo m;
   m.header.stamp = this->now();
   m.header.frame_id = global_frame_;
   m.replan_request = true;
@@ -1778,21 +1924,36 @@ void PathValidatorNode::triggerReplan(const std::string & reason, bool is_goal_o
   m.target_goal = target_goal;
 
   static_collision_pub_->publish(m);
-  RCLCPP_WARN(this->get_logger(), "Triggering replan: %s", reason.c_str());
+  // RCLCPP_WARN(this->get_logger(), "Triggering replan: %s", reason.c_str());
+
+// [LOG 보강] 단순 WARN을 THROTTLE로 변경해 터미널 도배를 막고, 충돌 좌표와 Goal 점유 여부를 상세히 출력
+  RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, 
+    "[StaticCollision] HIT! Reason: %s | Pos: (%.2f, %.2f) | GoalOcc: %s | LastGoalOcc: %s", 
+    reason.c_str(), hit_x, hit_y, 
+    is_goal_occupied ? "TRUE" : "FALSE", 
+    is_last_goal_occupied ? "TRUE" : "FALSE");
+
 
 // 배타적 퍼블리시: 정적 장애물이 확실하므로 에이전트 토픽은 빈 배열(False)로 pub.
   // publishAgentCollisionList 내부에 hits가 empty()일 때 non_collision을 쏘는 로직 활용.
   publishAgentCollisionList({}, false, false, target_goal);
 
-    
+// [LOG 추가] 배타적 퍼블리시가 정상적으로 호출되었음을 확인하기 위한 로깅
+  // RCLCPP_INFO(this->get_logger(), 
+  //   "[StaticCollision] Mutually exclusive trigger: Sent agent_collision=CLEAR");
+
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+        "[StaticCollision] Mutually exclusive trigger: Sent agent_collision=CLEAR");    
+
+
   // if (publish_false_pulse_ && flag_pulse_ms_ > 0) {
   //   flag_reset_timer_.reset();
-  //   auto weak_pub = std::weak_ptr<rclcpp::Publisher<multi_agent_msgs::msg::PathStaticCollisionInfo>>(static_collision_pub_);
+  //   auto weak_pub = std::weak_ptr<rclcpp::Publisher<robot_interfaces::msg::PathStaticCollisionInfo>>(static_collision_pub_);
   //   flag_reset_timer_ = this->create_wall_timer(
   //       std::chrono::milliseconds(flag_pulse_ms_),
   //       [weak_pub]() {
   //         if (auto pub = weak_pub.lock()) {
-  //           multi_agent_msgs::msg::PathStaticCollisionInfo off;
+  //           robot_interfaces::msg::PathStaticCollisionInfo off;
   //           off.replan_request = false;
   //           off.is_goal_occupied = false;
   //           off.is_last_goal_occupied = false;
@@ -1805,7 +1966,7 @@ void PathValidatorNode::triggerReplan(const std::string & reason, bool is_goal_o
 // [NEW] 아무 장애물도, 에이전트도 없을 때 호출
 void PathValidatorNode::publishSafeStatus()
 {
-multi_agent_msgs::msg::PathStaticCollisionInfo m;
+robot_interfaces::msg::PathStaticCollisionInfo m;
   m.header.stamp = this->now();
   m.header.frame_id = global_frame_;
   m.replan_request = false;
@@ -1813,6 +1974,8 @@ multi_agent_msgs::msg::PathStaticCollisionInfo m;
   m.is_last_goal_occupied = false;
   m.hit_x = 0.0;
   m.hit_y = 0.0;
+  m.is_status_ready = is_robot_in_ready_state_.load();
+    
 
   // false를 보낼 때도 항상 최신 Goal을 가져와서 채워넣음
   geometry_msgs::msg::Pose tgt_goal;

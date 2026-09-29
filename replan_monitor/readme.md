@@ -1,0 +1,1 @@
+ros2 launch replan_monitor path_validator.launch.py

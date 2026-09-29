@@ -223,6 +223,8 @@ private:
 
   std::atomic<bool> is_robot_in_driving_state_{false};
   std::atomic<bool> is_robot_in_ready_state_{false};
+  // [09-29 D1-ⓒ] 직전 로봇 상태 — RECOVERY_* 로 들어가는 순간을 알아 저장해 둔 옛 경로를 버린다 (robotStatusCallback 전용)
+  std::string last_robot_status_;
   rclcpp::Time last_replan_time_;        // replan 쿨다운 기준
   rclcpp::Time last_agent_block_time_;   // 에이전트 홀드 기준
 

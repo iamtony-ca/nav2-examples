@@ -6,32 +6,25 @@ namespace velocity_modifier
 {
 
 VelocityModifierNode::VelocityModifierNode(const rclcpp::NodeOptions & options)
-: Node("velocity_modifier_node", options)
+: Node("velocity_modifier_node", options),
+  speed_limit_linear_(std::numeric_limits<double>::max()),
+  speed_limit_angular_(std::numeric_limits<double>::max()),
+  speed_scale_(1.0)
 {
   RCLCPP_INFO(this->get_logger(), "Velocity Modifier Node is initializing...");
 
-  // 최소 속도 파라미터 & 
-  // 비율 보정 시 적용될 상한선 파라미터 
-  this->declare_parameter<double>("min_abs_linear_vel", 0.05);
-  this->declare_parameter<double>("min_abs_angular_vel", 0.05);
-  this->declare_parameter<double>("ratio_scaling_max_linear_vel", 0.35);
-  this->declare_parameter<double>("ratio_scaling_max_angular_vel", 0.25);
+
+  this->declare_parameter<double>("min_abs_linear_vel", 0.03);
+  this->declare_parameter<double>("min_abs_angular_vel", 0.03);
+  this->declare_parameter<double>("ratio_scaling_max_linear_vel", 0.30);
+  this->declare_parameter<double>("ratio_scaling_max_angular_vel", 0.20);
 
   this->get_parameter("min_abs_linear_vel", min_abs_linear_vel_);
   this->get_parameter("min_abs_angular_vel", min_abs_angular_vel_);
   this->get_parameter("ratio_scaling_max_linear_vel", ratio_scaling_max_linear_vel_);
   this->get_parameter("ratio_scaling_max_angular_vel", ratio_scaling_max_angular_vel_);
-  
-  RCLCPP_INFO(
-    this->get_logger(), "Min absolute linear velocity: %.3f m/s", min_abs_linear_vel_);
-  RCLCPP_INFO(
-    this->get_logger(), "Min absolute angular velocity: %.3f rad/s", min_abs_angular_vel_);
-  RCLCPP_INFO(
-    this->get_logger(), "Ratio scaling max linear velocity: %.3f m/s", ratio_scaling_max_linear_vel_);
-  RCLCPP_INFO(
-    this->get_logger(), "Ratio scaling max angular velocity: %.3f rad/s", ratio_scaling_max_angular_vel_);
 
-  
+
   cb_group_cmd_vel_ = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
   cb_group_control_ = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
   cb_group_recovery_ = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
@@ -54,16 +47,19 @@ VelocityModifierNode::VelocityModifierNode(const rclcpp::NodeOptions & options)
     std::bind(&VelocityModifierNode::controlCallback, this, std::placeholders::_1),
     sub_control_opt);
   
+  // /robot_status 토픽을 구독하는 로직 추가
   auto sub_recovery_opt = rclcpp::SubscriptionOptions();
   sub_recovery_opt.callback_group = cb_group_recovery_;
   // 상태 토픽은 마지막 메시지를 유지하는 것이 좋으므로 transient_local QoS 사용
   // rclcpp::QoS qos_recovery(10);
   // qos_recovery.transient_local(); 
   recovery_mode_sub_ = this->create_subscription<String>(
-    // "/bt_recovery_mode", qos_recovery,
+    // "/robot_status", qos_recovery,
     "/robot_status", 10,
     std::bind(&VelocityModifierNode::recoveryModeCallback, this, std::placeholders::_1),
     sub_recovery_opt);
+
+
 
   RCLCPP_INFO(this->get_logger(), "Node has been started successfully.");
 }
@@ -75,27 +71,48 @@ void VelocityModifierNode::recoveryModeCallback(const String::SharedPtr msg)
   // lock_guard를 통해 공유 변수인 recovery_mode_를 안전하게 수정
   const std::lock_guard<std::mutex> lock(data_mutex_);
   
-  if (msg->data == "recovery_start") {
+  
+
+  // if (msg->data == "RECOVERY_RUNNING") {
+  //   if (!recovery_mode_) {
+  //     recovery_mode_ = true;
+  //     RCLCPP_INFO(this->get_logger(), "Recovery mode ENABLED. Low-speed correction is active.");
+  //   }
+  // } else if (msg->data == "RECOVERY_SUCCESS" || msg->data == "RECOVERY_FAILURE") {
+  //   if (recovery_mode_) {
+  //     recovery_mode_ = false;
+  //     RCLCPP_INFO(this->get_logger(), "Recovery mode DISABLED. Low-speed correction is inactive.");
+  //   }
+  // } else {
+  //   recovery_mode_ = false;
+  //   RCLCPP_DEBUG(
+  //     this->get_logger(), "Received unknown command on /robot_status: '%s'", msg->data.c_str());
+  // }
+
+  if (msg->data == "RECOVERY_RUNNING") {
     if (recovery_mode_ == false) {
       recovery_mode_ = true;
       RCLCPP_INFO(this->get_logger(), "Recovery mode ENABLED. Low-speed correction is active.");
     }
-  } else if (msg->data == "recovery_finish") {
+  } else if (msg->data == "RECOVERY_SUCCESS" || msg->data == "RECOVERY_FAILURE") {
     if (recovery_mode_ == true) {
       recovery_mode_ = false;
       RCLCPP_INFO(this->get_logger(), "Recovery mode DISABLED. Low-speed correction is inactive.");
     }
   } else {
-    recovery_mode_ = false;
-    RCLCPP_DEBUG(
-      this->get_logger(), "Received unknown command on /bt_recovery_mode: '%s'", msg->data.c_str());
+    RCLCPP_INFO(
+      this->get_logger(), "Received unknown command on /robot_status: '%s'", msg->data.c_str());
+      recovery_mode_ = false;
   }
+
+
+
 }
 
 
 void VelocityModifierNode::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
 {
-  // lock_guard를 통해 데이터 읽기 전 잠금
+  // lock_guard를 통해 데이터 읽기 전 lock
   const std::lock_guard<std::mutex> lock(data_mutex_);
   
   auto adjusted_vel = std::make_unique<geometry_msgs::msg::Twist>(*msg);
@@ -150,11 +167,12 @@ void VelocityModifierNode::cmdVelCallback(const geometry_msgs::msg::Twist::Share
   }
   // [수정된 로직 끝]
 
-  // 3. 저속 보정 로직 
-  if (recovery_mode_ == true) {
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
-      "[RECOVERY_ACTIVE] Recovery logic is running! linear_max: %.2f", ratio_scaling_max_linear_vel_);
+  RCLCPP_INFO(this->get_logger(), "1▶ vx: %.11lf, wz: %.11lf", adjusted_vel->linear.x, adjusted_vel->linear.z);
 
+    
+   // 3. 저속 보정 로직 ( numerically stable version )
+  if (recovery_mode_ == true) {
+    RCLCPP_INFO(this->get_logger(), "recovery_mode_ == true #################");
     const double vx = adjusted_vel->linear.x;
     const double wz = adjusted_vel->angular.z;
     const double abs_vx = std::abs(vx);
@@ -187,16 +205,19 @@ void VelocityModifierNode::cmdVelCallback(const geometry_msgs::msg::Twist::Share
       // 원래 속도에 최종 배율을 곱하여 비율을 유지한 채 증폭
       double new_vx = vx * scale;
       double new_wz = wz * scale;
+      RCLCPP_INFO(this->get_logger(), " scale: %.5lf, new_vx: %.5lf, new_wz: %.5lf", scale, new_vx, new_wz);
 
-      // 이 로직으로 계산된 값에 대해서만 특별 상한선 적용
+      // // 이 로직으로 계산된 값에 대해서만 특별 상한선 적용
       adjusted_vel->linear.x = std::clamp(
         new_vx, -ratio_scaling_max_linear_vel_, ratio_scaling_max_linear_vel_);
       adjusted_vel->angular.z = std::clamp(
         new_wz, -ratio_scaling_max_angular_vel_, ratio_scaling_max_angular_vel_);
     }
-  } // End of if (recovery_mode_)
 
+  } // End of if (recovery_mode_)
   
+  RCLCPP_INFO(this->get_logger(), "2▶ vx: %.11lf, wz: %.11lf", adjusted_vel->linear.x, adjusted_vel->linear.z);
+
   adjusted_cmd_vel_pub_->publish(std::move(adjusted_vel));
 }
 
@@ -243,5 +264,7 @@ void VelocityModifierNode::controlCallback(const ModifierControl::SharedPtr msg)
       break;
   }
 }
+
+
 
 }  // namespace velocity_modifier

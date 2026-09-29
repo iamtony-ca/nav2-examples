@@ -3,6 +3,16 @@ linear_value: 0.35
 angular_value: 0.5
 ' 
 
+ros2 topic pub --once --qos-durability transient_local /velocity_modifier/control robot_interfaces/msg/ModifierControl 'command_type: 2
+linear_value: 0.8
+angular_value: 0.5
+' 
+
+ros2 topic pub --once --qos-durability transient_local /velocity_modifier/control robot_interfaces/msg/ModifierControl 'command_type: 3
+linear_value: 0.2
+angular_value: 0.15
+' 
+
 
 
 # Constants defining the type of modification

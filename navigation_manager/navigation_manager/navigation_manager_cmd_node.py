@@ -307,6 +307,10 @@ class NavigationManagerNode(Node):
         )
         self._pause_resume_publisher = self.create_publisher(
             Bool, 'nav_pause_flag', qos_nav_pause)
+        # [09-29 관제 우선] 마지막으로 발행한 /nav_pause_flag 값 = 관제 pause 중인지.
+        # 관제 pause 동안에는 하위 레이어의 내부 정지(/stop_command: BT 405 경보·fleet·nav_stuck)가
+        # goal 을 취소하지 못하게 _nav_stop_callback 이 이 값을 본다.
+        self._nav_pause_latched: bool = False
         # self._pause_resume_publisher = self.create_publisher(
         #     Bool, '/controller_pause_flag', qos_pause)
 
@@ -430,6 +434,14 @@ class NavigationManagerNode(Node):
         self.get_logger().info(f'nav stop_callback!, cmd_seq_num: {msg.data}')
         
         with self._state_lock:
+            # [09-29 관제 우선] 관제 pause 중에는 하위 레이어의 내부 정지로 goal 을 취소하지 않는다.
+            # 관제의 pause/resume/stop 이 우선이고 하위 레이어는 그대로 따른다 (사용자 원칙).
+            # (sim 실측 L5_dense r3 03:50:41: 교차로 flow control pause 중 BT 의 403 ping-pong 경보가
+            #  /stop_command 2 를 내 goal 이 CANCELED 됐다.) 원인이 남아 있으면 resume 뒤 그 출처가 다시 판단한다.
+            if self._nav_pause_latched:
+                self.get_logger().warn(
+                    f'[관제 우선] 관제 pause 중 내부 정지(/stop_command={msg.data}) 무시 — goal 유지')
+                return
             # while 문 중단을 위한 플래그 설정
             self.nav_stop_command = True
             self._stop_in_flight = True
@@ -1000,7 +1012,7 @@ class NavigationManagerNode(Node):
         # goal 을 받고 RESUME 을 기다린다). 판단·발행을 한 잠금 안에서 해 PAUSE/RESUME 발행과 순서가 섞이지 않게 한다.
         with self._state_lock:
             held_pause = self._pending_pause
-            self._pause_resume_publisher.publish(Bool(data=held_pause))
+            self._publish_nav_pause(held_pause)
         if held_pause:
             self.get_logger().warn('dispatching goal with held pause (waiting for RESUME)')
 
@@ -1082,7 +1094,7 @@ class NavigationManagerNode(Node):
                     self._pending_pause = True
                     self._nav2_cmd_data.cmd_seq_num = cmd_seq_num
                     self._nav2_monitoring_data.ros_nav_cmd_seq_num = cmd_seq_num
-                    self._pause_resume_publisher.publish(Bool(data=True))
+                    self._publish_nav_pause(True)
                     self.get_logger().warn('pause during wait phase -> held; goal will be sent paused')
                     return True, R.RESULT_OK, 'paused (held until resume)'
                 # [변경] 예전에는 조용히 return 해서 관제가 자기 PAUSE 가
@@ -1092,9 +1104,7 @@ class NavigationManagerNode(Node):
             self._nav2_cmd_data.cmd_seq_num = cmd_seq_num
             self._nav2_monitoring_data.ros_nav_cmd_seq_num = cmd_seq_num
 
-        pause_msg = Bool()
-        pause_msg.data = True
-        self._pause_resume_publisher.publish(pause_msg)
+        self._publish_nav_pause(True)
         self.get_logger().info('pause flag published (FollowPath canceled in BT)')
         return True, R.RESULT_OK, 'paused'
 
@@ -1111,11 +1121,16 @@ class NavigationManagerNode(Node):
             self._nav2_cmd_data.cmd_seq_num = cmd_seq_num
             self._nav2_monitoring_data.ros_nav_cmd_seq_num = cmd_seq_num
             # [B2 FIX] 같은 잠금 안에서 발행한다 (출발 직전 발행과 순서 보장)
-            self._pause_resume_publisher.publish(Bool(data=False))
+            self._publish_nav_pause(False)
 
 
         self.get_logger().info('resume_callback')
         return True, R.RESULT_OK, 'resumed'
+
+    def _publish_nav_pause(self, value: bool) -> None:
+        """[09-29 관제 우선] /nav_pause_flag 발행은 모두 여기를 거친다 — 관제 pause 상태를 함께 기억한다."""
+        self._nav_pause_latched = bool(value)
+        self._pause_resume_publisher.publish(Bool(data=bool(value)))
 
     def _pause_callback(self, msg: UInt8) -> None:
         self.get_logger().info('pause_callback')
