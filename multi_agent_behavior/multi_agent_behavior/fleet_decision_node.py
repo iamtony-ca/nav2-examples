@@ -517,6 +517,10 @@ class FleetDecisionNode(Node):
         # 이웃과 무관하므로 양보 규칙이 안 걸린다 → 이웃 없이도 **스스로 조금 물러나** 끼임을 푼다.
         self.declare_parameter("unwedge_enable", False)
         self.declare_parameter("unwedge_after_sec", 75.0)     # 이만큼 제자리면 (조정 대기 아님)
+        # [09-30 사용자 결정 D11 (가)] abort·취소 뒤 같은 자리에서 받은 새 명령은 무진전 시계를 이어서 센다
+        self.declare_parameter("stuck_carry_same_spot_m", 0.3)   # 직전 종료 위치에서 이만큼 안이면 '같은 자리'
+        self.declare_parameter("stuck_carry_window_sec", 180.0)  # 종료 뒤 이 시간 안에 온 새 명령만
+        self.declare_parameter("stuck_ready_reset_sec", 10.0)    # READY(목표 점유 대기)가 이만큼 넘으면 출발 때 새로 잡는다
         self.declare_parameter("unwedge_dist_m", 0.7)
         self.declare_parameter("unwedge_cooldown_sec", 60.0)
         self.declare_parameter("unwedge_max_tries", 6)
@@ -833,6 +837,11 @@ class FleetDecisionNode(Node):
         self._junc_cache = None
         self.unwedge_enable = bool(self.get_parameter("unwedge_enable").value)
         self.unwedge_after_sec = float(self.get_parameter("unwedge_after_sec").value)
+        self.stuck_carry_same_spot = float(self.get_parameter("stuck_carry_same_spot_m").value)
+        self.stuck_carry_window = float(self.get_parameter("stuck_carry_window_sec").value)
+        self.stuck_ready_reset = float(self.get_parameter("stuck_ready_reset_sec").value)
+        self._last_end = None          # [D11] 직전 활성 종료: {'status', 't', 'xy', 'active_since'}
+        self._ready_since = None       # [D11] READY 에 들어온 시각
         self.unwedge_dist_m = float(self.get_parameter("unwedge_dist_m").value)
         self.unwedge_cooldown_sec = float(self.get_parameter("unwedge_cooldown_sec").value)
         self.unwedge_max_tries = int(self.get_parameter("unwedge_max_tries").value)
@@ -1234,9 +1243,24 @@ class FleetDecisionNode(Node):
         # [OP] 종료·대기 상태(IDLE/SUCCEEDED/CANCELED/FAILED)에서 주행 계열로 들어오면 = 새 관제 명령.
         # 무진전 시계를 여기서 다시 시작한다 (도킹·이적재·충전 동안 서 있던 시간을 넘기지 않는다).
         # READY(목표 점유 대기, 최대 150 s) → RECEIVED_GOAL(실제 출발) 도 다시 시작한다 — 대기 시간을 무진전으로 넘기지 않는다.
-        if msg.data in self._OP_ACTIVE and (prev not in self._OP_ACTIVE or self._active_since is None
-                                            or (prev == 'READY' and msg.data == 'RECEIVED_GOAL')):
-            self._active_since = self.get_clock().now()
+        # [09-30 사용자 결정 D11 (가)] 관제가 abort 직후 곧바로 재명령하면(현장 Q4) 명령마다 시계가 0 이 되어
+        #   standoff(25 s)·junction-escape(20 s)·unwedge(75 s) 가 끝내 발동하지 못했다 (sim L5f_dense4 H2V4 30 분,
+        #   재명령 200여 회). 직전 종료가 CANCELED/FAILED 이고 같은 자리(0.3 m)·180 s 안·도킹 없이 온 새 명령이면
+        #   이전 활성 시각을 이어 쓴다. SUCCEEDED 뒤·자리를 옮긴 뒤·도킹 뒤는 지금처럼 새로 잡는다 (09-28 결정 유지).
+        #   READY→RECEIVED_GOAL 은 READY 가 10 s 넘게 이어졌을 때만(목표 점유로 정말 기다림) 새로 잡는다.
+        _now_st = self.get_clock().now()
+        if msg.data == 'READY' and prev != 'READY':
+            self._ready_since = _now_st
+        if msg.data in ('IDLE', 'SUCCEEDED', 'CANCELED', 'FAILED') and prev in self._OP_ACTIVE:
+            _me = self._own_pose()
+            self._last_end = {'status': msg.data, 't': _now_st, 'xy': (_me[0], _me[1]) if _me is not None else None,
+                              'active_since': self._active_since}
+        if msg.data in self._OP_ACTIVE and (prev not in self._OP_ACTIVE or self._active_since is None):
+            self._active_since = self._stuck_carry_or(_now_st)
+        elif prev == 'READY' and msg.data == 'RECEIVED_GOAL':
+            _ready = ((_now_st - self._ready_since).nanoseconds * 1e-9) if self._ready_since is not None else 1e9
+            if _ready >= self.stuck_ready_reset:
+                self._active_since = _now_st
         # [09-28 현장 이상 2] replan 재시도 횟수는 '한 관제 명령 안' 에서만 센다 (사용자 결정 F-a·F-b).
         # 새 명령(종료·대기 → 주행 계열, READY → RECEIVED_GOAL)과 goal 종료(IDLE/SUCCEEDED/CANCELED/FAILED) 때
         # 대기 상태 진행 여부와 상관없이 정적·agent 재시도 추적을 지운다.
@@ -3471,6 +3495,23 @@ class FleetDecisionNode(Node):
             t_leave = min(t_leave, anc[0])
         return max(0.0, t_now - t_leave)
 
+    def _stuck_carry_or(self, now: Time) -> Time:
+        """[D11] 새 활성 시작 시각. 직전 종료가 CANCELED/FAILED·같은 자리·창 안이면 이전 활성 시각을 이어 쓴다."""
+        e, self._last_end = self._last_end, None
+        if not e or e['status'] not in ('CANCELED', 'FAILED') or e['active_since'] is None or e['xy'] is None:
+            return now
+        gap = (now - e['t']).nanoseconds * 1e-9
+        me = self._own_pose()
+        if me is None or gap > self.stuck_carry_window:
+            return now
+        d = math.hypot(me[0] - e['xy'][0], me[1] - e['xy'][1])
+        if d > self.stuck_carry_same_spot:
+            return now
+        self.get_logger().info(
+            f"[OP] 같은 자리 재명령 (직전 {e['status']}, {d:.2f} m, {gap:.0f} s 뒤) — 무진전 시계를 이어서 센다 "
+            f"({(now - e['active_since']).nanoseconds * 1e-9:.0f} s)", throttle_duration_sec=10.0)
+        return e['active_since']
+
     def _stuck_sec(self, now: Time, dist_m: float = 0.3) -> float:
         """dist_m 안에 머문 시간 [s] (내 이력 기준)."""
         me = self._own_pose()
@@ -4049,7 +4090,10 @@ class FleetDecisionNode(Node):
     #   자기 구출성 = unwedge · 교차로 탈출. 그 밖(곡선·직선 후진 양보, 밀어내기, 순환·줄·정면 대치 해소)은 양보성.
     _OP_ACTIVE = ('READY', 'RECEIVED_GOAL', 'PLANNING', 'DRIVING', 'PAUSED',
                   'RECOVERY_RUNNING', 'RECOVERY_SUCCESS', 'RECOVERY_FAILURE')
-    _OP_SELF_CALLERS = ('_v2_unwedge_tick', '_junction_escape')
+    _OP_SELF_CALLERS = ('_v2_unwedge_tick',)
+    # [09-30 사용자 결정 D10 (가)] 교차로 비우기는 자기 구출이 아니라 이웃을 위한 양보로 본다 — PAUSED·RECOVERY_* 에서도 허용.
+    #   (sim L5f_dense1: 교차로 안 RECOVERY 로봇의 junction-escape 가 67회 불허돼 5대 교착이 판 끝까지 갔다)
+    _OP_JUNCTION_CALLERS = ('_junction_escape',)
     # [L3 준비] 시험 hook(_on_test_retreat)은 이어지는 단계가 아니라 새 양보 기동이다 — 직전 기동 종류를 물려받지 않게 뺐다
     _OP_CONTINUATIONS = ('_maneuver_next', '_v2_maneuver_tick', '_retreat_along_history', '_backup_send')
     # 관제 pause 해제 때 pause 길이만큼 뒤로 미는 대기 시계들 (얼린 것처럼 이어서 센다)
@@ -4067,8 +4111,16 @@ class FleetDecisionNode(Node):
         """관제 pause 중 — fleet 판단 루프를 쉰다 (STOP·replan·goal 제거·기동을 내지 않는다)."""
         return self.operator_priority and self._nav_paused
 
+    def _op_kind(self, name: str) -> str:
+        """기동 종류: 'self'(자기 구출) | 'junction'(교차로 비우기, D10) | 'yield'(양보)."""
+        if name in self._OP_SELF_CALLERS:
+            return 'self'
+        if name in self._OP_JUNCTION_CALLERS:
+            return 'junction'
+        return 'yield'
+
     def _motion_allowed(self, kind: str) -> bool:
-        """fleet 이 스스로 로봇을 움직여도 되는가. kind: 'yield'(양보성) | 'self'(자기 구출성)."""
+        """fleet 이 스스로 로봇을 움직여도 되는가. kind: 'yield'(양보성) | 'junction'(교차로 비우기) | 'self'(자기 구출성)."""
         if not self.operator_priority:
             return True
         if self._nav_paused or self._docking:
@@ -4077,7 +4129,7 @@ class FleetDecisionNode(Node):
         if st in ('RECEIVED_GOAL', 'PLANNING', 'DRIVING', 'READY'):
             return True
         if st in ('PAUSED', 'RECOVERY_RUNNING', 'RECOVERY_SUCCESS', 'RECOVERY_FAILURE'):
-            return kind == 'yield'
+            return kind in ('yield', 'junction')      # [D10] 교차로 비우기도 허용
         return False                                  # IDLE / SUCCEEDED / CANCELED / FAILED / 그 밖
 
     def _op_gate(self, caller: str, start: bool = True) -> bool:
@@ -4087,7 +4139,7 @@ class FleetDecisionNode(Node):
         if caller in self._OP_CONTINUATIONS:
             kind = self._man_kind
         else:
-            kind = 'self' if caller in self._OP_SELF_CALLERS else 'yield'
+            kind = self._op_kind(caller)
         if not self._motion_allowed(kind):
             self.get_logger().warn(
                 f"[OP] fleet 기동 불허 — {caller} ({kind}) status {self.current_robot_status}, "
@@ -4104,7 +4156,7 @@ class FleetDecisionNode(Node):
         전송 단계 관문은 그대로 둔다 (공지와 전송 사이에 상태가 바뀌는 경우의 마지막 방어선)."""
         if not self.operator_priority:
             return True
-        kind = 'self' if rule in self._OP_SELF_CALLERS else 'yield'
+        kind = self._op_kind(rule)
         if self._motion_allowed(kind):
             return True
         self.get_logger().info(
@@ -4150,6 +4202,8 @@ class FleetDecisionNode(Node):
 
     def _on_dock_monitoring(self, msg: DockingMonitoring) -> None:
         d = bool(msg.ros_dock_docking)
+        if d:
+            self._last_end = None                     # [D11] 도킹을 거친 뒤의 명령은 무진전 시계를 새로 잡는다
         if d != self._docking:
             self.get_logger().info(f"[OP] 도킹 {'시작' if d else '끝'} (ros_dock_docking={d})")
         self._docking = d
