@@ -1251,6 +1251,11 @@ class FleetDecisionNode(Node):
         _now_st = self.get_clock().now()
         if msg.data == 'READY' and prev != 'READY':
             self._ready_since = _now_st
+        # [10-01 사용자 결정 D14 (가)] 종료 상태로 들어오는 순간 진행 중인 fleet 기동을 바로 거둔다 (관제 명령이 우선).
+        #   관제 새 move 는 CANCELED(약 10 ms) → READY 로 지나가 0.1 s 주기 guard(_op_guard_tick)가 놓쳤고,
+        #   READY 는 "허용" 이라 기동이 새 명령 뒤에도 이어졌다 (sim L5f_dense4 r5 0.2~0.4 m, L5g_dense2 r4 17.9 s).
+        if self.operator_priority and msg.data in ('IDLE', 'SUCCEEDED', 'CANCELED', 'FAILED') and self._op_busy():
+            self._op_revoke(f"상태 {msg.data}")
         if msg.data in ('IDLE', 'SUCCEEDED', 'CANCELED', 'FAILED') and prev in self._OP_ACTIVE:
             _me = self._own_pose()
             self._last_end = {'status': msg.data, 't': _now_st, 'xy': (_me[0], _me[1]) if _me is not None else None,
