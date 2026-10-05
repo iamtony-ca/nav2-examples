@@ -231,8 +231,6 @@ fleet_decision_node:
     bt_error_react_enable: true
     bt_error_burst_n: 4
     bt_error_stuck_sec: 12.0
-    # [10-05 D17] 3단계 예비 planner (본 주행을 20 s 바꿈) 는 escape 없는 인스턴스로 — RecoveryGridBased2 는 escape 켬 (nav2_params.yaml)
-    recovery_planner_b: "RecoveryGridBased2Plain"
     # [V2.25 09-23] 줄 해소의 교착을 없앤다 — 합의 없이 각자 자기 후방만 보고 판단한다.
     #   후방이 막힌 로봇은 차례로 치지 않고, 줄이 45 s 이상 지속되면 순서를 무시한다.
     #   (S1 실측: "순서가 아니다" 752회 대 실제 기동 4회, 로봇마다 순서가 달랐다)
