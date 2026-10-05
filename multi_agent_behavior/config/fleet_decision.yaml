@@ -218,6 +218,7 @@ fleet_decision_node:
     standoff_retreat_m: 0.3    # [V2.21] BackUp 충돌 검사 통과용 단축
     standoff_cooldown_sec: 25.0
     push_retreat_m: 0.5    # [V2.21] BackUp 충돌 검사 통과용 단축
+    retreat_away_ratio: 0.5    # [10-05 D20 J1] 후퇴 후보가 상대에서 멀어져야 하는 최소 = min(0.5, 비율 × 후퇴 거리). 0.3 m 후퇴 → 0.15 m
     # [V2.2] 교차로를 막고 서지 않는다 (5·6대 붕괴의 시작점)
     junction_keep_clear_enable: true
     junction_probe_m: 1.2

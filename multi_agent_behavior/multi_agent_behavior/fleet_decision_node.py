@@ -556,6 +556,10 @@ class FleetDecisionNode(Node):
         self.declare_parameter("standoff_cone_deg", 70.0)     # 상대가 내 진행 방향 부채꼴 안
         self.declare_parameter("standoff_face_deg", 110.0)    # 두 헤딩 차이가 이보다 크면 마주 봄
         self.declare_parameter("standoff_retreat_m", 1.0)
+        # [10-05 D20 J1] 후퇴 후보가 보고한 로봇에서 멀어져야 하는 최소 거리 = min(0.5, 이 비율 × 후퇴 거리).
+        #   예전 고정 0.5 m 는 기본 후퇴 거리(1.0·2.0 m)에 맞춘 값이라, yaml 의 짧은 후퇴(standoff 0.3·push 0.5)에서는
+        #   삼각부등식상 만족하는 후보가 없었다 (standoff 직선 후퇴 34/34 실패, push 양보 626/626 보류 — sim 전체 집계).
+        self.declare_parameter("retreat_away_ratio", 0.5)
         self.declare_parameter("standoff_cooldown_sec", 25.0)
         # [V2.4 09-20 16:10 사용자 방향] "제어권을 최대한 fleet_decision 이 가져가자. BT 는 실행 엔진."
         # 1단계: **recovery 선택권**을 노드로. BT 가 올리는 `/bt_error_code` 를 노드가 보고 원인별 조치를 고른다.
@@ -873,6 +877,8 @@ class FleetDecisionNode(Node):
         self.standoff_cone_deg = float(self.get_parameter("standoff_cone_deg").value)
         self.standoff_face_deg = float(self.get_parameter("standoff_face_deg").value)
         self.standoff_retreat_m = float(self.get_parameter("standoff_retreat_m").value)
+        self.retreat_away_ratio = float(self.get_parameter("retreat_away_ratio").value)
+        self._plan_retreat_why = ""
         self.standoff_cooldown_sec = float(self.get_parameter("standoff_cooldown_sec").value)
         self._standoff_last: Optional[Time] = None
         self._standoff_active = False
@@ -3556,11 +3562,13 @@ class FleetDecisionNode(Node):
 
     def _plan_retreat(self, dist: float, away_from: Optional[Tuple[float, float]] = None) -> Optional[dict]:
         """후퇴 계획. 후보 = 내 이력 뒤 점(온 길 = 벽 없음) / 바로 뒤(BackUp) / 바로 앞(DriveOnHeading).
-        away_from(보고한 로봇 위치) 가 있으면 **그 로봇에서 0.5 m 이상 멀어지는** 후보만, 가장 멀어지는 순으로 고른다
+        away_from(보고한 로봇 위치) 가 있으면 **그 로봇에서 min(0.5, retreat_away_ratio × dist) 이상 멀어지는** 후보만,
+        가장 멀어지는 순으로 고른다 ([10-05 D20 J1] 예전 고정 0.5 m 는 dist < 0.5 이면 만족 불가였다)
         (큐15 ① 사례: 온 길이 고리라 이력 후퇴가 오히려 우선 로봇 쪽으로 갔다). 후보 실행 순서는 이력 → 뒤 → 앞.
         목표점 방향이 바로 뒤(±25°) 면 BackUp, 바로 앞(±25°) 이면 DriveOnHeading, 아니면 Spin 뒤 DriveOnHeading."""
         me = self._own_pose()
         if me is None:
+            self._plan_retreat_why = "자세를 모름"
             return None
         cands = []
         hist = self._retreat_target(dist)
@@ -3570,12 +3578,17 @@ class FleetDecisionNode(Node):
         cands.append(("ahead", (me[0] + dist * math.cos(me[2]), me[1] + dist * math.sin(me[2]))))
         if away_from is not None:
             d0 = math.hypot(away_from[0] - me[0], away_from[1] - me[1])
+            min_gain = max(1e-3, min(0.5, self.retreat_away_ratio * dist))
             scored = []
+            best = -1e9
             for name, tgt in cands:
                 gain = math.hypot(away_from[0] - tgt[0], away_from[1] - tgt[1]) - d0
-                if gain >= 0.5:
+                best = max(best, gain)
+                if gain >= min_gain:
                     scored.append((gain, name, tgt))
             if not scored:
+                self._plan_retreat_why = (f"상대에서 {min_gain:.2f} m 이상 멀어지는 후보 없음 "
+                                          f"(후퇴 {dist:.2f} m, 최대 {best:.2f} m)")
                 return None
             scored.sort(key=lambda z: (-(z[1] == "hist"), -z[0]))     # 이력 후보를 우선, 그 다음 멀어지는 정도
             cands = [(n, t) for _, n, t in scored]
@@ -3601,9 +3614,11 @@ class FleetDecisionNode(Node):
             me = self._own_pose()
             if me is not None:
                 dist = min(dist, self._retreat_need(me, -math.cos(me[2]), -math.sin(me[2]))[0])
+        self._plan_retreat_why = ""
         plan = self._plan_retreat(dist, away_from)
         if plan is None:
-            self.get_logger().error("[V2 retreat] 이력이 짧거나 자세를 몰라 후퇴 못 함")
+            # [10-05 D20 J1] 예전 문구 "이력이 짧거나 자세를 몰라" 는 실제 원인(멀어짐 조건)을 가렸다
+            self.get_logger().error(f"[V2 retreat] 후퇴 못 함: {self._plan_retreat_why or '후보 없음'}")
             return False
         self._maneuver = {"steps": list(plan["steps"]), "target": plan["target"], "started": now}
         self._backup_state = "sending"; self._backup_started_at = now
