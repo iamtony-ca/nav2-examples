@@ -915,7 +915,8 @@ planner_server:
     # org: cost_penalty: 0.7  use_quadratic_cost_penalty: true,  smooth_path: false,  w_data: 0.2
     # cost_penalty: 0.1  ,  use_quadratic_cost_penalty: false,  smooth_path: true ,   w_data: 0.7
 
-      plugin: "nav2_smac_planner::SmacPlannerHybrid" # In Iron and older versions, "/" was used instead of "::"
+      # plugin: "nav2_smac_planner::SmacPlannerHybrid" # [10-07 Q40] 원복 시 이 줄로
+      plugin: "ammr_smac_hybrid_planner::SmacPlannerHybrid" # [10-07 Q40] 같은 자리 (위치 같고 yaw 만 다른) goal 지름길 수정본
       downsample_costmap: false           # whether or not to downsample the map
       downsampling_factor: 1              # multiplier for the resolution of the costmap layer (e.g. 2 on a 5cm costmap would be 10cm)
       tolerance: 0.01 #0.25                     # dist-to-goal heuristic cost (distance) for valid tolerance endpoints if exact goal cannot be found.
@@ -1136,8 +1137,9 @@ planner_server:
       escape_max_dist: 1.5
       escape_step: 0.05
       escape_margin: 0.15
-      escape_min_straight: 0.5
+      escape_min_straight: 0.0  # [10-06 사용자 "0.45 는 최대 이동, 더 짧게 이동하는건 문제가 안돼"] 0.5 → 0.0 — 회전 가능 지점 + escape_margin 만큼만 (여유 0.15 > recovery goal 허용 0.10 이라 멈춘 자리에서 회전 가능)
       escape_edge_inset: -1.0  # 음수 = costmap 격자 1칸
+      escape_max_len: 0.45  # [10-06 사용자] 내보내는 직선 상한 (BT recovery 기동 0.45 m 와 통일). 회전 가능 지점 탐색은 escape_max_dist 1.5 그대로
 
     # [10-05 D17] escape 없는 예전 RecoveryGridBased2 그대로 (ammr_navfn_planner, 같은 값). fleet_decision V2 recovery 3단계
     #   (recovery_planner_b, 본 주행 planner 를 20 s 바꿈) 전용 — RecoveryGridBased2 는 escape 를 켜서, 본 주행 경로가 escape 직선으로
@@ -2702,7 +2704,8 @@ static_nav:
 
       StaticGridBased:
         # plugin: "nav2_smac_planner::SmacPlannerHybrid" # In Iron and older versions, "/" was used instead of "::"
-        plugin: "static_smac_planner::SmacPlannerHybrid" # In Iron and older versions, "/" was used instead of "::"
+        # plugin: "static_smac_planner::SmacPlannerHybrid" # [10-07 Q40] 원복 시 이 줄로
+        plugin: "ammr_static_smac_planner::SmacPlannerHybrid" # [10-07 Q40] 같은 자리 goal 지름길 수정본
         downsample_costmap: false           # whether or not to downsample the map
         downsampling_factor: 1              # multiplier for the resolution of the costmap layer (e.g. 2 on a 5cm costmap would be 10cm)
         tolerance: 0.01 #0.25                     # dist-to-goal heuristic cost (distance) for valid tolerance endpoints if exact goal cannot be found.

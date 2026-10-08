@@ -66,10 +66,83 @@ class RerouteStatus(IntEnum):
 SAME_PATH = 1
 DIFFERENT_PATH = 0
 
+
+class _YieldHoldResumeGate:
+    """[10-07 Q42] /controller_pause_flag resume (false) 발행의 단일 관문. yield_hold_enable 일 때만 __init__ 이 pub_cmd_resume 을
+    이것으로 감싼다 (꺼져 있으면 감싸지 않는다 → 예전과 같은 발행자). 비켜 준 뒤 정지 유지 (_yh_since) 동안에는 fleet 의 모든
+    resume (Early Exit·정적 Early Resume·[V2 reset]·밀어내기/unwedge/standoff 끝·Phase 3 등) 을 내지 않고 기록만 남긴다.
+    pause (true) 는 그대로 보낸다. 관제 pause/resume (/nav_pause_flag) 과 BT InitSequence 의 false 는 이 관문을 거치지 않는다."""
+
+    def __init__(self, node, pub):
+        self._node = node
+        self.raw = pub
+
+    def publish(self, msg):
+        n = self._node
+        if not bool(getattr(msg, 'data', True)) and n._yh_blocks_resume():
+            n._yh_note_swallow(sys._getframe(1).f_code.co_name)
+            return
+        self.raw.publish(msg)
+
+    def __getattr__(self, name):
+        return getattr(self.raw, name)
+
 # ----------------------------------------------------------------------
 # 3) Main Node
 # ----------------------------------------------------------------------
 class FleetDecisionNode(Node):
+    # [10-06 D26-A/B] 새 파라미터·상태의 클래스 기본값 (= 꺼짐, 예전 동작). 실제 값은 __init__ 이 인스턴스에 다시 넣는다.
+    #   기존 경로(_backup_send·_agent_lock_finish·gate·Phase 1)가 이 이름을 읽으므로, 인스턴스 값이 없어도 예전과 같게 돈다.
+    #   (불변 값만 둔다 — 쌍별 기억 dict 는 __init__ 에서만 만든다)
+    cycle_swap_gate_enable = False
+    ready_goal_occ_as_pause = False
+    cycle_blocker_swap_m = 0.0
+    cycle_swap_ready_assume_goal = False
+    _swap_pair = None
+    _swap_anchor = None
+    _swap_partner_anchor = None
+    _swap_steps = 0
+    _swap_step_active = False
+    _swap_step_xy = None
+    _swap_gate_ctx = None
+    _swap_freeze_since = None
+    _swap_hold_since = None
+    _swap_hold_partner = None
+    _swap_seen_t = None
+    _swap_retry_at = None
+    # [10-07 D26-A swap3] 결정 불필요 수정 (P1-1 clip·P2-1·P2-2·P2-3) 의 클래스 기본값 = 꺼짐 (예전 동작). 실제 값은 __init__ 이 넣는다.
+    cycle_swap_junction_margin_m = -1.0     # P1-1: 음수면 교차로 경계 clip 안 함 (예전: 목표가 교차로 안이면 그 단계 생략)
+    cycle_swap_start_block_m = 0.0          # P2-3: 0 이면 출발 보류 안 함
+    cycle_swap_start_block_sec = 100.0
+    cycle_swap_first_step_m = -1.0          # [10-07 Q37] 0 이하면 1번째 후진도 cycle_swap_step_m (예전 동작)
+    # [10-07 Q42] 비켜 준 로봇의 정지 유지 — 클래스 기본값 = 꺼짐 (예전 동작). 실제 값은 __init__ 이 넣는다.
+    yield_hold_enable = False
+    yield_hold_sec = 30.0
+    yield_hold_pass_m = 1.0
+    yield_hold_near_m = 4.0
+    _yh_since = None                        # 정지 유지 시작 (None = 유지 안 함)
+    _yh_mid = None                          # 기다려 주는 우선 로봇 id
+    _yh_ref = None                          # 정지 유지 시작 때 그 로봇 위치 (지나감 판정)
+    _yh_goals = None                        # 정지 유지 시작 때 내 남은 goal 목록 (같은 명령인가 판정, P2-1 과 같은 방식)
+    _yh_kind = None                         # 정지 유지를 건 후퇴 규칙 이름
+    _yh_assert_t = None                     # 마지막 pause 재발행 시각
+    _yh_assert_st = None                    # 마지막 pause 재발행 때 상태
+    _yh_swallowed = 0                       # 정지 유지 중 내지 않은 resume 수
+    _swap_hold_goals = None                # P2-1: 정지 유지 시작 때 내 남은 goal 목록 (같은 명령인가 판정)
+    _swap_first_xy = None                   # P2-2: 쌍별 최초 순환 검출 자리 (dict, 처음 쓸 때 만든다)
+    _swap_start_block_since = None          # P2-3: 출발 보류 시작
+    _swap_start_block_paused = False        # P2-3: 출발 보류가 pause 를 직접 냈는가 (풀 때 resume 책임)
+    _swap_start_block_expired = False       # P2-3: 출발 보류 시한 소진 — 이 상황에서는 다시 걸지 않는다
+    # [10-07 D26-A swap3 P4] 지금 경로가 없는 출처 — 'none' (경로·진짜 끝 기억 없음), 'mem-horizon' (경로 없음·기억은 10점 시야 끝).
+    #   ready_assume 판정은 예전처럼 둘 다 '경로 없음' 으로 본다 (로그 문구만 구분, 판정 불변).
+    _SWAP_SRC_NOPATH = ('none', 'mem-horizon')
+    _v2_goal_occ_wait = False      # 맞바꿈 술어가 읽는 기존 상태 (__init__ 에서 False 로 시작)
+    # [10-06 D26-A 재검토] 현장 이웃 truncated_path 최대 점 수. 현장 AMR 은 plan_truncated_short (~0.077 m 간격) 의
+    #   path[0, gap, 2gap, ...] 를 10점까지만 올린다 (AMR_Code_260921 PeriodicRoutine.cpp:515-534, VehicleCommManager.cpp:177-190,
+    #   AMRConfig.ini nDrivingPathIndexGap=2 → 시야 ~1.4 m). 10점 가득이면 끝점은 goal 이 아니라 시야 끝이다.
+    #   10점 미만 (시야 안에서 경로가 끝남) 일 때만 끝점 = 상대 goal 로 본다.
+    _SWAP_TRAJ_MAX_PTS = 10
+
     def __init__(self):
         super().__init__("fleet_decision_node")
 
@@ -319,6 +392,10 @@ class FleetDecisionNode(Node):
         # [S8 v2 1차] 우선 로봇이 내 옆(near_m 안)에서 정지·회복만 반복하면(경로 HIT 는 없음, M-8)
         # 그것도 "나 때문에 막힘" 으로 본다 → mutual_block_replan_sec 뒤 내가 비켜준다.
         self.declare_parameter("mutual_block_near_m", 1.5)
+        # [10-06 D25] M-8 ("우선 로봇이 내 옆에서 막혀 있으면 내가 비킨다") 전용 거리. 우선 로봇이 감속 대기 정지 거리
+        #   (slow_wait_min_body_m 2.2) 에서 서므로 1.5 로는 M-8 이 걸리지 않는다. goal 점유 후진의 작동 거리(mutual_block_near_m)와 분리.
+        #   음수 = mutual_block_near_m 과 같게 (예전 동작)
+        self.declare_parameter("mutual_block_m8_near_m", -1.0)
         # 상대 몸체 중심이 이보다 가까우면 감속 대기 대신 정지 (충돌점 거리만 보면 옆구리로 붙는다)
         self.declare_parameter("slow_wait_min_body_m", 1.2)
         # [S8 v2 2차] 예측 감속(예약 영역 앞 대기의 국소 구현). 두 로봇이 같은 시각에 교차점에 닿게 되면
@@ -356,6 +433,65 @@ class FleetDecisionNode(Node):
         self.declare_parameter("cycle_stagger_sec", 8.0)
         self.declare_parameter("cycle_backoff_m", 1.2)
         self.declare_parameter("cycle_retry_sec", 60.0)        # 같은 순환에 대한 내 후진 재시도 간격
+        # [10-06 사용자 D21 P4 (나)] retreat gate 에 막히면 '시도한 것' 으로 치지 않고 (재시도 60 s·실패 기록 없음) 이 간격 뒤 다시 본다.
+        #   gate 규칙은 그대로 — 순환이 retreat_gate_mutual_sec (20 s) 넘게 이어져 상호 정지 ④ 가 성립할 때 통과한다.
+        self.declare_parameter("cycle_gate_retry_sec", 5.0)
+        # [10-06 D26-A] goal 맞바꿈 (2-cycle, 서로 상대 goal 을 점유) 전용 후진. 기본 false = 예전 동작 (gate 가 coord_wait 로 거부).
+        #   켜면: 상호 정지 cycle_swap_mutual_sec (+ 우선순위 순번 × cycle_stagger_sec) 뒤, 우선순위가 낮은 쪽 (vacater) 이
+        #   거리 조건 없이 직선 후진 min(cycle_swap_step_m, retreat_max_m) 를 상황당 cycle_swap_max_steps 회까지 한다 (사용자 Q25·Q26).
+        #   후진 뒤에는 정지를 유지한다 — 상대가 cycle_swap_pass_m 지나가거나 cycle_swap_hold_sec 경과, 새 명령까지. 그동안 대기 시계 정지.
+        #   상대 goal 쪽으로 다가가는 후진은 하지 않는다 (사용자 Q27 C 필터). 옆 차선 이동은 없다.
+        self.declare_parameter("cycle_swap_gate_enable", False)
+        self.declare_parameter("cycle_swap_mutual_sec", 20.0)
+        self.declare_parameter("cycle_swap_step_m", 0.45)
+        self.declare_parameter("cycle_swap_max_steps", 2)
+        self.declare_parameter("cycle_swap_hold_sec", 30.0)
+        self.declare_parameter("cycle_swap_pass_m", 1.0)
+        self.declare_parameter("cycle_swap_partner_goal_m", 0.8)    # 상대 경로 끝(= 상대 goal 추정) 이 나에게서 이 안이면 맞바꿈
+        # [10-06 D26-A 검토] 상대 goal 을 모를 때 (현장 AMR 은 MOVING·MARKING 이 아니면 Traj 를 0 으로 올린다 — PAUSE 상대는 경로 없음):
+        #   상대가 주행 중 보였던 경로 끝을 기억해 쓰고, 그것도 없으면 — true: 상대 phase 가 MOVING(3) 인데 경로가 없는 정지 로봇
+        #   (= 현장 READY, goal 점유 대기 루프) 은 '상대 goal = 내 자리' 로 보고 진행, false: 진행하지 않는다 (C 필터를 평가할 수 없음).
+        #   PAUSE·그 밖의 phase 는 둘 다 진행하지 않는다. 기본 false (보수적).
+        self.declare_parameter("cycle_swap_ready_assume_goal", False)
+        # [10-07 Q35] 이웃 경로 (/plan_truncated_short, BT 앞 4.0 m) 가 10점으로 솎여 와도 길이로 '진짜 끝' 을 판정한다:
+        #   본체 → 표본점을 따라 잰 길이가 이 값 미만이면 경로가 시야 (4 m) 안에서 끝난 것 (끝점 = goal). 0 이하 = 끔 (점 10개 미만만, 예전).
+        #   솎기 때문에 4 m 가득인 경로도 약 3.5 m 로 보이므로 4.0 보다 작게 (sim 3.0).
+        self.declare_parameter("cycle_swap_path_goal_len_m", 0.0)
+        # [10-07 D26-A swap3 P1-1] 다음 직선 후진 목표가 교차로 안이면, 단계를 생략하지 않고 교차로 경계 앞 (이 여유만큼) 까지로 줄인다.
+        #   줄인 거리가 0.1 m 미만이면 예전처럼 생략 (사전 점검 '교차로 안' 거부). 한 단계 0.45 m 를 늘리거나 교차로를 지나가게 하지는 않는다
+        #   (Q37 결정 대기). 음수 = clip 안 함 (예전 동작). cycle_swap_gate_enable 이 꺼져 있으면 쓰이지 않는다.
+        #   [10-07 Q37] 결정: 1번째 후진만 cycle_swap_first_step_m (0.65) — clip 은 1번째에도 그대로 적용, 교차로 통과는 여전히 없음.
+        self.declare_parameter("cycle_swap_junction_margin_m", 0.05)
+        # [10-07 D26-A swap3 P2-3] 맞바꿈 상황에서 내가 이미 비켰고 (후진 1회 이상) 상대가 아직 내 goal 의 이 거리 안에 있으면 (관제 캐시),
+        #   상대가 검출 거리 (~3 m) 밖으로 벗어났다는 이유만으로 출발 (READY → RECEIVED_GOAL) 해 점유된 goal 로 가지 않는다 —
+        #   agent 대기를 풀지 않고 pause 를 유지한다. 상대가 비키거나 cycle_swap_start_block_sec 가 지나면 (예전 동작으로) 푼다. 0 = 끔.
+        self.declare_parameter("cycle_swap_start_block_m", 0.8)
+        self.declare_parameter("cycle_swap_start_block_sec", 100.0)
+        # [10-07 Q37] 사용자 결정 "처음 1회 맞바꿈에 대해서만 0.65 m 이동하게 하자": 맞바꿈 상황 (기준점) 의 1번째 후진 (_swap_steps == 0)
+        #   만 이 거리로 간다. retreat_max_m (0.45) 로 자르지 않는다 — 누적 상한·교차로 경계 clip (P1-1)·후방 사전 검사·C 필터·gate 는
+        #   그대로 적용 (누적 상한이 남긴 거리가 더 짧으면 그만큼만). 2번째부터는 예전대로 min(cycle_swap_step_m, retreat_max_m).
+        #   누적 상한 = 계획된 단계 합 + 0.05 = 이 값 + (cycle_swap_max_steps − 1) × cycle_swap_step_m + 0.05
+        #   (0.65 + 0.45 + 0.05 = 1.15 m; 예전 2 × 0.45 + 0.05 = 0.95 m). 0 이하 (코드 기본 -1) = 끔 → 예전 동작과 같다.
+        #   다른 후퇴 (순환 후진·unwedge·push·standoff·곡선 후퇴·교차로 탈출) 는 바뀌지 않는다.
+        self.declare_parameter("cycle_swap_first_step_m", -1.0)
+        # [10-07 Q42] 사용자 결정 "비켜 준 로봇은 최대 30sec 기다려 주는게 맞는거 같아": 우선 로봇에게 비켜 준 후퇴
+        #   (밀어내기·unwedge·standoff·순환 후진·TYPE_9/goal 점유 후진 — BT 곡선 후퇴든 직선 기동이든) 가 끝나면, 같은 명령 안에서
+        #   그 우선 로봇이 yield_hold_pass_m 움직이거나 yield_hold_sec 가 지날 때까지 다시 출발하지 않는다 (pause 유지·resume 안 냄).
+        #   새 명령 (D23 — 같은 goal 의 READY→RECEIVED_GOAL 내부 출발은 제외, P2-1 과 같음)·명령 끝·관제 명령은 그대로 우선.
+        #   대상: 나보다 우선인 로봇 (_i_have_priority false) 이 yield_hold_near_m 안에 있고, 후퇴 규칙이 지목한 상대이거나 나를 마주 봄
+        #   (cycle_front_deg) 또는 내 agent 충돌 대상. 우선이 아닌 로봇에게는 걸지 않는다. 맞바꿈 A 가 맡은 쌍 (후진·정지 유지·순번 기억)
+        #   이면 걸지 않는다 (A 의 정지 유지 그대로). 기본 false = 예전 동작 (resume 관문도 설치하지 않는다).
+        #   cycle_swap_hold_sec·cycle_swap_pass_m 과 같은 값이지만 A 와 따로 조정할 수 있게 이름을 나눴다.
+        self.declare_parameter("yield_hold_enable", False)
+        self.declare_parameter("yield_hold_sec", 30.0)
+        self.declare_parameter("yield_hold_pass_m", 1.0)
+        self.declare_parameter("yield_hold_near_m", 4.0)   # 우선 로봇 중심 거리 상한 (sim ③ d38: 후퇴 끝 3.3 m)
+        # [10-06 D26-B] READY 의 TYPE_12 (정지 상대가 내 goal 점유) 는 slow 대신 pause — READY 는 Nav2 goal 이 없어 감속 접근이 없고,
+        #   pause 여야 cycle 검출의 '대기 중' 으로 잡힌다. 기본 false = 예전 동작.
+        self.declare_parameter("ready_goal_occ_as_pause", False)
+        # [10-06 D26-B] 내 TYPE_12 잠금 대상 한 대에만 cycle 기하 반경을 넓힌다 (현장 cross_agent_id = 0 이라 2.5 m 밖 맞바꿈은 검출 불가).
+        #   0 = 예전 동작 (cycle_front_m 그대로).
+        self.declare_parameter("cycle_blocker_swap_m", 0.0)
         # [V2.1 09-20] 밀어내기 양보(push yield, PIBT 의 priority inheritance): 우선 로봇이 "나 때문에 막혔다"(관제 cross_agent_id
         # = 나, 또는 정지한 채 나를 마주봄) 고 하는데 나는 push_min_sec 동안 무진전이면 — 내가 조정 대기 중이 아니어도(플래너
         # 실패·취소 반복 등) — **내 주행 이력을 따라** push_retreat_m 물러난다 (온 길은 벽이 없다는 걸 안다). 방향에 따라 BackUp
@@ -511,6 +647,9 @@ class FleetDecisionNode(Node):
         self.declare_parameter("junction_open_dirs", 3)
         self.declare_parameter("junction_clear_ahead_m", 1.5)   # 이 거리만큼 내 경로가 비어 있어야 빠져나간다
         self.declare_parameter("junction_clear_max_sec", 6.0)
+        # [10-06 사용자 D21 P7] 교차로를 비우는 동안의 속도 상한 (0 이하 = 예전처럼 그때 속도 그대로). 감속 대기 0.1 m/s 로는
+        #   6 s 안에 1.5 m 를 못 가 23 % 가 시간 초과였다. 0.2 m/s × junction_clear_max_sec 10 s = 최대 2.0 m.
+        self.declare_parameter("junction_clear_speed_mps", 0.0)
         # [V2.3 09-20 14:00] **자기 구출(self-unwedge)**. 긴 정체(1900~2100 s) 를 뜯어 보니 조정 대기가 아니라
         # **Nav2 회복 루프**였다: 로봇이 벽에 붙어 끼면 플래너가 시작점 점유/경로 없음을 내고 RECOVERY 만 반복,
         # 관제가 2.5분마다 다시 명령해도 start_timeout(주행 시작 못 함) 이 반복된다 (5대 판 r4: 33분, r5: 35분).
@@ -616,6 +755,8 @@ class FleetDecisionNode(Node):
         self.mutual_block_replan_sec = float(gp("mutual_block_replan_sec"))
         self.mutual_block_radius = float(gp("mutual_block_radius_m"))
         self.mutual_block_near = float(gp("mutual_block_near_m"))
+        _m8 = float(gp("mutual_block_m8_near_m"))
+        self.mutual_block_m8_near = _m8 if _m8 > 0.0 else self.mutual_block_near
         self.slow_wait_min_body = float(gp("slow_wait_min_body_m"))
         self.predict_enable = bool(gp("predict_enable"))
         self.predict_horizon = float(gp("predict_horizon_sec"))
@@ -663,6 +804,10 @@ class FleetDecisionNode(Node):
         self._v2_reason: str = ""
         self._speed_limited: bool = False
         self._last_speed_cmd: Optional[Tuple[int, float, float]] = None
+        # [10-06 D12 버그 A] 최근 내 속도 명령들 (명령, 시각). echo 판정을 마지막 1개와만 하면 같은 틱에 두 번 내보낼 때
+        #   (예: 교차로 비우기 끝 → 감속 대기 속도 재적용 → 바로 정지 격상 복원) 앞 명령의 echo 가 '외부' 로 기억돼
+        #   이후 모든 복원이 그 값 (0.10 m/s) 을 다시 걸었다 (sim D12 r1 33 분 고정).
+        self._own_speed_hist: deque = deque(maxlen=8)
         self._external_speed_ctrl: Optional[ModifierControl] = None
         self._static_last_hit_xy: Optional[Tuple[float, float]] = None
         self._static_hit_xy: Optional[Tuple[float, float]] = None
@@ -735,12 +880,60 @@ class FleetDecisionNode(Node):
         self.cycle_stagger_sec = float(self.get_parameter("cycle_stagger_sec").value)
         self.cycle_backoff_m = float(self.get_parameter("cycle_backoff_m").value)
         self.cycle_retry_sec = float(self.get_parameter("cycle_retry_sec").value)
+        self.cycle_gate_retry_sec = float(self.get_parameter("cycle_gate_retry_sec").value)
+        self._cycle_gate_retry_at: Optional[Time] = None   # [10-06 D21 P4] gate 거부 뒤 다음 확인 시각
         self._cycle_sig: Optional[Tuple[int, ...]] = None
         self._cycle_since: Optional[Time] = None
         self._cycle_done: Dict[Tuple[int, ...], Time] = {}
         self._cycle_backoff_active = False          # 내가 순환 해소용 BackUp 을 보낸 상태
         self._cycle_backoff_static = False          # 그 BackUp 이 정적(goal 점유) 대기 중에 나간 것인가
         self._cycle_failed_sig: Optional[Tuple[int, ...]] = None   # 내 BackUp 이 실패한 순환 → 다음엔 이력 후퇴
+        # [10-06 D26-A] goal 맞바꿈 후진
+        self.cycle_swap_gate_enable = bool(self.get_parameter("cycle_swap_gate_enable").value)
+        self.cycle_swap_mutual_sec = float(self.get_parameter("cycle_swap_mutual_sec").value)
+        self.cycle_swap_step_m = float(self.get_parameter("cycle_swap_step_m").value)
+        self.cycle_swap_max_steps = int(self.get_parameter("cycle_swap_max_steps").value)
+        self.cycle_swap_hold_sec = float(self.get_parameter("cycle_swap_hold_sec").value)
+        self.cycle_swap_pass_m = float(self.get_parameter("cycle_swap_pass_m").value)
+        self.cycle_swap_partner_goal_m = float(self.get_parameter("cycle_swap_partner_goal_m").value)
+        self.cycle_swap_ready_assume_goal = bool(self.get_parameter("cycle_swap_ready_assume_goal").value)
+        self.cycle_swap_path_goal_len_m = float(self.get_parameter("cycle_swap_path_goal_len_m").value)   # [10-07 Q35]
+        # [10-07 D26-A swap3] P1-1 교차로 경계 clip 여유, P2-3 출발 보류 거리·시한
+        self.cycle_swap_junction_margin_m = float(self.get_parameter("cycle_swap_junction_margin_m").value)
+        self.cycle_swap_start_block_m = float(self.get_parameter("cycle_swap_start_block_m").value)
+        self.cycle_swap_start_block_sec = float(self.get_parameter("cycle_swap_start_block_sec").value)
+        self.cycle_swap_first_step_m = float(self.get_parameter("cycle_swap_first_step_m").value)   # [10-07 Q37]
+        # [10-07 Q42] 비켜 준 로봇의 정지 유지
+        self.yield_hold_enable = bool(self.get_parameter("yield_hold_enable").value)
+        self.yield_hold_sec = float(self.get_parameter("yield_hold_sec").value)
+        self.yield_hold_pass_m = float(self.get_parameter("yield_hold_pass_m").value)
+        self.yield_hold_near_m = float(self.get_parameter("yield_hold_near_m").value)
+        self._swap_hold_goals: Optional[Tuple[Tuple[float, float], ...]] = None   # P2-1 정지 유지 시작 때 내 남은 goal
+        self._swap_first_xy: Dict[Tuple[int, ...], Tuple[float, float]] = {}      # P2-2 쌍별 최초 순환 검출 자리
+        self._swap_start_block_since: Optional[Time] = None                      # P2-3 출발 보류 시작
+        self._swap_start_block_paused = False
+        self._swap_start_block_expired = False
+        # [10-06 D26-A 검토] 상대별 goal 기억: mid -> (goal x, goal y, 기억할 때 상대 x, y). 상대가 경로를 보낼 때마다 갱신,
+        #   상대가 그 자리에서 2.0 m 넘게 움직였거나 goal 0.3 m 안에 닿았으면 (도착 = 쓴 goal) 쓰지 않는다.
+        #   [10-06 D26-A 재검토] 5번째 값 = 그 끝점이 진짜 경로 끝인가 (10점 미만). 10점 가득 (시야 끝) 이면 False — goal 로 쓰지 않는다.
+        self._swap_goal_mem: Dict[int, Tuple[float, float, float, float, bool]] = {}
+        self._swap_pair: Optional[Tuple[int, ...]] = None       # 지금 상황의 쌍 (정렬된 2 id)
+        # [10-06 D26-A 재검토] 기준점·누적 후진 횟수는 쌍이 아니라 로봇 단위 — 세 번째 로봇과 쌍이 바뀌어도 유지 (누적 ~0.95 m 상한).
+        self._swap_anchor: Optional[Tuple[float, float]] = None  # 최초 감지 자리 — 누적 상한 기준. 2.0 m 정상 주행·SUCCEEDED 에만 지운다
+        self._swap_partner_anchor: Optional[Tuple[float, float, float]] = None   # 상대 자세 (변위 0.08 m·yaw 5° 감시)
+        self._swap_steps = 0                                     # 기준점 이후 내가 한 후진 횟수 (재전송·재명령·쌍 바뀜으로 초기화 안 함)
+        self._swap_vacater: Dict[Tuple[int, ...], int] = {}      # 쌍별 '비키는 로봇' 기억 — 한 쌍에 한 대만 비킨다
+        self._swap_step_active = False                           # 맞바꿈 후진을 보낸 상태 (결과 대기)
+        self._swap_step_xy: Optional[Tuple[float, float]] = None
+        self._swap_gate_ctx: Optional[Tuple[int, ...]] = None    # 이 후진을 보내는 동안만 — retreat gate 의 coord_wait 거부 예외
+        self._swap_freeze_since: Optional[Time] = None           # 후진·정지 유지 동안 대기 시계(100 s last-goal STOP 등) 정지 시작
+        self._swap_hold_since: Optional[Time] = None             # 후진 뒤 정지 유지 시작
+        self._swap_hold_partner: Optional[Tuple[float, float]] = None   # 정지 유지 시작 때 상대 위치 (지나감 판정)
+        self._swap_seen_t: Optional[Time] = None                 # 맞바꿈 술어가 마지막으로 참이던 시각 (다른 후퇴 규칙 gate 차단)
+        self._swap_retry_at: Optional[Time] = None               # 사전 점검에 막힌 뒤 다음 시도 시각
+        # [10-06 D26-B]
+        self.ready_goal_occ_as_pause = bool(self.get_parameter("ready_goal_occ_as_pause").value)
+        self.cycle_blocker_swap_m = float(self.get_parameter("cycle_blocker_swap_m").value)
         self.push_yield_enable = bool(self.get_parameter("push_yield_enable").value)
         self.blocked_yield_enable = bool(self.get_parameter("blocked_yield_enable").value)
         self.blocked_yield_m = float(self.get_parameter("blocked_yield_m").value)
@@ -836,7 +1029,13 @@ class FleetDecisionNode(Node):
         self.junction_open_dirs = int(self.get_parameter("junction_open_dirs").value)
         self.junction_clear_ahead_m = float(self.get_parameter("junction_clear_ahead_m").value)
         self.junction_clear_max_sec = float(self.get_parameter("junction_clear_max_sec").value)
+        self.junction_clear_speed = float(self.get_parameter("junction_clear_speed_mps").value)
+        self._jclear_limited = False                       # [10-06 P7] 교차로 비우기 속도 상한을 걸었는가
+        self._jclear_last: Optional[Time] = None
         self._junction_clear_since: Optional[Time] = None
+        self._agent_lock_deferred = False                  # [10-06 P7-3] Phase 0 잠금을 교차로 비우기로 미뤘다
+        self._man_gen = 0                                  # [10-06 D23-1] 기동 세대. 취소·회수 때 올려서 응답 대기 중인 송신을 무효로 한다
+        self._jclear_cmd: Optional[Tuple[int, float, float]] = None   # [10-06 P7-1] 비우기 상한으로 마지막에 보낸 명령
         self._map_free_mask: Optional[bytearray] = None
         self._junc_cache = None
         self.unwedge_enable = bool(self.get_parameter("unwedge_enable").value)
@@ -879,6 +1078,10 @@ class FleetDecisionNode(Node):
         self.standoff_retreat_m = float(self.get_parameter("standoff_retreat_m").value)
         self.retreat_away_ratio = float(self.get_parameter("retreat_away_ratio").value)
         self._plan_retreat_why = ""
+        self._yield_cands_why = ""                     # [10-06 D21 P8] 마지막 후퇴 후보 목록의 탈락 사유
+        # [10-06 D21-②] 직선 기동 실패·취소의 실제 사유 (예전에는 관제 회수·허가 거부도 "후방 막힘" 으로 적었다)
+        self._backup_fail_why = ""
+        self._revoke_note: Optional[Tuple[Time, str]] = None
         self.standoff_cooldown_sec = float(self.get_parameter("standoff_cooldown_sec").value)
         self._standoff_last: Optional[Time] = None
         self._standoff_active = False
@@ -899,6 +1102,7 @@ class FleetDecisionNode(Node):
         self._bt_errs: deque = deque(maxlen=64)       # (t, code)
         self._recov_step = 0                           # 1 코스트맵 → 2 예비 플래너 A → 3 B → 4 자기 구출
         self._recov_last: Optional[Time] = None
+        self._recov_xy: Optional[Tuple[float, float]] = None   # [10-06 D21 P1] 마지막으로 단계를 올린 자리
         self._planner_override_until: Optional[Time] = None
         self.recovery_cmd_enable = bool(self.get_parameter("recovery_cmd_enable").value)
         self.recovery_cmd_hold = float(self.get_parameter("recovery_cmd_hold_sec").value)
@@ -922,6 +1126,7 @@ class FleetDecisionNode(Node):
         self._own_hist: deque = deque(maxlen=600)   # (t, x, y) 내 자세 이력 (2 Hz, 5 분)
         self._agent_stop_since: Dict[int, Tuple[float, float, float]] = {}   # mid → (t, x, y) 정지 앵커
         self._push_done: Dict[int, Time] = {}
+        self._push_last_mid: Optional[int] = None        # [10-06 D23-1b] 회수 때 쿨다운을 돌려줄 상대
         self._push_paused = False
         self._maneuver: Optional[dict] = None       # 진행 중인 이력 후퇴 {mode, steps, ...}
         self._spin_client = ActionClient(self, Spin, self.get_parameter("spin_action_name").value,
@@ -1001,8 +1206,9 @@ class FleetDecisionNode(Node):
         self.pub_cmd_resume = self.create_publisher(Bool, 
             self.get_parameter("topic_cmd_resume").value, qos_req, callback_group=self.cb_group)
         
-        self.pub_cmd_pause = self.create_publisher(Bool, 
+        self.pub_cmd_pause = self.create_publisher(Bool,
             self.get_parameter("topic_cmd_pause").value, qos_req, callback_group=self.cb_group)
+        self._yh_install_gate()           # [10-07 Q42] 켜져 있을 때만 resume 관문을 씌운다 (꺼짐 = 발행자 그대로)
 
         self.pub_cmd_stop = self.create_publisher(UInt8, 
             self.get_parameter("topic_cmd_stop").value, 10, callback_group=self.cb_group)
@@ -1020,6 +1226,7 @@ class FleetDecisionNode(Node):
         self.create_timer(1.0, self._v2_push_tick, callback_group=self.cb_group)     # [V2.1] 밀어내기 양보
         self.create_timer(0.5, self._v2_maneuver_tick, callback_group=self.cb_group) # [V2.1] 기동 stop-and-go 재개
         self.create_timer(0.5, self._v2_yield_tick, callback_group=self.cb_group)    # [V2.1] BT 후퇴 주행 감시
+        self.create_timer(0.5, self._jclear_watch_tick, callback_group=self.cb_group)  # [10-06 P7] 교차로 비우기 속도 상한 정리
         self.create_timer(1.0, self._v2_unwedge_tick, callback_group=self.cb_group)  # [V2.3] 자기 구출
         self.create_timer(1.0, self._v2_standoff_tick, callback_group=self.cb_group) # [V2.7] 정면 대치 해소
         self.create_timer(0.5, self._v2_junction_exit_tick, callback_group=self.cb_group)  # [V2.26] 교차로 진입 전 출구 확인
@@ -1029,6 +1236,8 @@ class FleetDecisionNode(Node):
         self.create_timer(0.5, self._v2_yield_beat, callback_group=self.cb_group)    # [V2.1] 후퇴 요청 하트비트
         self.create_timer(0.5, self._v2_recov_cmd_beat, callback_group=self.cb_group)  # [V2.6] 회복 지시 하트비트
         self.create_timer(0.1, self._op_guard_tick, callback_group=self.cb_group)     # [OP] 허가 상실 시 fleet 기동 즉시 회수
+        if self.yield_hold_enable:
+            self.create_timer(0.1, self._v2_yield_hold_tick, callback_group=self.cb_group)  # [10-07 Q42] 비켜 준 뒤 정지 유지
 
 
         # [추가] 현재 일시정지/재계획 시퀀스가 진행 중인지 확인하는 플래그
@@ -1172,6 +1381,8 @@ class FleetDecisionNode(Node):
             self._agent_seen_at[a.machine_id] = now
             if self.v2_enable:
                 self._v2_record_agent(a, now)
+            if self.cycle_swap_gate_enable and int(a.machine_id) != int(self.my_id):   # [10-06 D26-A 검토] 상대 goal 기억
+                self._swap_note_goal(a)
 
         # [FIX] 병합만 하면 떠난 이웃이 영원히 남는다. 관제 링크가 끊겨도
         # 몇 분 전 자세/경로로 판단하게 되므로 오래된 항목은 버린다.
@@ -1180,6 +1391,8 @@ class FleetDecisionNode(Node):
         for mid in stale:
             self._cached_agents.pop(mid, None)
             self._agent_seen_at.pop(mid, None)
+            if self.cycle_swap_gate_enable:
+                self._swap_goal_mem.pop(mid, None)       # [10-06 D26-A 검토]
             self.get_logger().warn(
                 f"[on_agents] agent {mid} 소식 끊김 "
                 f"({self.agent_cache_ttl_sec:.1f}s). 캐시에서 제거한다.")
@@ -1220,6 +1433,26 @@ class FleetDecisionNode(Node):
                 f"다중로봇 조정을 강제 재개한다. (통지 유실 의심)")
             self.nav_stop_complete_ = True
             self._nav_stop_wait_start = None
+
+    # [10-06 D26-D] Nav2 goal 이 없는 상태. 이때 내부 STOP(/stop_command) 을 받은 navigation_manager 는
+    #   _goal_handle 이 None 이라 취소할 것이 없어 /nav_stop_complete 를 내지 않고 return 한다
+    #   (navigation_manager_cmd_node.py _nav_stop_callback 450-454, navigation_manager_node.py 352-356).
+    #   READY = 목표 점유 대기 루프(_run_move_wait_and_dispatch) 안, goal 발송 전.
+    #   IDLE·SUCCEEDED·CANCELED·FAILED = goal 이 끝나 _move_result_callback 이 _goal_handle 을 비운 뒤.
+    _NO_GOAL_STATUSES = ('READY', 'IDLE', 'SUCCEEDED', 'CANCELED', 'FAILED')
+
+    def _arm_nav_stop_wait(self, now: Time, where: str) -> None:
+        """[10-06 D26-D] 내부 STOP 을 낸 직후 부른다. STOP 발행 자체는 호출자가 예전 그대로 한다 (관제 보고 경로 불변).
+        정지 완료 통지가 올 상태에서만 대기(nav_stop_complete_=False + watchdog)를 건다.
+        예전에는 READY 에서도 걸어 10 s 동안 cycle·push·standoff 가 멈추고 watchdog 이 '통지 유실 의심' 을 냈다
+        (sim op_swap_c1_ready_d26)."""
+        if self.current_robot_status in self._NO_GOAL_STATUSES:
+            self.get_logger().warn(
+                f"[{where}] STOP 발행 — 상태 {self.current_robot_status} 는 Nav2 goal 이 없어 navigation_manager 가 "
+                f"/nav_stop_complete 를 내지 않는다. 정지 완료 대기를 걸지 않는다.")
+            return
+        self.nav_stop_complete_ = False
+        self._nav_stop_wait_start = now          # watchdog 무장
 
 
     def robot_status_callback(self, msg: String):
@@ -1266,12 +1499,15 @@ class FleetDecisionNode(Node):
             _me = self._own_pose()
             self._last_end = {'status': msg.data, 't': _now_st, 'xy': (_me[0], _me[1]) if _me is not None else None,
                               'active_since': self._active_since}
+        _stuck_fresh = False                       # [10-06 D21 P1] 무진전 시계를 새로 시작했는가 (D11 이어 세기면 False)
         if msg.data in self._OP_ACTIVE and (prev not in self._OP_ACTIVE or self._active_since is None):
             self._active_since = self._stuck_carry_or(_now_st)
+            _stuck_fresh = self._active_since == _now_st
         elif prev == 'READY' and msg.data == 'RECEIVED_GOAL':
             _ready = ((_now_st - self._ready_since).nanoseconds * 1e-9) if self._ready_since is not None else 1e9
             if _ready >= self.stuck_ready_reset:
                 self._active_since = _now_st
+                _stuck_fresh = True
         # [09-28 현장 이상 2] replan 재시도 횟수는 '한 관제 명령 안' 에서만 센다 (사용자 결정 F-a·F-b).
         # 새 명령(종료·대기 → 주행 계열, READY → RECEIVED_GOAL)과 goal 종료(IDLE/SUCCEEDED/CANCELED/FAILED) 때
         # 대기 상태 진행 여부와 상관없이 정적·agent 재시도 추적을 지운다.
@@ -1280,6 +1516,28 @@ class FleetDecisionNode(Node):
                     and (prev not in self._OP_ACTIVE or (prev == 'READY' and msg.data == 'RECEIVED_GOAL')))
         _goal_end = (msg.data in ('IDLE', 'SUCCEEDED', 'CANCELED', 'FAILED') and prev != msg.data
                      and prev in self._OP_ACTIVE)
+        # [10-06 D21 P1] V2 recovery 단계(1 코스트맵 → 2·3 예비 플래너 → 4) 도 명령 단위로 센다 (09-28 결정과 같은 기준).
+        #   예전에는 새 명령·goal 종료에도 남아 다음 막힘이 2~4단계부터 시작했다 (sim 459 회 중 183 회, S9 실측).
+        #   D11 이어 세기(같은 자리 재명령으로 무진전 시계를 이어 쓰는 경우)에는 단계도 잇는다 — 시계와 같은 기준.
+        # [10-06 사용자 D23 (가)] 새 명령(종료·대기 → 주행 계열, READY → RECEIVED_GOAL 출발 포함) 이면 진행 중인 fleet 직선 기동
+        #   (BackUp·DriveOnHeading·Spin·stop-and-go 재개 예약)과 곡선 후퇴를 즉시 거둔다. D14 는 종료 상태로 들어갈 때만 거뒀다 —
+        #   READY 에서 시작한 직선 후진이 출발 뒤에도 이어져 새 주행과 겹쳤다 (sim op_d8 r2 06:05:43, 0.72 m 후진 + 1.48 m 전진 → Collision Ahead).
+        if self.operator_priority and _new_cmd and self._op_busy():
+            self._op_revoke(f"새 명령 ({prev} -> {msg.data})", refund=True)
+        # [10-07 D26-A swap3 P2-1·P2-3] 같은 명령의 내부 출발 (READY → RECEIVED_GOAL, goal 목록 그대로) 인가 — _swap_on_command 가
+        #   정지 유지 기억을 바꾸기 전에 본다
+        _swap_internal = (self.cycle_swap_gate_enable and prev == 'READY' and msg.data == 'RECEIVED_GOAL'
+                          and not self._swap_goal_changed())
+        if self.cycle_swap_gate_enable and (_new_cmd or _goal_end):   # [10-06 D26-A] 새 명령·명령 끝 → 정지 유지 해제, SUCCEEDED → 상황 지움
+            self._swap_on_command(prev, msg.data, _new_cmd, _goal_end)
+        if self.yield_hold_enable and (_new_cmd or _goal_end):   # [10-07 Q42] 새 명령·명령 끝 → 정지 유지 해제 (같은 goal 내부 출발은 유지)
+            self._yh_on_command(prev, msg.data, _new_cmd, _goal_end)
+        if (_new_cmd and _stuck_fresh) or (_goal_end and msg.data in ('IDLE', 'SUCCEEDED')):
+            self._recov_reset(f"{'새 명령' if _new_cmd else 'goal 종료'} ({prev} -> {msg.data})")
+            # [10-06 D21 P9] 1회성 후진 표시도 같은 기준(명령 단위, D11 같은 자리 재명령이면 유지)으로 푼다.
+            #   예전에는 지우는 곳이 없어 한 번 쓰면(게이트에 막힌 공지 포함) 그 상대에게는 노드 수명 내내 다시 못 물러났다.
+            #   [V2 reset](자기 후퇴 끝 → RECEIVED_GOAL 등) 은 새 명령이 아니므로 여기서 풀지 않는다.
+            self._backoff_done_for = None
         if (_new_cmd or _goal_end) and (self._static_replan_retry or self._agent_replan_retry
                                         or self._static_last_release_t is not None
                                         or self._agent_last_release_t is not None):
@@ -1288,7 +1546,12 @@ class FleetDecisionNode(Node):
                 f"replan 재시도 추적 초기화 (static {self._static_replan_retry}회, agent {self._agent_replan_retry}회)")
             self._static_reset_osc()
             self._agent_reset_osc()
-        if self.v2_enable and msg.data in ('RECEIVED_GOAL', 'READY') and prev != msg.data:
+        # [10-07 D26-A swap3 P2-3] 내가 비킨 뒤 상대가 검출 거리 밖으로 벗어나 출발 (READY → RECEIVED_GOAL) 했지만 상대가 아직 내 goal 에
+        #   있으면 (관제 캐시) 대기를 풀지 않고 pause 를 건다 — 아래 [V2 reset] 을 건너뛴다 (sim swap3_c1_ready_d26 r2.log:1487/1511:
+        #   3.06 m 에서 AgentCollision Clear → 출발 → 점유된 P1 으로 가서 recovery·abort 2회).
+        _swap_blk = (_swap_internal
+                     and self._swap_start_block_engage(_now_st, f"출발 {prev} -> {msg.data}", force_pause=True))
+        if self.v2_enable and msg.data in ('RECEIVED_GOAL', 'READY') and prev != msg.data and not _swap_blk:
             held = (self.is_processing_agent_pause or self.is_processing_replan_pause
                     or self.is_processing_goal_occupied_pause or self.is_processing_last_goal_occupied_pause)
             if held:
@@ -1320,6 +1583,16 @@ class FleetDecisionNode(Node):
                 self._static_reset_osc()
                 self._np_anchor = None
                 self._np_anchor_t = now
+        # [10-06 D23-2] 회수가 남긴 'failed' 를 거둘 주인이 없으면 (Phase 1 TYPE_9·goal 점유 후진은 위 [V2 reset] 이 대기를 풀었다)
+        #   idle 로 돌린다. 안 그러면 idle 을 기다리는 규칙 (순환·밀어내기·교차로 탈출·unwedge·standoff) 이 90 s watchdog 까지 막힌다.
+        if _new_cmd and self._backup_state == "failed" and not self.is_processing_agent_pause and not self._backup_owned():
+            self.get_logger().info(f"[OP] 새 명령 ({prev} -> {msg.data}) — 주인 없는 기동 실패 상태를 정리 (failed → idle)")
+            self._backup_state = "idle"; self._man_ctx = None
+
+    def _backup_owned(self) -> bool:
+        """[10-06 D23-2] _backup_state 결과 (succeeded/failed) 를 거둘 규칙이 살아 있는가."""
+        return bool(self._cycle_backoff_active or self._push_paused or self._jx_escape_active
+                    or self._unwedge_active or self._standoff_active)
 
 
 # ------------------------------------------------------------------
@@ -1379,15 +1652,18 @@ class FleetDecisionNode(Node):
                 self._last_goal_occupied_false_start_time = None
                 if self._pause_start_time is not None:
                     dt = (now - self._pause_start_time).nanoseconds * 1e-9
-                    if dt < self.goal_occupied_timeout_sec : 
+                    if self._swap_freeze_since is not None:
+                        # [10-06 D26-A] 맞바꿈 후진·정지 유지 중 — 100 s 시계 정지 (사용자 Q26). 끝날 때 멈춘 구간을 뺀다
+                        self.get_logger().info("[check_collision_obstacle] last Goal Occupied — 맞바꿈 후진·정지 유지 중, 시계 정지",
+                                               throttle_duration_sec=5.0)
+                    elif dt < self.goal_occupied_timeout_sec : 
                         self.get_logger().info(f"[check_collision_obstacle] last Goal Occupied detected but pausing for {dt:.1f}s (within timeout threshold).", throttle_duration_sec=2.0)
                     elif dt >= self.goal_occupied_timeout_sec:   
                         self.get_logger().warn(f"[check_collision_obstacle] last Goal Occupied detected timeout for {dt:.1f}s. Initiating resume sequence.")
                         self.pub_cmd_stop.publish(UInt8(data=1))  # Stop 명령 발행 (예: 1 = 긴급 정지)
                         self.pub_cmd_stop.publish(UInt8(data=1))  # Stop 명령 발행 (예: 1 = 긴급 정지)
                         self._publish_state("STOP (Goal Occupied)")
-                        self.nav_stop_complete_ = False # STOP 명령 발행 후 주행 재개 대기 상태로 전환
-                        self._nav_stop_wait_start = now  # [FIX] watchdog 기동
+                        self._arm_nav_stop_wait(now, "check_collision_obstacle last goal")  # [10-06 D26-D] goal 있을 때만 정지 완료 대기
                         self.static_is_last_goal_occupied_ = False
                         self._last_goal_occupied_false_start_time = None
                         self._pause_start_time = None
@@ -1640,8 +1916,7 @@ class FleetDecisionNode(Node):
                                 f"{self._static_replan_retry - 1}회가 모두 실패했다. "
                                 f"자력 우회 불가로 판단해 관제에 보고한다.")
                             self.pub_cmd_stop.publish(UInt8(data=1))
-                            self.nav_stop_complete_ = False
-                            self._nav_stop_wait_start = now      # watchdog 무장
+                            self._arm_nav_stop_wait(now, "check_collision_obstacle replan 상한")  # [10-06 D26-D]
                             self._static_reset_osc()
                             self.is_processing_replan_pause = False
                             self._pause_start_time = None
@@ -1805,6 +2080,13 @@ class FleetDecisionNode(Node):
             
             self._agent_clear_start_time = None # Early Exit 카운트 리셋
 
+            # [10-06 P7-3] Phase 0 이 교차로 비우기로 잠금 마무리를 미뤘다 → 비우는 동안은 그대로, 끝나면 정지한다
+            if self._agent_lock_deferred and self._agent_pause_start_time is None:
+                if self._junction_should_clear(now):
+                    return
+                self._agent_lock_finish(now)
+                return
+
             if self.v2_enable and self._v2_phase1_tick(now):
                 return   # [V2] 감속 대기 중이거나 방금 상태를 바꿨다 — 아래 타임아웃 분기는 다음 틱에
             
@@ -1853,8 +2135,7 @@ class FleetDecisionNode(Node):
                                     f"agent replan 상한 도달 ({self._agent_replan_retry - 1}회 실패). "
                                     f"자력 해결 불가로 판단해 관제에 보고한다.")
                                 self.pub_cmd_stop.publish(UInt8(data=1))
-                                self.nav_stop_complete_ = False
-                                self._nav_stop_wait_start = now      # watchdog 무장
+                                self._arm_nav_stop_wait(now, "check_collision_agent replan 상한")  # [10-06 D26-D]
                                 self._publish_state(
                                     f"[check_collision_agent] ABORT (agent replan 상한 {self.agent_max_replan_retry})")
                                 self._agent_reset_osc()
@@ -1881,6 +2162,13 @@ class FleetDecisionNode(Node):
 
         # [Phase 0 -> 조기 종료] 연속 False 판정 (Early Exit)
         if self.is_processing_agent_pause and self.agent_collision_status is False and self.delay_after_agent_action == False:
+            # [10-07 D26-A swap3 P2-3] 내가 비킨 맞바꿈 상대가 검출 거리 밖으로 사라졌을 뿐 아직 내 goal 에 있으면 Early Exit 하지 않는다
+            #   (sim swap3_c1_ready_d26 r2.log:1487 3.06 m 에서 Clear). 상대가 비키거나 시한이 지나면 아래 Early Exit 이 그대로 푼다.
+            #   이미 서 있는 pause 대기에서만 (감속 대기는 그대로 — 달리는 로봇을 새로 세우지 않는다).
+            if (self.cycle_swap_gate_enable and self._v2_mode == "pause"
+                    and self._swap_start_block_engage(now, "Early Exit 대신")):
+                self._agent_clear_start_time = None
+                return
             if self._agent_clear_start_time is None:
                 self.get_logger().info("[check_collision_agent] [Early Exit] Obstacle disappeared. Starting clear timer...")
                 self._agent_clear_start_time = now
@@ -1922,6 +2210,8 @@ class FleetDecisionNode(Node):
                 
                 cmd = MovingCommand.WAIT
                 stop_type = MovingStopType.TYPE_11
+                self._v2_last_goal_report = False   # [10-06 D26-D] 대상 없음(TYPE_11)도 이전 goal 점유 플래그를 지운다
+                self._v2_goal_occ_wait = False
                 # self.get_logger().warn(f"self.latest_agent_target_id == 0 , n_check_complete : {cmd}, moving_stop_type : {stop_type}")
                 self.get_logger().warn(f"[check_collision_agent] [Phase 0] target_id is 0. Fallback to WAIT (TYPE_11).")
 
@@ -1944,32 +2234,46 @@ class FleetDecisionNode(Node):
             if self._yield_active:
                 self._yield_finish(False, "조정 시퀀스 재잠금")     # 플래그·컨트롤러를 반드시 되돌린다
             # [V2.2] 교차로 한가운데서 잠그면 세 방향이 함께 막힌다 → 앞이 비어 있으면 빠져나간 뒤 잠근다
+            # [10-06 P7-3] 미룬 잠금 마무리는 Phase 1 이 매 틱 다시 본다 (예전에는 다시 보지 않아 정지 없이 계속 달렸다)
             if self._v2_pending_mode == "pause" and self._junction_should_clear(now):
+                self._agent_lock_deferred = True
                 return
+            self._agent_lock_finish(now)
+
+    def _agent_lock_finish(self, now: Time) -> None:
+        """Phase 0 잠금의 나머지 (대기 시작). [10-06 P7-3] 교차로 비우기로 미뤘으면 비우기가 끝난 틱에 Phase 1 이 부른다."""
+        self._agent_lock_deferred = False
+        # [10-06 D26-A] 진행 중인 맞바꿈 후진의 상대를 다시 잠근 것이면 취소하지 않는다
+        #   (예전: STOP 뒤 push 가 1 s 뒤 TYPE_12 재잠금에 취소됨, sim op_swap_c1_ready_d18_r2 14:03:05 'BackUp 취소됨 status 5')
+        if (self._swap_step_active and self._swap_pair is not None
+                and int(self._locked_target_id or 0) in self._swap_pair
+                and self._backup_state in ("sending", "running", "waiting")):
+            self.get_logger().info(f"[V2 swap] 맞바꿈 상대 {self._locked_target_id} 재잠금 — 진행 중인 후진은 그대로 둔다")
+        else:
             if self._backup_state in ("sending", "running", "waiting"):
                 self._backup_cancel()
             self._backup_state = "idle"; self._man_ctx = None
-            # [FIX B-7] 같은 상대에게 짧은 간격으로 다시 걸린 것이면 경과·재시도를 이어받는다
-            self._agent_pause_start_time = self._agent_pause_start(now, self._locked_target_id)
-            
-            # 대기 시간(N초) 매핑
-            n_pause = self._pause_timeout_for(self.current_agent_command)
-            self.agent_pause_timeout_sec = n_pause
-            
-            if self.v2_enable and self._v2_pending_mode != "pause":
-                # [V2] 정지 대신 감속 대기 / 속도 맞추기. 정지·재개 왕복(실측 2~4 s) 을 아낀다.
-                self._v2_mode = self._v2_pending_mode
-                self._v2_apply_speed(now)
-                self.get_logger().error(
-                    f"[check_collision_agent] [Phase 0] Sequence Locked. {self._v2_mode.upper()} for {n_pause}s "
-                    f"({self._v2_reason}).")
-                self._publish_state(f"{self.current_agent_stop_type.name}: {self._v2_mode.upper()} {n_pause}s")
-            else:
-                self._v2_mode = "pause"
-                self._v2_pause_since = now
-                self.get_logger().error(f"[check_collision_agent] [Phase 0] Sequence Locked. Starting PAUSE for {n_pause}s. ({self._v2_reason})")
-                self._publish_pause()
-                self._publish_state(f"{self.current_agent_stop_type.name}: PAUSE {n_pause}s")
+        # [FIX B-7] 같은 상대에게 짧은 간격으로 다시 걸린 것이면 경과·재시도를 이어받는다
+        self._agent_pause_start_time = self._agent_pause_start(now, self._locked_target_id)
+        
+        # 대기 시간(N초) 매핑
+        n_pause = self._pause_timeout_for(self.current_agent_command)
+        self.agent_pause_timeout_sec = n_pause
+        
+        if self.v2_enable and self._v2_pending_mode != "pause":
+            # [V2] 정지 대신 감속 대기 / 속도 맞추기. 정지·재개 왕복(실측 2~4 s) 을 아낀다.
+            self._v2_mode = self._v2_pending_mode
+            self._v2_apply_speed(now)
+            self.get_logger().error(
+                f"[check_collision_agent] [Phase 0] Sequence Locked. {self._v2_mode.upper()} for {n_pause}s "
+                f"({self._v2_reason}).")
+            self._publish_state(f"{self.current_agent_stop_type.name}: {self._v2_mode.upper()} {n_pause}s")
+        else:
+            self._v2_mode = "pause"
+            self._v2_pause_since = now
+            self.get_logger().error(f"[check_collision_agent] [Phase 0] Sequence Locked. Starting PAUSE for {n_pause}s. ({self._v2_reason})")
+            self._publish_pause()
+            self._publish_state(f"{self.current_agent_stop_type.name}: PAUSE {n_pause}s")
 
 
 
@@ -1992,6 +2296,8 @@ class FleetDecisionNode(Node):
     def _decide_for_current_target(self):
         """ 지금 잡혀 있는 대상으로 명령/타입을 결정한다. Phase 0 와 재평가가 공유. """
         if self.latest_agent_target_id == 0:
+            self._v2_last_goal_report = False       # [10-06 D26-D] 대상 없음(TYPE_11)도 이전 goal 점유 플래그를 지운다
+            self._v2_goal_occ_wait = False
             return MovingCommand.WAIT, MovingStopType.TYPE_11
         return self._decide_obstacle_action(self.latest_agent_target_id,
                                             self.latest_agent_collision_xy)
@@ -2085,6 +2391,10 @@ class FleetDecisionNode(Node):
 
         # [V2] 정책 v2. reroute 진행 중인 상대(TYPE_3/5~8) 는 v1 트리에 맡긴다.
         self._v2_pending_mode, self._v2_pending_timeout, self._v2_reason = "pause", None, ""
+        # [10-06 D26-D] v1 트리로 빠지는 결정(캐시에 없는 상대·reroute 상대·simple_mode)도 이전 v2 goal 점유 플래그를 물려받지 않게
+        #   지운다 (Phase 1 의 v2 tick 은 v2_enable 이면 결정 경로와 무관하게 돈다).
+        self._v2_last_goal_report = False
+        self._v2_goal_occ_wait = False
         if self.v2_enable and not self.simple_mode:
             agent_v2 = self._cached_agents.get(target_id)
             if agent_v2 is not None and not (self.use_reroute and agent_v2.reroute):
@@ -2421,6 +2731,10 @@ class FleetDecisionNode(Node):
                 f"상대 {self._agent_last_target_id} -> {target_id}).")
         self._agent_replan_retry = 0
         self._agent_last_elapsed = 0.0
+        # [10-06 D21 P9] 1회성 후진 표시는 **다른 상대**를 만났을 때만 푼다. 예전 판(1차 수정)은 이 '새 상황' 분기에서 무조건
+        #   풀어, 해제 기록이 없을 때(goal 종료·[V2 reset] 뒤)도 같은 상대에게 다시 후진했다 (D7 r1 05:31:33·05:32:05, 순환 끊기 순번을 앞지름)
+        if self._backoff_done_for is not None and target_id != self._backoff_done_for:
+            self._backoff_done_for = None
         return now
 
     def _agent_reset_osc(self) -> None:
@@ -2457,11 +2771,13 @@ class FleetDecisionNode(Node):
     def _on_speed_ctrl(self, msg: ModifierControl):
         """velocity_modifier 명령을 엿본다. 내가 보낸 것이 아니면 '외부 기준값' 으로 기억했다가
         감속 대기가 끝날 때 그대로 되돌린다 (관제·다른 노드가 건 제한을 지우지 않기 위해)."""
-        mine = self._last_speed_cmd
-        if mine is not None and int(msg.command_type) == mine[0] \
-                and abs(float(msg.linear_value) - mine[1]) < 1e-4 \
-                and abs(float(msg.angular_value) - mine[2]) < 1e-4:
-            return
+        now = self.get_clock().now()
+        # [10-06 D12 버그 A] 마지막 1개가 아니라 최근 2 s 안의 내 명령 모두와 비교한다
+        for mine, t in self._own_speed_hist:
+            if (now - t).nanoseconds * 1e-9 <= 2.0 and int(msg.command_type) == mine[0] \
+                    and abs(float(msg.linear_value) - mine[1]) < 1e-4 \
+                    and abs(float(msg.angular_value) - mine[2]) < 1e-4:
+                return
         self._external_speed_ctrl = msg
         self.get_logger().info(
             f"[V2] 외부 속도 명령 기억: type {msg.command_type} lin {msg.linear_value:.2f} ang {msg.angular_value:.2f}")
@@ -2634,7 +2950,7 @@ class FleetDecisionNode(Node):
             return False
         sp = self._agent_speed(agent.machine_id, now)
         return (sp is not None and sp < self.agent_moving_mps
-                and self._target_dist(agent) <= self.mutual_block_near)
+                and self._target_dist(agent) <= self.mutual_block_m8_near)     # [10-06 D25] M-8 전용 거리
 
     def _hit_dist(self) -> float:
         me = self._own_pose()
@@ -2680,6 +2996,11 @@ class FleetDecisionNode(Node):
                 f"| {reason} | hit {dist:.2f} m, body {bdist:.2f} m")
             return cmd, st
 
+        # [10-06 D26-D] goal 점유 플래그 두 개는 결정마다 새로 정한다 — manual·immobile 조기 return 보다 먼저 지운다.
+        #   예전에는 아래 [S11B v2] 자리에서만 지워, 이전 TYPE_12(마지막 goal 점유) 의 True 가 TYPE_11 결정에 남았고
+        #   Phase 1 tick 이 15 s 뒤 "STOP (last goal occupied)" 를 냈다 (sim op_swap_c1_ready_d26 r1 11:47:03).
+        self._v2_last_goal_report = False
+        self._v2_goal_occ_wait = False
         if self._check_vehicle_manual_mode(agent):
             return out(MovingCommand.WAIT_DETECT_AMR, MovingStopType.TYPE_1, "pause",
                        self.wait_detect_sec, "manual")
@@ -2698,13 +3019,18 @@ class FleetDecisionNode(Node):
         if not moving and self.latest_agent_goal_occupied:
             wait = (self.stopped_yielding_wait if cls == "yielding"
                     else self.stopped_working_wait if cls == "working" else self.wait_detect_sec)
+            # [10-06 D26-B1] READY 는 Nav2 goal 이 없어 slow 여도 실제로는 서 있다 — pause 로 두어 cycle 검출의 '대기 중' 에 들게 한다.
+            #   (slow 면 waiting_agent 가 아니라 2.2~3.0 m 맞바꿈이 slow-wait 시한 100 s 동안 cycle 로 안 잡혔다, sim op_swap_c1_ready_d26)
+            mode12 = slow_or_pause
+            if self.ready_goal_occ_as_pause and self.current_robot_status == 'READY':
+                mode12 = "pause"
             if self.latest_agent_last_goal_occupied:
                 # 마지막 goal 점유는 현행 유지(사용자 결정): goal_occupied_timeout_sec 뒤 STOP → 관제 보고. replan 은 무의미.
                 self._v2_last_goal_report = True
-                return out(MovingCommand.WAIT_DETECT_AMR, MovingStopType.TYPE_12, slow_or_pause,
+                return out(MovingCommand.WAIT_DETECT_AMR, MovingStopType.TYPE_12, mode12,
                            self.goal_occupied_timeout_sec,
                            f"my LAST goal occupied by stopped agent ({cls}) → wait {self.goal_occupied_timeout_sec:.0f}s then report")
-            return out(MovingCommand.WAIT_DETECT_AMR, MovingStopType.TYPE_12, slow_or_pause, wait,
+            return out(MovingCommand.WAIT_DETECT_AMR, MovingStopType.TYPE_12, mode12, wait,
                        f"my goal occupied by stopped agent ({cls}, phase {agent.status.phase}) → wait, no replan")
         if self._same_path_v2(agent) == SAME_PATH:
             if moving:
@@ -2747,6 +3073,7 @@ class FleetDecisionNode(Node):
         m.linear_value = float(lin)
         m.angular_value = float(ang)
         self._last_speed_cmd = (int(m.command_type), float(m.linear_value), float(m.angular_value))
+        self._own_speed_hist.append((self._last_speed_cmd, self.get_clock().now()))
         self.pub_speed_ctrl.publish(m)
         self._speed_limited = True
         self.get_logger().warn(f"[V2] speed limit {lin:.2f} m/s / {ang:.2f} rad/s ({self._v2_mode})")
@@ -2763,6 +3090,7 @@ class FleetDecisionNode(Node):
             m.linear_value = 1.0
             m.angular_value = 0.0
         self._last_speed_cmd = (int(m.command_type), float(m.linear_value), float(m.angular_value))
+        self._own_speed_hist.append((self._last_speed_cmd, self.get_clock().now()))
         self.pub_speed_ctrl.publish(m)
         self._speed_limited = False
         self._pre_slow_active = False
@@ -2772,6 +3100,8 @@ class FleetDecisionNode(Node):
         if self._v2_mode == "match":
             sp = self._agent_speed(self._locked_target_id, now)
             v = max(self.speed_match_min, (sp or 0.0) * self.speed_match_ratio)
+            if self._jclear_limited:                 # [10-06 P7-2] 교차로 비우는 중이면 비우기 상한을 넘지 않는다 (번갈아 덮어쓰기 방지)
+                v = min(v, self.junction_clear_speed)
             self._v2_set_speed_limit(v, 1.0)
         elif self._v2_mode == "slow":
             self._v2_set_speed_limit(self.slow_wait_speed, self.slow_wait_angular)
@@ -2801,6 +3131,14 @@ class FleetDecisionNode(Node):
         """Phase 1 의 v2 부분. True 를 돌려주면 v1 의 타임아웃 분기를 이번 틱에는 건너뛴다."""
         if self._agent_pause_start_time is None:
             return False
+        # [10-06 D26-A] 맞바꿈 후진·정지 유지 중이고 잠금 대상이 그 상대면 대기 시계를 멈춘다 (사용자 Q26) —
+        #   100 s last-goal STOP·후진 성공 뒤 replan 재개·aging 재평가를 하지 않는다. 후진 결과는 여기서도 거둔다.
+        if (self._swap_freeze_since is not None and self._swap_pair is not None
+                and int(self._locked_target_id or 0) in self._swap_pair):
+            self._swap_collect(now)
+            self.get_logger().info("[check_collision_agent][Phase 1][V2 swap] 맞바꿈 후진·정지 유지 중 — 대기 시계 정지",
+                                   throttle_duration_sec=5.0)
+            return True
         dt = (now - self._agent_pause_start_time).nanoseconds * 1e-9
         agent = self._cached_agents.get(self._locked_target_id)
 
@@ -2838,8 +3176,7 @@ class FleetDecisionNode(Node):
                     f"[V2] 마지막 goal 을 agent {self._locked_target_id} 가 {dt:.0f}s 동안 점유 → STOP, 관제에 보고 (현행 last-goal 규칙과 동일)")
                 self._publish_state(f"STOP (last goal occupied by agent {self._locked_target_id}, {dt:.0f}s)")
                 self.pub_cmd_stop.publish(UInt8(data=1))
-                self.nav_stop_complete_ = False
-                self._nav_stop_wait_start = now
+                self._arm_nav_stop_wait(now, "V2 last goal")  # [10-06 D26-D] READY 면 대기를 걸지 않는다 (통지가 오지 않음)
                 self._agent_reset_osc()
                 self.is_processing_agent_pause = False
                 self._agent_pause_start_time = None
@@ -2849,19 +3186,23 @@ class FleetDecisionNode(Node):
                 return True
             # [후진 양보] BackUp 액션 진행 중 — 결과를 기다린다
             if self._backup_state in ("sending", "running", "waiting"):
-                if self._backup_started_at is not None and self._backup_state != "waiting" and \
+                # [10-06 D21 P5] BT 곡선 후퇴(_yield_active)는 _backup_started_at 을 찍지 않아, 지난 직선 기동 시각 기준으로
+                #   곧바로 '응답 없음' 처리되었다 (sim 29/29, 시작 0.1 s 안). 곡선 후퇴는 _v2_yield_tick 의 자체 시한이 맡는다.
+                if not self._yield_active and self._backup_started_at is not None and self._backup_state != "waiting" and \
                         (now - self._backup_started_at).nanoseconds * 1e-9 > self.backup_time_allowance + 10.0:
                     self.get_logger().error("[V2 backoff] BackUp 응답 없음 → 취소하고 대기 계속")
                     self._backup_cancel(); self._backup_state = "failed"
                 return True
             if self._backup_state == "succeeded":
                 self._backup_state = "idle"
+                if self.yield_hold_enable:                  # [10-07 Q42] 우선 로봇 (잠금 대상) 에게 비켰으면 replan 뒤 resume 을 미룬다
+                    self._yh_on_backoff_done('backoff', self._locked_target_id)
                 self.get_logger().warn("[V2 backoff] BackUp 완료 → replan 하고 재개한다")
                 self.agent_pause_timeout_sec = dt          # 즉시 Phase 2 (replan)
                 return False
             if self._backup_state == "failed":
                 self._backup_state = "idle"                # 후방이 막혔거나 거부됨 → 후진 없이 대기 계속 (상대별 1회)
-                self._publish_state("TYPE_9: BACKOFF failed (rear blocked) → keep waiting")
+                self._publish_state(f"TYPE_9: BACKOFF failed ({self._backup_fail_why or 'unknown'}) → keep waiting")
                 return True
             # [후진 양보] 낮은 쪽(TYPE_9) 이 우선 로봇과 대면(몸체 < body_m, 앞쪽) 이고 mutual block 이 잡혔으면 물러난다
             # [S17 v2] goal 점유 대기 중에도: 내 goal 위의 상대가 내 앞 가까이에서 못 움직이면(플래너 실패 등) 내가 길을
@@ -3187,23 +3528,29 @@ class FleetDecisionNode(Node):
 
     def _backup_send(self, now: Time, dist: Optional[float] = None) -> None:
         _caller = sys._getframe(1).f_code.co_name
+        self._backup_fail_why = ""                    # [10-06 D21-②] 이번 시도의 실패 사유로 다시 채운다
         if not self._op_gate(_caller):                # [OP] 관제 명령 우선·상태별 허가
+            self._backup_fail_why = f"관제 규칙 불허 (상태 {self.current_robot_status})"
             self._backup_state = "failed"; self._man_ctx = None
             return
         if dist is None and _caller not in ("_maneuver_next", "_v2_maneuver_tick") \
                 and not self._retreat_gate_check(_caller):
+            self._backup_fail_why = "후퇴 허가 거부 (retreat gate)"
             self._backup_state = "failed"                 # [V2.34] 모든 규칙이 succeeded/failed 로 뒷정리한다
             return
-        if self._yield_bt_ready(now) and not self._yield_active:
+        # [10-06 D26-A] 맞바꿈 후진은 직선 BackUp 으로만 — BT 곡선 후퇴 (이력·지나온 goal 후보) 는 상대 goal 쪽으로 갈 수 있다 (③형)
+        if self._yield_bt_ready(now) and not self._yield_active and not self._swap_step_active:
             a = self._cached_agents.get(self._locked_target_id)
             away = (a.current_pose.pose.position.x, a.current_pose.pose.position.y) if a is not None else None
             if not self._yield_start(now, away):
+                self._backup_fail_why = f"곡선 후퇴 목표 없음 ({self._yield_cands_why or '?'})"
                 self._backup_state = "failed"
             return
         self._backup_state = "sending"
         self._backup_started_at = now
         if not self._backup_client.wait_for_server(timeout_sec=0.5):
             self.get_logger().error("[V2 backoff] behavior_server 의 backup 액션이 없다 → 후진 생략")
+            self._backup_fail_why = "backup 액션 없음"
             self._backup_state = "failed"; self._man_ctx = None
             return
         d = float(self.yield_backoff_m if dist is None else dist)
@@ -3215,6 +3562,7 @@ class FleetDecisionNode(Node):
                 f"[V2 backoff] 후방 {self._rear_block_at} m 에 lethal 셀 — 후진 {d:.2f} m 를 보내지 않는다 "
                 f"(보내도 거부된다). 다른 수단/다음 순번에 맡긴다")
             self._publish_state(f"[V2 backoff] rear blocked at {self._rear_block_at} m → skip")
+            self._backup_fail_why = f"후방 {self._rear_block_at} m lethal (사전 검사)"
             self._backup_state = "failed"; self._man_ctx = None
             return
         self._man_begin("backup", d, now)
@@ -3225,7 +3573,8 @@ class FleetDecisionNode(Node):
         if hasattr(g, "disable_collision_checks"):
             g.disable_collision_checks = False          # 후방 충돌 검사는 항상 켠다 (안전 최우선)
         fut = self._backup_client.send_goal_async(g, feedback_callback=self._man_feedback)
-        fut.add_done_callback(self._backup_goal_response)
+        _gen = self._man_gen
+        fut.add_done_callback(lambda f, _g=_gen: self._backup_goal_response(f, _g))
 
     def _drive_send(self, dist: float) -> None:
         if not self._op_gate(sys._getframe(1).f_code.co_name):     # [OP]
@@ -3247,12 +3596,16 @@ class FleetDecisionNode(Node):
         g.time_allowance = Duration(seconds=self.backup_time_allowance).to_msg()
         if hasattr(g, "disable_collision_checks"): g.disable_collision_checks = False
         fut = self._drive_client.send_goal_async(g, feedback_callback=self._man_feedback)
-        fut.add_done_callback(self._maneuver_goal_response)
+        _gen = self._man_gen
+        fut.add_done_callback(lambda f, _g=_gen: self._maneuver_goal_response(f, _g))
 
-    def _backup_goal_response(self, fut) -> None:
+    def _backup_goal_response(self, fut, gen: Optional[int] = None) -> None:
         gh = fut.result()
+        if self._stale_gen(gh, gen, "BackUp"):
+            return
         if gh is None or not gh.accepted:
             self.get_logger().error("[V2 backoff] BackUp 목표 거부됨")
+            self._backup_fail_why = "BackUp 목표 거부됨"
             self._backup_state = "failed"
             return
         self._backup_goal_handle = gh
@@ -3281,10 +3634,33 @@ class FleetDecisionNode(Node):
             self.get_logger().warn("[V2 backoff] BackUp 남은 거리 0.1 m 미만 → 완료로 본다")
             self._backup_state = "succeeded"; self._man_ctx = None
             return
-        self.get_logger().error(f"[V2 backoff] BackUp 실패 status {status} error {err} (후방 막힘 지속/시간 초과)")
+        if status == 5:
+            # [10-06 D21-②] 취소(5)는 대개 관제 우선 회수·새 명령(D23) 이다 — 예전에는 이것도 "후방 막힘" 으로 적었다
+            _rn = self._revoke_note
+            _why = (_rn[1] if _rn is not None and (self.get_clock().now() - _rn[0]).nanoseconds * 1e-9 < 5.0
+                    else "취소 (사유 미상)")
+            self._backup_fail_why = f"취소됨 — {_why}"
+            self.get_logger().warn(f"[V2 backoff] BackUp 취소됨 status 5 — {_why}")
+        else:
+            self._backup_fail_why = f"후방 막힘 지속/시간 초과 (status {status} error {err})"
+            self.get_logger().error(f"[V2 backoff] BackUp 실패 status {status} error {err} (후방 막힘 지속/시간 초과)")
         self._backup_state = "failed"; self._man_ctx = None
 
+    def _stale_gen(self, gh, gen: Optional[int], what: str) -> bool:
+        """[10-06 D23-1] 보낸 뒤 응답 전에 취소·회수됐으면 (세대가 바뀜) 받아들여진 목표를 바로 취소하고 상태는 건드리지 않는다.
+        예전에는 응답 콜백이 'running' 으로 되살려 회수된 기동이 새 명령 뒤에도 실행됐다."""
+        if gen is None or gen == self._man_gen:
+            return False
+        if gh is not None and gh.accepted:
+            try:
+                gh.cancel_goal_async()
+            except Exception:                                    # noqa: BLE001
+                pass
+        self.get_logger().warn(f"[OP] 회수·취소 뒤에 도착한 {what} 응답 — 목표를 취소하고 무시한다")
+        return True
+
     def _backup_cancel(self) -> None:
+        self._man_gen += 1                            # [10-06 D23-1] 응답 대기 중인 송신도 무효
         gh = self._backup_goal_handle
         if gh is not None:
             try:
@@ -3354,8 +3730,15 @@ class FleetDecisionNode(Node):
         if rep > 0 and rep != int(mid):
             return rep
         p = a.current_pose.pose.position
+        rad = self.cycle_front_m
+        # [10-06 D26-B blocker] 내가 TYPE_12 (내 goal 점유) 로 잠근 상대 한 대만 반경을 넓힌다. 다른 구성원은 cycle_front_m 그대로.
+        #   현장 cross_agent_id 는 0 이라 (AMR_Code 대입 없음) 2.5 m 밖 맞바꿈 (d26 2.63 m) 은 위 rep 경로로도 못 잡는다.
+        if (self.cycle_blocker_swap_m > 0.0 and self.is_processing_agent_pause and self._v2_goal_occ_wait
+                and self.current_agent_stop_type == MovingStopType.TYPE_12
+                and int(mid) == int(self._locked_target_id or 0)):
+            rad = max(rad, self.cycle_blocker_swap_m)
         return self._front_nearest(p.x, p.y, self._agent_yaw(a), int(mid), now,
-                                   self.cycle_front_m, self.cycle_front_deg)
+                                   rad, self.cycle_front_deg)
 
     def _detect_cycle(self, now: Time) -> Optional[List[int]]:
         """나에서 출발하는 대기 사슬이 나로 돌아오면 그 사슬(나 포함, 순서대로) 을 돌려준다."""
@@ -3378,18 +3761,916 @@ class FleetDecisionNode(Node):
         order = sorted(chain, reverse=True)
         return order.index(int(self.my_id))
 
+    # ------------------------------------------------------------------
+    # [10-06 D26-A] goal 맞바꿈 (2-cycle, 서로 상대 goal 을 점유) 전용 후진 — 사용자 Q25·Q26·Q27
+    #   누가: 우선순위가 없는 쪽 (_swap_i_have_priority false = vacater). 우선 쪽 (passer) 은 vacater 가 못 움직이면 cycle_stagger_sec 뒤에.
+    #   언제: 둘 다 cycle_swap_mutual_sec 넘게 제자리 + READY·DRIVING·fleet PAUSED (RECOVERY_* 는 BT 가 주도하므로 제외).
+    #   무엇: 직선 후진 min(cycle_swap_step_m, retreat_max_m), 상황당 cycle_swap_max_steps 회·기준점에서 누적 (횟수×거리 + 0.05) m 까지.
+    #         [10-07 Q37] cycle_swap_first_step_m > 0 이면 1번째만 그 거리 (retreat_max_m 미적용), 누적 상한은 (1번째 + 나머지 × 거리 + 0.05) m.
+    #         교차로 안 목표·상대 goal 쪽으로 다가가는 목표는 거부 (C 필터). 후방 lethal 이면 보내지 않음 (후방 사전 검사 그대로).
+    #   그 뒤: 재개하지 않고 정지 유지 — 상대가 cycle_swap_pass_m 지나가거나 cycle_swap_hold_sec, 새 명령까지. 그동안 대기 시계 정지.
+    #   [10-06 D26-A 검토] 상대 goal 은 지금 경로 끝 → 주행 중 기억 → (현장 READY 만, 설정 시) 내 자리 순으로 추정. 모르거나 경계면
+    #         움직이지 않고 예전 순환 후진으로도 넘기지 않는다. stop-and-go 로 멈춘 후진은 취소해 상대 순번에 넘긴다.
+    #   [10-06 D26-A 재검토] ① 경로 끝은 10점 미만 (시야 안에서 끝남) 일 때만 goal — 10점 가득은 현장 Traj 시야 끝 (~1.4 m)
+    #         ② 기준점·누적 후진은 로봇 단위 (쌍이 바뀌어도 유지) ③ 상대가 다가와 섰으면 비키는 것이 아니다 — 기준 자세 다시 잡음
+    #         ④ 'hold' 도 swap gate 기억을 둔다 ⑤ 관제 캐시에 나·상대 정보가 없으면 우선순위 판정 불가 → 비키지 않는다
+    # ------------------------------------------------------------------
+    def _swap_partner_id(self) -> Optional[int]:
+        if self._swap_pair is None:
+            return None
+        o = [int(m) for m in self._swap_pair if int(m) != int(self.my_id)]
+        return o[0] if o else None
+
+    def _swap_path_end(self, a: MultiAgentInfo) -> Optional[Tuple[float, float, bool]]:
+        """상대 truncated_path 끝점과 '진짜 경로 끝인가' (x, y, ended). 경로가 없거나 몸체 0.3 m 안에 뭉쳐 있으면 None (정보 없음 —
+        READY 는 Nav2 경로가 없고, relay·bridge 는 빈 경로를 본체 위치로 채운다).
+        [10-06 D26-A 재검토] 현장 경로는 _SWAP_TRAJ_MAX_PTS (10) 점까지의 시야 (~1.4 m) 다. 10점 가득이면 ended=False
+        (끝점 = 시야 끝, goal 아님), 10점 미만이면 시야 안에서 경로가 끝난 것이라 ended=True (끝점 = goal)."""
+        c = a.current_pose.pose.position
+        pts = [(q.pose.position.x, q.pose.position.y) for q in a.truncated_path.poses
+               if math.isfinite(q.pose.position.x) and math.isfinite(q.pose.position.y)]
+        if not pts or max(math.hypot(x - c.x, y - c.y) for x, y in pts) < 0.3:
+            return None
+        ended = len(a.truncated_path.poses) < self._SWAP_TRAJ_MAX_PTS
+        # [10-07 Q35] 10점 가득이어도 본체에서 표본을 따라 잰 길이가 cycle_swap_path_goal_len_m 미만이면 진짜 끝 (4 m 시야 안에서 끝남).
+        if not ended and getattr(self, 'cycle_swap_path_goal_len_m', 0.0) > 0.0:
+            ln, px, py = 0.0, c.x, c.y
+            for x, y in pts:
+                ln += math.hypot(x - px, y - py)
+                px, py = x, y
+            ended = ln < self.cycle_swap_path_goal_len_m
+        return pts[-1][0], pts[-1][1], ended
+
+    def _swap_note_goal(self, a: MultiAgentInfo) -> None:
+        """[10-06 D26-A 검토] 상대가 경로를 보내는 동안 그 끝점을 기억한다 (on_agents). 현장 AMR 은 MOVING·MARKING 이 아니면
+        Traj 를 0 으로 올리고 (VehicleCommManager 180-197), winros_bridge 는 첫 (0,0) 에서 읽기를 멈춰 PAUSE 상대의 경로는 빈다.
+        [10-06 D26-A 재검토] 마지막 관측으로 덮어쓰고 '진짜 끝인가' 를 함께 둔다 — 시야 끝 (10점 가득) 을 본 뒤에는
+        예전 진짜 끝도 새 명령일 수 있어 쓰지 않는다 (보수적)."""
+        pe = self._swap_path_end(a)
+        if pe is not None:
+            p = a.current_pose.pose.position
+            self._swap_goal_mem[int(a.machine_id)] = (pe[0], pe[1], p.x, p.y, bool(pe[2]))
+
+    def _swap_note_first(self, sig: Tuple[int, ...]) -> None:
+        """[10-07 D26-A swap3 P2-2] 이 쌍의 순환을 처음 검출한 내 자리를 기억한다 (이미 있으면 그대로). 2-cycle 만."""
+        if len(sig) != 2:
+            return
+        me = self._own_pose()
+        if me is None:
+            return
+        if self._swap_first_xy is None:
+            self._swap_first_xy = {}
+        if sig not in self._swap_first_xy:
+            self._swap_first_xy[sig] = (me[0], me[1])
+
+    def _swap_first_pos(self, sig: Tuple[int, ...], me: Tuple[float, float, float]) -> Optional[Tuple[float, float]]:
+        """[10-07 D26-A swap3 P2-2] 이 쌍의 최초 순환 검출 자리. 없거나 지금 자리에서 2.0 m 넘게 떨어졌으면 None (기준점 규칙과 같다)."""
+        fx = (self._swap_first_xy or {}).get(sig)
+        if fx is None or me is None or math.hypot(me[0] - fx[0], me[1] - fx[1]) > 2.0:
+            return None
+        return fx
+
+    def _swap_partner_goal(self, a: MultiAgentInfo) -> Tuple[Optional[Tuple[float, float]], str]:
+        """상대 goal 추정과 출처 ('path' 지금 경로 끝, 'mem' 주행 중 보였던 경로 끝, 'horizon' 경로는 있으나 시야 끝이라 goal 모름,
+        'none' 경로·기억 없음).
+        [10-06 D26-A 검토] 기억은 상대가 기억한 자리에서 2.0 m 넘게 움직였거나 그 goal 0.3 m 안에 닿았으면 (도착) 쓰지 않는다.
+        [10-06 D26-A 재검토] 지금 경로·기억 모두 진짜 경로 끝 (10점 미만) 일 때만 goal 로 쓴다. 10점 가득은 시야 끝 (~1.4 m)."""
+        pe = self._swap_path_end(a)
+        if pe is not None and pe[2]:
+            return (pe[0], pe[1]), 'path'
+        m = self._swap_goal_mem.get(int(a.machine_id))
+        if m is not None and m[4]:
+            p = a.current_pose.pose.position
+            if (math.hypot(p.x - m[2], p.y - m[3]) <= 2.0
+                    and math.hypot(p.x - m[0], p.y - m[1]) > 0.3):
+                return (m[0], m[1]), 'mem'
+        # [10-07 D26-A swap3 P4] 지금 경로가 없고 기억이 10점 시야 끝이면 'mem-horizon' (예전엔 'none' 으로 섞여 로그가 "경로·기억 없음").
+        #   판정은 예전과 같다 — 'none'·'mem-horizon' 모두 _SWAP_SRC_NOPATH (ready_assume 조건).
+        if pe is not None:
+            return None, 'horizon'
+        return None, ('mem-horizon' if (m is not None and not m[4]) else 'none')
+
+    def _swap_src_text(self, a: MultiAgentInfo, src: str) -> str:
+        """[10-07 D26-A swap3 P4] '상대 goal 정보 없음' 로그의 출처 문구. 'horizon' = 지금 경로가 10점 가득 (시야 끝),
+        'mem-horizon' = 지금 경로 없음 + 주행 중 기억도 10점 시야 끝, 'none' = 지금 경로 없음 + 진짜 끝 기억 없음 (또는 무효)."""
+        n = self._SWAP_TRAJ_MAX_PTS
+        if src == 'horizon':
+            if getattr(self, 'cycle_swap_path_goal_len_m', 0.0) > 0.0:   # [10-07 Q35]
+                return (f"horizon: 지금 경로 {n}점 가득·길이 {self.cycle_swap_path_goal_len_m:.1f} m 이상 (시야 끝, goal 아님)"
+                        "·진짜 끝 기억 없음")
+            return f"horizon: 지금 경로 {n}점 가득 (시야 끝, goal 아님)·진짜 끝 기억 없음"
+        if src == 'mem-horizon':
+            return f"no path + mem-horizon: 지금 경로 없음·주행 중 기억도 {n}점 가득 (시야 끝, goal 아님)"
+        m = self._swap_goal_mem.get(int(a.machine_id))
+        if m is not None and m[4]:
+            return "no path: 지금 경로 없음·진짜 끝 기억은 무효 (기억 자리에서 2.0 m 넘게 이동 또는 도착)"
+        return "no path: 지금 경로 없음·기억 없음"
+
+    def _cycle_goal_swap(self, chain: List[int], now: Time, waiting_agent: bool,
+                         waiting_static: bool) -> Tuple[Optional[int], Optional[str]]:
+        """맞바꿈 술어 — (상대 id, 'swap' | 'hold' | None).
+        ① 2-cycle ② 내 대기가 그 상대에 대한 goal 점유 대기 (agent TYPE_12 잠금 또는 정적 goal 점유 대기의 대상)
+        ③ 상대 goal 추정 (지금 경로 끝, 없으면 주행 중 보였던 경로 끝) 이 나에게서 cycle_swap_partner_goal_m 안.
+        ③ 이 없으면 상대가 TYPE_10 (우선 쪽이 우회 대기) 인 경우에도 맞았다 (sim D10 09:59:31).
+        [10-06 D26-A 검토] ① ② 가 맞으면 맞바꿈 규칙이 이 상황을 맡는다 — 'hold' 는 움직이지 않고 예전 순환 후진 (BT 곡선 포함)
+        으로도 넘기지 않는다. 경계 (③ 의 0.8~1.2 m) 와 상대 goal 을 모르는 경우가 'hold' 다. 예전 경로는 상대 goal 이
+        1.2 m 밖으로 확인될 때만. 두 로봇이 경로 정보 차이로 술어가 갈리면 우선 쪽이 예전 경로로 먼저 움직였다 (13 s)."""
+        if len(chain) != 2:
+            return None, None
+        partner = int(chain[1]) if int(chain[0]) == int(self.my_id) else int(chain[0])
+        mine = ((waiting_agent and self._v2_goal_occ_wait and int(self._locked_target_id or 0) == partner)
+                or (waiting_static and self._cycle_my_wait_target(now) == partner))
+        if not mine:
+            return None, None
+        a = self._cached_agents.get(partner)
+        me = self._own_pose()
+        if a is None or me is None:
+            return partner, 'hold'
+        pg, src = self._swap_partner_goal(a)
+        if pg is None:
+            if (src in self._SWAP_SRC_NOPATH and self.cycle_swap_ready_assume_goal
+                    and int(a.status.phase) == AgentStatus.STATUS_MOVING):
+                return partner, 'swap'            # 현장 READY (phase 3, 경로 없음) — goal 점유 대기 루프 = 상대 goal 이 내 자리
+            # [10-06 D26-A 재검토] 'horizon' = 경로 10점 가득 (현장 Traj 시야 ~1.4 m) — 끝점은 goal 이 아니다. 기억도 없으면 모름
+            # [10-07 D26-A swap3 P4] 출처를 나눠 적는다 — '경로 없음' (PAUSE·READY 는 현장 Traj 0) 과 'horizon' (10점 가득) 구분
+            what = self._swap_src_text(a, src)
+            self.get_logger().info(
+                f"[V2 swap] 상대 {partner} goal 정보 없음 (phase {a.status.phase}, {what}) — 맞바꿈 후진도 예전 순환 후진도 하지 않는다",
+                throttle_duration_sec=30.0)
+            return partner, 'hold'
+        # 이미 이 쌍의 맞바꿈 상황이면 최초 감지 자리 (기준점) 에서 잰다 — 내가 비킨 만큼 멀어져 2번째가 막히지 않게
+        #   [10-07 D26-A swap3 P2-2] 아직 쌍이 없으면 이 쌍의 최초 순환 검출 자리 (곧 기준점이 될 자리) 에서 잰다
+        _fx = self._swap_first_pos(tuple(sorted(chain)), me)
+        ref = (self._swap_anchor if (self._swap_pair == tuple(sorted(chain)) and self._swap_anchor is not None)
+               else (_fx if _fx is not None else (me[0], me[1])))
+        dg = math.hypot(pg[0] - ref[0], pg[1] - ref[1])
+        if dg <= self.cycle_swap_partner_goal_m:
+            return partner, 'swap'
+        if dg <= 1.5 * self.cycle_swap_partner_goal_m:
+            self.get_logger().info(
+                f"[V2 swap] 상대 {partner} goal ({src}) 이 {dg:.2f} m — 맞바꿈 경계 ({self.cycle_swap_partner_goal_m:.1f}~"
+                f"{1.5 * self.cycle_swap_partner_goal_m:.1f} m), 움직이지 않는다", throttle_duration_sec=30.0)
+            return partner, 'hold'
+        return None, None
+
+    def _swap_release(self, now: Time, why: str) -> None:
+        """정지 유지·시계 정지를 끝낸다. 정지 구간은 대기 시계에서 뺀다 (얼렸다 녹인 것처럼)."""
+        fs = self._swap_freeze_since
+        if fs is not None:
+            # 시계 시작 뒤의 정지 구간만 뺀다 — 정지 중에 새로 잡힌 대기라면 그 뒤만 뺀다
+            st = self._agent_pause_start_time
+            if st is not None:
+                self._agent_pause_start_time = st + (now - (st if st > fs else fs))
+            st = self._pause_start_time
+            if st is not None and self.is_processing_last_goal_occupied_pause:
+                self._pause_start_time = st + (now - (st if st > fs else fs))
+        held = (now - fs).nanoseconds * 1e-9 if fs is not None else 0.0
+        self._swap_freeze_since = None
+        self._swap_hold_since = None
+        self._swap_hold_partner = None
+        self._swap_hold_goals = None           # [10-07 D26-A swap3 P2-1]
+        self.get_logger().warn(f"[V2 swap] 정지 유지 끝 — {why}. 대기 시계는 멈춘 {held:.0f}s 를 빼고 이어서 센다")
+        self._publish_state(f"[V2 swap] HOLD end ({why})")
+
+    def _swap_enter(self, now: Time, sig: Tuple[int, ...], partner: int, a: MultiAgentInfo,
+                    me: Tuple[float, float, float], verdict: str) -> None:
+        """[10-06 D26-A 재검토] 맞바꿈 쌍을 (새로) 잡는다 — 'swap'·'hold' 공용.
+        다른 쌍으로 바뀌어도 기준점·누적 후진 횟수·vacater 기억은 지우지 않는다 (로봇 단위 누적 상한).
+        예전: 다른 쌍 한 틱에 _swap_reset 이 기준점·횟수를 지워, 세 번째 로봇과 엮이면 기준점에서 0.95 m 를 넘어 1.35 m 까지 물러났다.
+        바뀐 쌍에서는 정지 유지 (앞 상대 지나감 판정) 만 끝내고 상대 기준 자세를 새로 잡는다."""
+        p = a.current_pose.pose.position
+        old = self._swap_pair
+        if old is not None and old != sig:
+            if self._swap_freeze_since is not None or self._swap_hold_since is not None:
+                self._swap_release(now, f"다른 쌍 {sig}")
+            self._swap_retry_at = None
+            self.get_logger().info(
+                f"[V2 swap] 맞바꿈 쌍 {old} → {sig} — 기준점·누적 후진 {self._swap_steps}회는 그대로 (로봇 단위 상한)")
+        self._swap_pair = sig
+        self._swap_partner_anchor = (p.x, p.y, self._agent_yaw(a))
+        if self._swap_anchor is None:
+            # [10-07 D26-A swap3 P2-2] 기준점 = 이 쌍의 최초 순환 검출 자리 (예전 순환 후진 전). 예전: 술어가 늦게 맞으면
+            #   예전 [V2 cycle] BackUp 뒤 자리에 잡혀 누적 상한이 그 후진을 세지 않았다 (sim swap3_c1_ready_d12 23:18:21.9 → 기준점 -9.43,
+            #   실제 출발점에서 0.93 m, 이론상 1.40 m). 기록이 없으면 (또는 2.0 m 넘게 떨어졌으면) 지금 자리.
+            fx = self._swap_first_pos(sig, me)
+            self._swap_anchor = fx if fx is not None else (me[0], me[1])
+            self._swap_steps = 0
+            if fx is not None and math.hypot(me[0] - fx[0], me[1] - fx[1]) >= 0.05:
+                self.get_logger().info(
+                    f"[V2 swap] 기준점 = 최초 순환 검출 자리 ({fx[0]:.2f},{fx[1]:.2f}) — 지금 자리에서 "
+                    f"{math.hypot(me[0] - fx[0], me[1] - fx[1]):.2f} m (그 사이 fleet 후진도 누적 상한에 넣는다)")
+        ax, ay = self._swap_anchor
+        self.get_logger().warn(
+            f"[V2 swap] goal 맞바꿈 {'상황' if verdict == 'swap' else '후보 (보류: 경계·goal 모름)'}: 상대 {partner} "
+            f"(서로 상대 goal 점유). 기준점 ({ax:.2f},{ay:.2f}), 상한 {self.cycle_swap_max_steps}회 (지금 {self._swap_steps}회)")
+        self._publish_state(f"[V2 swap] {'detected' if verdict == 'swap' else 'hold'} vs {partner}")
+
+    def _swap_note_hold(self, now: Time, sig: Tuple[int, ...], partner: int) -> None:
+        """[10-06 D26-A 재검토] 술어 'hold' 에서도 swap gate 기억 (_swap_pair·_swap_seen_t) 을 둔다 —
+        예전에는 'hold' 동안 기억이 없어, 100 s last-goal STOP 으로 대기가 풀리면 두 대의 unwedge·push·standoff 가 함께 나갈 수 있었다."""
+        a = self._cached_agents.get(partner)
+        me = self._own_pose()
+        if a is not None and me is not None and self._swap_pair != sig and not self._swap_step_active:
+            self._swap_enter(now, sig, partner, a, me, 'hold')
+        if self._swap_pair == sig:
+            self._swap_seen_t = now
+
+    def _swap_reset(self, now: Time, why: str) -> None:
+        """맞바꿈 상황을 지운다 (누적 상한·vacater 기억 포함). 정상 주행 2.0 m·SUCCEEDED (·IDLE 이면서 기준점 2.0 m 밖) 에서만 부른다.
+        [10-06 D26-A 재검토] 다른 쌍으로 바뀔 때는 부르지 않는다 (_swap_enter)."""
+        if self._swap_freeze_since is not None or self._swap_hold_since is not None:
+            self._swap_release(now, why)
+        if self._swap_pair is not None:
+            self.get_logger().info(f"[V2 swap] 맞바꿈 상황 {self._swap_pair} 종료 — {why} (이 상황 후진 {self._swap_steps}회)")
+        self._swap_pair = None
+        self._swap_anchor = None
+        self._swap_partner_anchor = None
+        self._swap_steps = 0
+        self._swap_vacater.clear()
+        self._swap_retry_at = None
+        self._swap_seen_t = None
+        self._swap_first_xy = {}                 # [10-07 D26-A swap3 P2-2]
+        self._swap_start_block_clear(why)        # [10-07 D26-A swap3 P2-3]
+
+    def _swap_step_done(self, now: Time) -> None:
+        """내 맞바꿈 후진의 결과를 거둔다. 움직였으면 1회로 세고 정지 유지, 못 움직였으면 세지 않고 상대 순번에 맡긴다."""
+        st = self._backup_state
+        ok = (st == "succeeded")
+        self._backup_state = "idle"
+        self._swap_step_active = False
+        me = self._own_pose()
+        sx = self._swap_step_xy
+        moved = math.hypot(me[0] - sx[0], me[1] - sx[1]) if (me is not None and sx is not None) else 0.0
+        why = self._backup_fail_why or ("기동 상태 유실 (watchdog·재잠금)" if st == "idle" else "사유 미상")
+        pid = self._swap_partner_id()
+        if ok or moved >= 0.1:
+            self._swap_hold_since = now
+            self._swap_hold_goals = self._swap_goal_sig()   # [10-07 D26-A swap3 P2-1] 같은 명령인가 판정 기준
+            a = self._cached_agents.get(pid if pid is not None else -1)
+            self._swap_hold_partner = ((a.current_pose.pose.position.x, a.current_pose.pose.position.y)
+                                       if a is not None else None)
+            # [10-06 D26-A 재검토] 정지 유지 시작에 상대 기준 자세를 다시 잡는다 (상대가 서 있을 때만) — 내 후진 동안 상대가
+            #   자기 goal 쪽으로 조금 (0.08 m+) 다가와 섰으면, 예전 기준으로는 영영 '상대가 움직임' 이라 2번째 후진이 나가지 않았다.
+            if a is not None and not self._agent_is_moving(a, now):
+                self._swap_partner_anchor = (a.current_pose.pose.position.x, a.current_pose.pose.position.y,
+                                             self._agent_yaw(a))
+            if ok:
+                self.get_logger().warn(
+                    f"[V2 swap] 맞바꿈 후진 완료 ({moved:.2f} m, {self._swap_steps}/{self.cycle_swap_max_steps}) → 재개하지 않고 정지 유지 "
+                    f"(상대 {pid} 가 {self.cycle_swap_pass_m:.1f} m 지나가거나 {self.cycle_swap_hold_sec:.0f}s, 새 명령까지). 대기 시계 정지")
+            else:
+                self.get_logger().error(
+                    f"[V2 swap] 맞바꿈 후진 중단 ({why}) — {moved:.2f} m 는 움직였다 → 1회로 세고 정지 유지")
+            self._publish_state(f"[V2 swap] HOLD (step {self._swap_steps}/{self.cycle_swap_max_steps}, {moved:.2f} m)")
+            return
+        self._swap_steps = max(0, self._swap_steps - 1)          # 움직이지 못한 시도는 세지 않는다
+        if self._swap_pair is not None and self._swap_vacater.get(self._swap_pair) == int(self.my_id):
+            self._swap_vacater.pop(self._swap_pair, None)          # 상대가 대신 비킬 수 있게
+        self._swap_retry_at = now + Duration(seconds=2.0 * self.cycle_stagger_sec)
+        self.get_logger().error(
+            f"[V2 swap] 맞바꿈 후진 실패 ({why}) — 움직이지 못했다 → 세지 않고, {2.0 * self.cycle_stagger_sec:.0f}s 동안 상대 순번에 맡긴다")
+        self._swap_release(now, "후진 못 함")
+
+    def _swap_collect(self, now: Time) -> bool:
+        """[10-06 D26-A] 내 맞바꿈 후진 결과를 거둔다 (1 Hz housekeeping·10 Hz Phase 1 공용). 거뒀으면 True.
+        [10-06 D26-A 검토] stop-and-go 'waiting' (후방 장애물로 멈춤) 은 기다리지 않고 취소해 실패로 거둔다 — 기다리면 상대 (우선 쪽) 는
+        내가 안 움직인다고 보고 28 s 에 대신 비키고, 나는 2 s 뒤 남은 거리를 이어 가 두 대가 함께 움직였다. 순번을 명시적으로 넘긴다."""
+        if not self._swap_step_active:
+            return False
+        if self._backup_state == "waiting":
+            self._backup_cancel()
+            self._backup_fail_why = "후진 중 장애물 (stop-and-go) — 맞바꿈 후진은 기다리지 않는다"
+            self._backup_state = "failed"; self._man_ctx = None
+        if self._backup_state in ("succeeded", "failed", "idle"):
+            self._swap_step_done(now)
+            return True
+        return False
+
+    def _v2_swap_housekeeping(self, now: Time) -> bool:
+        """[10-06 D26-A] 후진 결과 거두기·정지 유지 해제·상황 초기화. 결과를 거뒀으면 True (이번 틱은 끝)."""
+        if self._swap_collect(now):
+            return True
+        if self._swap_hold_since is not None:
+            pid = self._swap_partner_id()
+            a = self._cached_agents.get(pid if pid is not None else -1)
+            hp = self._swap_hold_partner
+            why = None
+            if a is not None and hp is not None:
+                p = a.current_pose.pose.position
+                d = math.hypot(p.x - hp[0], p.y - hp[1])
+                if d >= self.cycle_swap_pass_m:
+                    why = f"상대 {pid} 가 {d:.2f} m 지나감"
+            held = (now - self._swap_hold_since).nanoseconds * 1e-9
+            if why is None and held >= self.cycle_swap_hold_sec:
+                why = f"정지 유지 {held:.0f}s 경과"
+            if why is not None:
+                self._swap_release(now, why)
+        # [10-07 D26-A swap3 P2-3] 출발 보류: 상대가 내 goal 에서 비켰으면 (또는 시한 소진) 푼다
+        if self._swap_start_block_since is not None and not self._swap_start_block_engage(now, "유지"):
+            if self._swap_start_block_since is not None:
+                self._swap_start_block_clear("상대가 내 goal 에서 비킴·상황 끝", forget=False)
+        me = self._own_pose()
+        # [10-07 D26-A swap3 P2-2] 최초 순환 검출 자리도 기준점과 같은 규칙 — 그 자리에서 2.0 m 넘게 주행하면 잊는다
+        if self._swap_first_xy and me is not None:
+            for k in [k for k, v in self._swap_first_xy.items() if math.hypot(me[0] - v[0], me[1] - v[1]) > 2.0]:
+                self._swap_first_xy.pop(k, None)
+        if (self._swap_anchor is not None and not self._swap_step_active and me is not None
+                and math.hypot(me[0] - self._swap_anchor[0], me[1] - self._swap_anchor[1]) > 2.0):
+            self._swap_reset(now, "최초 감지 자리에서 2.0 m 넘게 주행")
+        return False
+
+    def _swap_on_command(self, prev: str, new: str, new_cmd: bool, goal_end: bool) -> None:
+        """[10-06 D26-A] 새 명령·명령 끝. 새 명령은 정지 유지만 푼다 (재전송으로 누적 상한이 사라지지 않게 — 상한은 그대로).
+        회수된 후진이 움직이지 못했으면 세지 않는다. SUCCEEDED 면 상황을 지운다.
+        [10-06 D26-A 검토] IDLE 은 지우지 않는다 — READY 150 s 시한 (READY_TIMEOUT) 도 IDLE 로 들어오고 (navigation_manager 917-923 →
+        robot_status_manager 166), 그 뒤 FLECS·관제가 같은 goal 을 다시 보내면 새 기준점에서 2회를 더 해 1.8 m 까지 물러났다.
+        IDLE 은 CANCELED 처럼 정지 유지만 풀고, 기준점에서 2.0 m 넘게 벗어나 있을 때만 상황을 지운다."""
+        now = self.get_clock().now()
+        if self._swap_step_active and self._backup_state not in ("sending", "running", "waiting"):
+            self._swap_step_active = False                          # D23/D14 회수로 끝났다 ('failed' 는 D23-2 가 정리)
+            me = self._own_pose()
+            sx = self._swap_step_xy
+            moved = math.hypot(me[0] - sx[0], me[1] - sx[1]) if (me is not None and sx is not None) else 0.0
+            if moved < 0.1:
+                self._swap_steps = max(0, self._swap_steps - 1)
+                if self._swap_pair is not None and self._swap_vacater.get(self._swap_pair) == int(self.my_id):
+                    self._swap_vacater.pop(self._swap_pair, None)
+                self.get_logger().info(f"[V2 swap] 회수된 맞바꿈 후진 ({moved:.2f} m) 은 세지 않는다 ({prev} -> {new})")
+        # [10-07 D26-A swap3 P2-1] READY → RECEIVED_GOAL 은 같은 명령의 내부 출발 (navigation_manager 의 goal 점유 대기 끝) 이다 —
+        #   관제의 새 명령은 종료 상태 (CANCELED·IDLE 등) 를 거쳐 들어오거나 (위 goal_end·new_cmd 에서 이미 풀린다) goal 목록이 바뀐다.
+        #   fleet 은 seq 를 모르므로 'goal 목록이 정지 유지 시작 때와 같은가' 로 본다. 같으면 정지 유지를 풀지 않는다
+        #   (예전: 같은 seq 의 내부 출발로 0.16 s 만에 풀림, sim swap3_c1_ready_d26 r2.log:1533). 정지 유지 전 (후진 중 회수) 은 예전대로 푼다.
+        internal = (new_cmd and prev == 'READY' and new == 'RECEIVED_GOAL' and not self._swap_goal_changed())
+        if internal and self._swap_hold_since is not None:
+            self.get_logger().info(
+                f"[V2 swap] 정지 유지 계속 — 같은 명령의 내부 출발 ({prev} -> {new}, goal 그대로). "
+                f"상대 지나감·{self.cycle_swap_hold_sec:.0f}s·새 명령에만 푼다")
+        elif self._swap_freeze_since is not None or self._swap_hold_since is not None:
+            self._swap_release(now, f"{'새 명령' if new_cmd else '명령 끝'} ({prev} -> {new})")
+        if not internal:
+            self._swap_start_block_clear(f"{'새 명령' if new_cmd else '명령 끝'} ({prev} -> {new})")
+        if goal_end and new == 'SUCCEEDED':
+            self._swap_reset(now, f"명령 끝 {new}")
+        elif goal_end and new == 'IDLE' and self._swap_anchor is not None:
+            me = self._own_pose()
+            if me is not None and math.hypot(me[0] - self._swap_anchor[0], me[1] - self._swap_anchor[1]) > 2.0:
+                self._swap_reset(now, f"명령 끝 {new} (기준점에서 2.0 m 넘게 떨어짐)")
+
+    # ------------------------------------------------------------------
+    # [10-07 D26-A swap3] 결정 불필요 수정 — P2-1 (같은 명령 판정), P2-3 (출발 보류)
+    # ------------------------------------------------------------------
+    def _swap_goal_sig(self) -> Optional[Tuple[Tuple[float, float], ...]]:
+        """[10-07 D26-A swap3 P2-1] 내 남은 goal 목록 (/remaining_goals — READY 대기 중에도 navigation_manager 가 0.1 s 마다 낸다).
+        모르면 None."""
+        g = getattr(self, '_prev_goals', None)
+        if not g:
+            return None
+        return tuple((round(float(q[0]), 2), round(float(q[1]), 2)) for q in g)
+
+    def _swap_goal_changed(self) -> bool:
+        """[10-07 D26-A swap3 P2-1] 정지 유지 시작 때와 지금 goal 목록이 다른가 (= 새 명령). 어느 한쪽을 모르면 False
+        (바뀌었다고 볼 근거 없음 — 종료 상태를 거쳐 오는 새 명령은 그 전환에서 이미 풀린다)."""
+        a, b = self._swap_hold_goals, self._swap_goal_sig()
+        return a is not None and b is not None and a != b
+
+    def _swap_start_block_reason(self, now: Time) -> Optional[str]:
+        """[10-07 D26-A swap3 P2-3] 출발 보류 조건 — 맞바꿈 상황 기억 중 + 내가 이미 비킴 (후진 1회 이상) + 관제 캐시의 상대가
+        내 남은 goal 중 하나의 cycle_swap_start_block_m 안. 맞으면 사유 문자열, 아니면 None. 상태를 바꾸지 않는다."""
+        if not (self.cycle_swap_gate_enable and self.cycle_swap_start_block_m > 0.0):
+            return None
+        if self._swap_pair is None or self._swap_steps <= 0 or self._swap_start_block_expired:
+            return None
+        pid = self._swap_partner_id()
+        a = self._cached_agents.get(pid) if pid is not None else None
+        goals = getattr(self, '_prev_goals', None)
+        if a is None or not goals:
+            return None
+        p = a.current_pose.pose.position
+        gx, gy, dg = min(((float(q[0]), float(q[1]), math.hypot(p.x - q[0], p.y - q[1])) for q in goals),
+                         key=lambda t: t[2])
+        if dg > self.cycle_swap_start_block_m:
+            return None
+        return f"상대 {pid} 가 아직 내 goal ({gx:.2f},{gy:.2f}) 에서 {dg:.2f} m (관제 캐시)"
+
+    def _swap_start_block_engage(self, now: Time, why: str, force_pause: bool = False) -> bool:
+        """[10-07 D26-A swap3 P2-3] 출발 보류를 건다 (또는 이어 간다). 걸었으면 True — 부르는 쪽은 대기를 풀지 않는다.
+        처음 걸 때와 force_pause (출발 순간 — 새 Nav2 goal) 에만 pause 를 낸다. cycle_swap_start_block_sec 가 지나면 소진으로 풀고
+        이 상황에서는 다시 걸지 않는다 (예전 동작으로 돌아감)."""
+        r = self._swap_start_block_reason(now)
+        if r is None:
+            return False
+        since = self._swap_start_block_since
+        if since is not None:
+            held = (now - since).nanoseconds * 1e-9
+            if held >= self.cycle_swap_start_block_sec:
+                self._swap_start_block_expired = True
+                self.get_logger().warn(
+                    f"[V2 swap] 출발 보류 {held:.0f}s 소진 ({r}) — 더 막지 않는다 (예전 동작)")
+                self._swap_start_block_clear("시한 소진", forget=False)
+                return False
+        else:
+            self._swap_start_block_since = now
+        if since is None or force_pause:
+            self._publish_pause()
+            self._swap_start_block_paused = True
+            self.get_logger().warn(
+                f"[V2 swap] 출발 보류 ({why}) — {r}. 검출 거리 밖이라도 점유된 goal 로 가지 않는다: 대기를 풀지 않고 pause 유지 "
+                f"(상대가 비키거나 최대 {self.cycle_swap_start_block_sec:.0f}s)")
+            self._publish_state(f"[V2 swap] START BLOCK ({why})")
+        return True
+
+    def _swap_start_block_clear(self, why: str, forget: bool = True) -> None:
+        """[10-07 D26-A swap3 P2-3] 출발 보류를 끝낸다. 내가 pause 를 냈고 다른 대기가 없으면 resume 을 낸다
+        (agent·정적 대기가 남아 있으면 그 규칙 (Early Exit 등) 이 푼다). forget 이면 소진 기억도 지운다 (새 명령·상황 끝)."""
+        since = self._swap_start_block_since
+        paused = self._swap_start_block_paused
+        self._swap_start_block_since = None
+        self._swap_start_block_paused = False
+        if forget:
+            self._swap_start_block_expired = False
+        if since is None:
+            return
+        held = (self.get_clock().now() - since).nanoseconds * 1e-9
+        waits = (self.is_processing_agent_pause or self.is_processing_replan_pause
+                 or self.is_processing_goal_occupied_pause or self.is_processing_last_goal_occupied_pause)
+        resume = paused and not waits
+        if resume:
+            self.pub_cmd_resume.publish(Bool(data=False))
+        self.get_logger().info(
+            f"[V2 swap] 출발 보류 끝 — {why} ({held:.0f}s). "
+            f"{'resume 발행' if resume else ('남은 대기가 풀어 준다' if paused else 'pause 발행 없음')}")
+        self._publish_state(f"[V2 swap] START BLOCK end ({why})")
+
+    def _swap_gate_note(self, caller: str) -> Optional[Tuple[bool, str]]:
+        """[10-06 D26-A] retreat gate 의 맞바꿈 예외. None 이면 평소 gate.
+        - 맞바꿈 후진을 보내는 동안 (ctx) 은 coord_wait 거부 없이 거리 무관 허용 (사용자 Q25).
+        - 맞바꿈을 최근 cycle_swap_hold_sec 안에 확인했으면 다른 후퇴 규칙 (unwedge·push·standoff·S17 후진) 은 보류.
+          STOP 으로 대기가 풀려 coord_wait 가 false 가 되면 '정적 끼임' 으로 두 대가 같이 unwedge 했다 (sim c3 12:41:44)."""
+        if self._swap_gate_ctx is not None:
+            pid = [int(m) for m in self._swap_gate_ctx if int(m) != int(self.my_id)]
+            return True, f"goal 맞바꿈 (상대 {pid[0] if pid else '?'}) 상호 정지 — 거리 무관 허용"
+        if caller in self._OP_JUNCTION_CALLERS or self._swap_seen_t is None or self._swap_pair is None:
+            return None
+        age = (self.get_clock().now() - self._swap_seen_t).nanoseconds * 1e-9
+        if age >= self.cycle_swap_hold_sec:
+            return None
+        return False, (f"goal 맞바꿈 상대 {self._swap_partner_id()} 와 대치 중 ({age:.0f}s 전 확인) — "
+                       f"맞바꿈 규칙만 움직인다")
+
+    def _swap_i_have_priority(self, a: MultiAgentInfo, now: Time) -> Optional[bool]:
+        """[10-06 D26-A 검토] 맞바꿈의 passer (우선) 판정 — _i_have_priority 와 같은 순서 (aging 단계 → machine_id) 지만
+        양쪽 aging 을 모두 관제가 돌려준 phase (PAUSE 관측 시각, _agent_pause_since) 로 센다.
+        _i_have_priority 는 내 aging 을 내 _v2_pause_since 로, 상대 aging 을 관측 PAUSE 로 세서 READY (현장 phase 3) 두 대가
+        60 s 넘게 서 있으면 둘 다 자기가 우선이라고 보고 같은 초에 함께 비켰다.
+        [10-06 D26-A 재검토] 관제가 내 정보 (또는 상대 정보) 를 돌려주지 않으면 None (판정 불가) — 예전처럼 machine_id 로 떨어지면
+        상대는 aging 으로 세고 나는 machine_id 로 세서 둘 다 '우선 아님' 으로 보고 함께 비킬 수 있었다. 부르는 쪽은 비키지 않는다."""
+        if not self.dynamic_priority_enable:
+            return int(self.my_id) < int(a.machine_id)
+        if int(self.my_id) not in self._cached_agents or int(a.machine_id) not in self._cached_agents:
+            return None
+
+        def lvl(mid: int) -> int:
+            since = self._agent_pause_since.get(int(mid))
+            if since is None:
+                return 0
+            return min(self.aging_max_level, int((now - since).nanoseconds * 1e-9 / self.aging_step_sec))
+        lm, lo = lvl(self.my_id), lvl(a.machine_id)
+        if lm != lo:
+            return lm > lo
+        return int(self.my_id) < int(a.machine_id)
+
+    def _swap_step_blocked(self, now: Time, me: Tuple[float, float, float], tx: float, ty: float, d: float,
+                           a: MultiAgentInfo) -> Optional[str]:
+        """맞바꿈 후진 사전 점검. 막히면 사유, 통과하면 None. 아무 상태도 바꾸지 않는다."""
+        if not self._op_may('_v2_cycle_tick'):
+            return f"관제 규칙 불허 (상태 {self.current_robot_status})"
+        if self._in_junction(tx, ty):
+            return f"목표 ({tx:.2f},{ty:.2f}) 가 교차로 안"
+        pg, src = self._swap_partner_goal(a)
+        if pg is not None:
+            d0 = math.hypot(me[0] - pg[0], me[1] - pg[1])
+            d1 = math.hypot(tx - pg[0], ty - pg[1])
+            if d1 < d0 - 1e-3:
+                return f"상대 goal ({pg[0]:.2f},{pg[1]:.2f}, {src}) 쪽으로 다가감 ({d0:.2f} → {d1:.2f} m)"
+        elif not (src in self._SWAP_SRC_NOPATH and self.cycle_swap_ready_assume_goal
+                  and int(a.status.phase) == AgentStatus.STATUS_MOVING):
+            # [10-06 D26-A 검토] 상대 goal 을 모르면 C 필터를 평가할 수 없다 — 진행하지 않는다 (술어가 이미 'hold' 로 거르지만 한 번 더)
+            #   [10-06 D26-A 재검토] 경로 10점 가득 ('horizon', 시야 끝) 도 goal 모름 — ready_assume 은 경로가 없는 phase 3 에만
+            return f"상대 goal 정보 없음 (phase {a.status.phase}, {src}) — C 필터 평가 불가"
+        if self._rear_blocked(d) is True:
+            return f"후방 {self._rear_block_at} m lethal"
+        self._swap_gate_ctx = self._swap_pair
+        try:
+            ok = self._retreat_gate_check('_v2_cycle_tick')
+        finally:
+            self._swap_gate_ctx = None
+        if not ok:
+            return "retreat gate 보류 (관제 정지)"
+        return None
+
+    def _swap_clip_to_junction(self, me: Tuple[float, float, float], d: float) -> Optional[float]:
+        """[10-07 D26-A swap3 P1-1] 직선 후진 (뒤쪽) 0..d 위에서 처음 교차로로 판정되는 거리를 0.01 m 간격으로 찾아
+        (그 앞 마지막 비교차로 거리 − 여유) 를 돌려준다. 0.1 m 미만 (지금 자리가 이미 교차로 등) 이면 None (줄이지 않음 = 예전대로 거부).
+        _in_junction 은 0.25 m·2 s 캐시를 쓰므로 점마다 캐시를 비우고, 끝나면 비워 둔다 (줄인 목표가 경계 칸 캐시를 물려받지 않게)."""
+        res = 0.01
+        c, s_ = math.cos(me[2]), math.sin(me[2])
+        last_free = None
+        try:
+            n = int(math.ceil(d / res))
+            for k in range(0, n + 1):
+                t = min(d, k * res)
+                self._junc_cache = None
+                if self._in_junction(me[0] - t * c, me[1] - t * s_):
+                    break
+                last_free = t
+            else:
+                return None                    # 끝까지 교차로가 아님 (캐시 탓 오판) — 줄이지 않는다
+        finally:
+            self._junc_cache = None
+        if last_free is None:
+            return None
+        dc = last_free - self.cycle_swap_junction_margin_m
+        return dc if dc >= 0.1 else None
+
+    def _v2_swap_step_tick(self, now: Time, sig: Tuple[int, ...], partner: int) -> None:
+        """맞바꿈 쌍에서 내 후진 여부를 정한다 (_v2_cycle_tick 이 맞바꿈일 때만 부른다)."""
+        a = self._cached_agents.get(partner)
+        me = self._own_pose()
+        if a is None or me is None:
+            return
+        p = a.current_pose.pose.position
+        pyaw = self._agent_yaw(a)
+        if self._swap_pair != sig:
+            if self._swap_step_active:
+                # [10-06 D26-A 재검토] 내 후진이 아직 진행 중 — 결과를 거둘 때까지 쌍을 바꾸지 않는다
+                self.get_logger().info(f"[V2 swap] 후진 진행 중 — 다른 쌍 {sig} 은 결과를 거둔 뒤 본다", throttle_duration_sec=5.0)
+                return
+            self._swap_enter(now, sig, partner, a, me, 'swap')     # [10-06 D26-A 재검토] 기준점·누적은 로봇 단위로 유지
+        self._swap_seen_t = now
+        if self.current_robot_status not in ('READY', 'DRIVING', 'PAUSED'):
+            self.get_logger().info(f"[V2 swap] 상태 {self.current_robot_status} — 맞바꿈 후진은 READY·DRIVING·fleet PAUSED 에서만",
+                                   throttle_duration_sec=10.0)
+            return
+        vac = self._swap_vacater.get(sig)
+        if vac is not None and vac != int(self.my_id):
+            self.get_logger().info(f"[V2 swap] 상대 {partner} 가 비키는 로봇 — 나는 정지 유지", throttle_duration_sec=10.0)
+            return
+        # 움직이는 구성원 guard (항상): 상대가 기준에서 0.08 m 넘게 바뀌었고 나에게서 멀어졌으면 상대가 비키는 로봇
+        #   [10-06 D26-A 검토] 0.15 → 0.08: 후진은 0.1 m 부터 1회로 센다 (_swap_step_done). 0.1~0.15 m 만 가고 멈춘 상대를 '안 움직임' 으로
+        #   보면 두 대가 같이 비킨다. 0.08 m 는 이웃 격자 (0.05 m) 반올림 한 칸·대각 (0.07 m) 보다 크다.
+        #   [10-06 D26-A 재검토] '비키는 중' 은 나와의 거리가 늘었을 때만이다. 상대가 자기 goal (내 자리) 쪽으로 다가와 섰으면
+        #   비키는 것이 아니다 — 기준 자세를 다시 잡고 이어 간다 (예전: 내 1번째 뒤 상대가 0.08 m+ 다가와 서면 2번째가 영영 안 나갔다).
+        #   움직이는 중 (속도) 이면 판정하지 않고 멈출 때까지 기다린다.
+        pa = self._swap_partner_anchor
+        disp = math.hypot(p.x - pa[0], p.y - pa[1])
+        r_now = math.hypot(p.x - me[0], p.y - me[1])
+        r_then = math.hypot(pa[0] - me[0], pa[1] - me[1])
+        if disp >= 0.08 and r_now > r_then:
+            if vac is None:
+                self._swap_vacater[sig] = int(partner)
+                self.get_logger().warn(f"[V2 swap] 상대 {partner} 가 움직였다 ({disp:.2f} m, 나와 {r_then:.2f} → {r_now:.2f} m) "
+                                       f"→ 상대가 비키는 로봇, 나는 정지 유지")
+            return
+        if self._agent_is_moving(a, now):
+            self.get_logger().info(f"[V2 swap] 상대 {partner} 움직이는 중 — 멈출 때까지 판정하지 않는다", throttle_duration_sec=10.0)
+            return
+        if disp >= 0.08:
+            self._swap_partner_anchor = (p.x, p.y, pyaw)
+            pa = self._swap_partner_anchor
+            self.get_logger().info(
+                f"[V2 swap] 상대 {partner} 가 {disp:.2f} m 움직여 섰지만 나와 {r_then:.2f} → {r_now:.2f} m (멀어지지 않음) — "
+                f"비키는 것이 아니다, 기준 자세를 다시 잡는다")
+        if abs(self._ang_wrap(pyaw - pa[2])) >= math.radians(5.0):
+            self._swap_partner_anchor = (pa[0], pa[1], pyaw)
+            self._swap_retry_at = now + Duration(seconds=self.cycle_gate_retry_sec)
+            self.get_logger().info(f"[V2 swap] 상대 {partner} 가 회전 중 — {self.cycle_gate_retry_sec:.0f}s 뒤 다시 본다")
+            return
+        if self._swap_retry_at is not None and now < self._swap_retry_at:
+            return
+        # [10-06 D26-A 검토] 다음 후진은 정지 유지 시작 (= 앞 후진 끝) 에서 다시 cycle_swap_mutual_sec 뒤. 무진전 시계 (_stuck_sec) 는
+        #   0.3 m 넘게 움직여야 새로 세므로, 0.1~0.3 m 만 가고 멈춘 후진 (stop-and-go 취소 등) 뒤에는 다음 틱에 바로 또 보냈다.
+        if (self._swap_hold_since is not None
+                and (now - self._swap_hold_since).nanoseconds * 1e-9 < self.cycle_swap_mutual_sec):
+            return
+        if self._swap_steps >= self.cycle_swap_max_steps:
+            self.get_logger().info(
+                f"[V2 swap] 후진 상한 {self.cycle_swap_max_steps}회 소진 — 더 비키지 않는다 (상대 통과·last-goal 보고에 맡김)",
+                throttle_duration_sec=30.0)
+            return
+        prio = self._swap_i_have_priority(a, now)
+        if prio is None and vac != int(self.my_id):
+            # [10-06 D26-A 재검토] 관제 캐시에 내 정보 (또는 상대 정보) 가 없어 우선순위를 양쪽이 같게 정할 수 없다 — 비키지 않는다
+            #   (이미 내가 비키는 로봇이면 우선순위를 보지 않으므로 이어 간다)
+            self.get_logger().info(
+                f"[V2 swap] 관제 정보 없음 (나 {int(self.my_id) in self._cached_agents}, 상대 {int(partner) in self._cached_agents}) — "
+                f"우선순위 판정 불가, 비키지 않는다", throttle_duration_sec=30.0)
+            return
+        srank = 0 if (vac == int(self.my_id) or not prio) else 1     # 0 = vacater, 1 = passer (vacater 가 못 움직이면 대신)
+        need = self.cycle_swap_mutual_sec + srank * self.cycle_stagger_sec
+        if self._stuck_sec(now) < need or self._agent_stuck_sec(partner, now) < need:
+            return
+        ax, ay = self._swap_anchor
+        moved = math.hypot(me[0] - ax, me[1] - ay)
+        # [10-07 Q37] 맞바꿈 상황의 1번째 후진 (기준점 이후 센 후진 0회) 만 cycle_swap_first_step_m — retreat_max_m 로 자르지 않는다.
+        #   1번째가 움직이지 못해 세지 않았으면 (_swap_step_done 감산) 다음 시도도 1번째. 0.1 m+ 움직인 중단은 1회로 세므로 다음은 0.45.
+        #   누적 상한은 '계획된 단계 합 + 0.05' 로 넓힌다 (끄면 예전 식 그대로). 아래 교차로 clip·사전 점검 (교차로·C 필터·후방·gate) 은 그대로.
+        first = self.cycle_swap_first_step_m > 0.0 and self._swap_steps == 0
+        if self.cycle_swap_first_step_m > 0.0:
+            cap = self.cycle_swap_first_step_m + max(0, self.cycle_swap_max_steps - 1) * self.cycle_swap_step_m + 0.05
+        else:
+            cap = self.cycle_swap_max_steps * self.cycle_swap_step_m + 0.05
+        if first:
+            d = min(self.cycle_swap_first_step_m, cap - moved)
+        else:
+            d = min(self.cycle_swap_step_m, self.retreat_max_m, cap - moved)
+        if d < 0.1:
+            self.get_logger().info(f"[V2 swap] 기준점에서 이미 {moved:.2f} m — 누적 상한 {cap:.2f} m 소진", throttle_duration_sec=30.0)
+            return
+        tx, ty = me[0] - d * math.cos(me[2]), me[1] - d * math.sin(me[2])
+        # [10-07 D26-A swap3 P1-1] 목표가 교차로 안이면 단계를 통째로 버리지 않고 교차로 경계 앞 (여유 cycle_swap_junction_margin_m)
+        #   까지로 줄인다 (sim swap3_c1_ready_d18 r2.log:1857… 목표 -8.69 '교차로 안' 25회 거부 → 0.45 m 한 번에 그침).
+        #   줄인 거리가 0.1 m 미만이면 줄이지 않는다 — 아래 사전 점검이 예전처럼 '교차로 안' 으로 거부. step 0.45 m 증가·교차로 통과는 하지 않는다 (Q37).
+        #   [10-07 Q37] 1번째 0.65 m 도 같은 clip 을 받는다 (교차로를 지나가지 않음).
+        if self.cycle_swap_junction_margin_m >= 0.0 and self._in_junction(tx, ty):
+            dc = self._swap_clip_to_junction(me, d)
+            if dc is not None:
+                self.get_logger().info(
+                    f"[V2 swap] 후진 목표 ({tx:.2f},{ty:.2f}) 가 교차로 안 — 경계 앞까지 {d:.2f} → {dc:.2f} m 로 줄인다 "
+                    f"(여유 {self.cycle_swap_junction_margin_m:.2f} m)")
+                d = dc
+                tx, ty = me[0] - d * math.cos(me[2]), me[1] - d * math.sin(me[2])
+        why = self._swap_step_blocked(now, me, tx, ty, d, a)
+        if why is not None:
+            wait = (2.0 * self.cycle_stagger_sec) if srank == 0 else self.cycle_gate_retry_sec
+            self._swap_retry_at = now + Duration(seconds=wait)
+            self.get_logger().info(
+                f"[V2 swap] 맞바꿈 후진 사전 점검 불통과 — {why}. {wait:.0f}s 뒤 다시 본다"
+                f"{' (그동안 상대 순번)' if srank == 0 else ''}", throttle_duration_sec=10.0)
+            return
+        self._swap_steps += 1
+        self._swap_vacater[sig] = int(self.my_id)
+        self._swap_step_active = True
+        self._swap_step_xy = (me[0], me[1])
+        self._swap_hold_since = None
+        self._swap_hold_partner = None
+        if self._swap_freeze_since is None:
+            self._swap_freeze_since = now
+        self.get_logger().warn(
+            f"[V2 swap] goal 맞바꿈 상대 {partner} 와 {need:.0f}s 넘게 상호 정지, 나는 "
+            f"{'우선순위 없음 → 비키는 로봇' if srank == 0 else '우선이지만 상대가 못 비킴 → 대신 비킴'} → 직선 후진 {d:.2f} m "
+            f"({self._swap_steps}/{self.cycle_swap_max_steps}, 기준점에서 {moved:.2f} m, 누적 상한 {cap:.2f} m"
+            f"{', 1번째 거리 ' + format(self.cycle_swap_first_step_m, '.2f') + ' m (Q37)' if first else ''})")
+        self._publish_state(f"[V2 swap] BACKOFF {d:.2f} m (step {self._swap_steps}/{self.cycle_swap_max_steps}, vs {partner})")
+        saved = self.yield_backoff_m
+        self.yield_backoff_m = d
+        self._swap_gate_ctx = sig
+        try:
+            self._backup_send(now)
+        finally:
+            self._swap_gate_ctx = None
+            self.yield_backoff_m = saved
+
+    # ------------------------------------------------------------------
+    # [10-07 Q42] 비켜 준 로봇의 정지 유지 — 사용자 결정 "비켜 준 로봇은 최대 30sec 기다려 주는게 맞는거 같아."
+    #   문제 (sim ③ c3_both_d38): 비우선 r2 의 push·unwedge 후퇴가 끝나는 순간 우선 r1 은 경로가 비어 resume 하고, r2 는 같은 명령 안에서
+    #   직진 plan 을 받아 함께 출발해 다시 정면으로 맞섰다 (on1 r2 DRIVING 03:21:11.47 / r1 resume 11.69).
+    #   무엇: 우선 로봇에게 비켜 준 후퇴 (밀어내기·unwedge·standoff·순환 후진·TYPE_9/goal 점유 후진) 가 끝나면 그 로봇이
+    #         yield_hold_pass_m 움직이거나 yield_hold_sec 가 지날 때까지 fleet 의 resume 을 내지 않고 pause 를 유지한다.
+    #   어떻게 (같은 명령 안): ① 후퇴 끝에 pause 발행 ② resume 관문 (_YieldHoldResumeGate) 이 그동안 fleet resume 을 모두 보류
+    #         ③ BT 가 goal 시작 (InitSequence) 에 /controller_pause_flag 를 false 로 지우고, CheckPauseResetCondition 이 첫 PauseBranch
+    #         tick 에 래치를 지우므로 (P2-3 이 듣지 않은 이유), 상태가 RECEIVED_GOAL·PLANNING·DRIVING·RECOVERY_SUCCESS 로 바뀔 때마다
+    #         (그리고 1 s 마다) pause 를 다시 낸다 — 첫 FollowPath tick 뒤의 pause 는 BT 가 따른다.
+    #         A 의 정지 유지는 같은 방식이 아니라 '대기 pause 를 풀지 않음 + 100 s 시계 정지' 다 — A 는 vacater 가 이미 goal 점유
+    #         대기 (pause·READY 대기 루프) 중이라 그것으로 충분했지만, d38 의 r2 는 후퇴 뒤 대기가 없어 BT 가 곧바로 달린다.
+    #   해제: 상대 지나감·시한 → (다른 pause 대기·관제 pause·기동 없으면) resume. 새 명령·명령 끝 → resume 없이 해제 (새 명령이 우선).
+    #         같은 goal 의 READY→RECEIVED_GOAL 내부 출발은 새 명령이 아니다 (P2-1 과 같은 판정) — 유지하고 출발 뒤 pause 를 다시 건다.
+    #   막을 수 없는 것: READY 대기 루프의 출발 자체 (navigation_manager 는 fleet pause 를 보지 않는다) — 출발 뒤 다음 tick (≤0.1 s) 에 세운다.
+    #         BT RECOVERY 기동 (escape 등, BT recovery 동결) 과 다른 fleet 후퇴 기동 (각자 gate 그대로) 은 막지 않는다 — 끝나면 다시 pause.
+    #         BT 403/405·100 s last-goal STOP 등 내부 abort 는 명령 끝이라 해제된다 (관제 재명령 = 새 명령).
+    # ------------------------------------------------------------------
+    _YH_ASSERT_STATES = ('RECEIVED_GOAL', 'PLANNING', 'DRIVING', 'RECOVERY_SUCCESS')
+    _YH_PASS_CALLERS = ('_yield_publish',)    # BT 곡선 후퇴 시작의 resume 은 통과 (후퇴 기동 자체는 각 규칙의 gate 가 판단)
+
+    def _yh_install_gate(self) -> None:
+        """[10-07 Q42] 켜져 있을 때만 pub_cmd_resume 을 관문으로 감싼다. 꺼져 있으면 아무것도 바꾸지 않는다."""
+        if self.yield_hold_enable and not isinstance(self.pub_cmd_resume, _YieldHoldResumeGate):
+            self.pub_cmd_resume = _YieldHoldResumeGate(self, self.pub_cmd_resume)
+
+    def _yh_blocks_resume(self) -> bool:
+        if not (self.yield_hold_enable and self._yh_since is not None):
+            return False
+        return sys._getframe(2).f_code.co_name not in self._YH_PASS_CALLERS
+
+    def _yh_note_swallow(self, caller: str) -> None:
+        self._yh_swallowed = int(self._yh_swallowed or 0) + 1
+        held = ((self.get_clock().now() - self._yh_since).nanoseconds * 1e-9) if self._yh_since is not None else 0.0
+        self.get_logger().info(
+            f"[V2 yield-hold] resume 보류 ({caller}) — 우선 로봇 {self._yh_mid} 통과 대기 중 ({held:.0f}/{self.yield_hold_sec:.0f}s)",
+            throttle_duration_sec=2.0)
+
+    def _yh_swap_owned(self, mid: int) -> bool:
+        """[10-07 Q42] 맞바꿈 A 가 이 상대와의 쌍을 맡고 있는가 (A 판정 'swap' 으로 후진했거나·후진 중·정지 유지 중·비키는 로봇 기억).
+        A 판정이 'hold' (경계·goal 모름) 뿐이면 맡은 것이 아니다 — Q42 정지 유지를 건다."""
+        if not self.cycle_swap_gate_enable:
+            return False
+        pair = self._swap_pair
+        if pair is None or int(mid) not in pair:
+            return False
+        vac = getattr(self, '_swap_vacater', None) or {}
+        return bool(self._swap_steps > 0 or self._swap_step_active or self._swap_hold_since is not None
+                    or self._swap_freeze_since is not None or vac.get(pair) is not None)
+
+    def _yh_pick_partner(self, hint: Optional[int], now: Time) -> Optional[Tuple[int, MultiAgentInfo, str]]:
+        """[10-07 Q42] 기다려 줄 우선 로봇. 후퇴 규칙이 지목한 상대 (hint) 를 먼저, 없으면 가까운 순으로.
+        조건: 나보다 우선 (_i_have_priority false)·yield_hold_near_m 안·스스로 못 움직이는 phase 아님.
+        지목이 아니면 나를 마주 보거나 (cycle_front_deg) 내 agent 충돌 대상이어야 한다."""
+        me = self._own_pose()
+        if me is None:
+            return None
+        cands = [(int(m), a) for m, a in self._cached_agents.items() if int(m) != int(self.my_id)]
+        cands.sort(key=lambda t: (0 if (hint is not None and t[0] == int(hint)) else 1,
+                                  math.hypot(t[1].current_pose.pose.position.x - me[0],
+                                             t[1].current_pose.pose.position.y - me[1])))
+        tgts = set()
+        if self.is_processing_agent_pause and self._locked_target_id:
+            tgts.add(int(self._locked_target_id))
+        if getattr(self, 'agent_collision_status', False) and getattr(self, 'latest_agent_target_id', 0):
+            tgts.add(int(self.latest_agent_target_id))
+        for mid, a in cands:
+            if self._check_vehicle_immobile(a):
+                continue
+            p = a.current_pose.pose.position
+            d = math.hypot(p.x - me[0], p.y - me[1])
+            if d > self.yield_hold_near_m:
+                continue
+            if self._i_have_priority(a, now):
+                continue                                  # 우선이 아닌 로봇에게는 기다려 주지 않는다
+            if hint is not None and mid == int(hint):
+                return mid, a, "후퇴 규칙이 지목"
+            face = abs(self._ang_wrap(math.atan2(me[1] - p.y, me[0] - p.x) - self._agent_yaw(a))) <= math.radians(self.cycle_front_deg)
+            if face or mid in tgts:
+                return mid, a, ("나를 마주 봄" if face else "내 agent 충돌 대상")
+        return None
+
+    def _yh_on_yield_done(self) -> None:
+        """[10-07 Q42] BT 곡선 후퇴 성공 — 주인 규칙을 보고 정지 유지를 건다. 맞바꿈 A 후진·교차로 탈출·시험 hook 은 대상 아님."""
+        if self._swap_step_active or getattr(self, '_jx_escape_active', False):
+            return
+        if getattr(self, '_push_paused', False):
+            self._yh_on_backoff_done('push', getattr(self, '_push_last_mid', None))
+        elif getattr(self, '_unwedge_active', False):
+            self._yh_on_backoff_done('unwedge', None)
+        elif getattr(self, '_standoff_active', False):
+            self._yh_on_backoff_done('standoff', getattr(self, '_standoff_sig', None))
+        elif getattr(self, '_cycle_backoff_active', False):
+            self._yh_on_backoff_done('cycle', self._cycle_my_wait_target(self.get_clock().now()))
+        elif self.is_processing_agent_pause:
+            self._yh_on_backoff_done('backoff', self._locked_target_id)
+
+    def _yh_on_backoff_done(self, kind: str, hint: Optional[int]) -> None:
+        """[10-07 Q42] 비켜 준 후퇴가 끝났다 — 조건이 맞으면 정지 유지를 시작한다 (이미 유지 중이면 pause 만 다시 낸다, 시한은 늘리지 않는다)."""
+        if not (self.yield_hold_enable and self.v2_enable) or self._swap_step_active:
+            return
+        st = self.current_robot_status
+        if self._yh_since is not None:
+            if st in self._OP_ACTIVE and st != 'READY':
+                self._publish_pause()                     # 유지 중 다른 후퇴가 resume 을 냈을 수 있다 — 다시 세운다
+                self._yh_assert_t = self.get_clock().now(); self._yh_assert_st = st
+            return
+        if st not in self._OP_ACTIVE:
+            return                                        # 명령이 없으면 움직이지 않는다 — 유지할 것이 없다
+        now = self.get_clock().now()
+        pick = self._yh_pick_partner(hint, now)
+        if pick is None:
+            self.get_logger().info(
+                f"[V2 yield-hold] {kind} 후퇴 끝 — {self.yield_hold_near_m:.1f} m 안에 기다려 줄 우선 로봇 없음 (지목 {hint}) → 정지 유지 안 함",
+                throttle_duration_sec=10.0)
+            return
+        mid, a, src = pick
+        if self._yh_swap_owned(mid):
+            self.get_logger().info(
+                f"[V2 yield-hold] {kind} 후퇴 끝 — 상대 {mid} 는 맞바꿈 A 가 맡은 쌍 {self._swap_pair} → A 규칙 그대로 (Q42 유지 안 함)",
+                throttle_duration_sec=10.0)
+            return
+        p = a.current_pose.pose.position
+        me = self._own_pose()
+        d = math.hypot(p.x - me[0], p.y - me[1]) if me is not None else float('nan')
+        self._yh_since = now
+        self._yh_mid = int(mid)
+        self._yh_ref = (p.x, p.y)
+        self._yh_goals = self._swap_goal_sig()
+        self._yh_kind = kind
+        self._yh_assert_t = None
+        self._yh_assert_st = None
+        self._yh_swallowed = 0
+        self.get_logger().warn(
+            f"[V2 yield-hold] {kind} 후퇴 끝 — 우선 로봇 {mid} ({src}, {d:.2f} m) 에게 비켜 줬다 → 같은 명령 안에서 {mid} 가 "
+            f"{self.yield_hold_pass_m:.1f} m 움직이거나 {self.yield_hold_sec:.0f}s 지날 때까지 출발하지 않는다 "
+            f"(resume 보류·pause 유지, 새 명령·관제 명령은 우선)")
+        self._publish_state(f"[V2 yield-hold] HOLD vs {mid} ({kind})")
+        if st != 'READY':
+            self._publish_pause()
+            self._yh_assert_t = now
+            self._yh_assert_st = st
+
+    def _yh_goal_changed(self) -> bool:
+        """[10-07 Q42] 정지 유지 시작 때와 지금 goal 목록이 다른가 (P2-1 _swap_goal_changed 와 같은 규칙, 한쪽을 모르면 False)."""
+        a, b = self._yh_goals, self._swap_goal_sig()
+        return a is not None and b is not None and a != b
+
+    def _yh_release(self, why: str, resume: bool) -> None:
+        """[10-07 Q42] 정지 유지를 끝낸다. resume=True (상대 지나감·시한) 이면 명령 진행 중·다른 pause 대기 없음·관제 pause 아님·
+        fleet 기동 없음일 때만 resume 을 낸다 (유지가 막은 출발만 되돌린다 — 명령 밖에서 움직임을 만들지 않는다)."""
+        since = self._yh_since
+        if since is None:
+            return
+        held = (self.get_clock().now() - since).nanoseconds * 1e-9
+        mid, n = self._yh_mid, int(self._yh_swallowed or 0)
+        self._yh_since = None
+        self._yh_mid = None
+        self._yh_ref = None
+        self._yh_goals = None
+        self._yh_kind = None
+        self._yh_assert_t = None
+        self._yh_assert_st = None
+        self._yh_swallowed = 0
+        st = self.current_robot_status
+        waits = ((self.is_processing_agent_pause and self._v2_mode == "pause") or self.is_processing_replan_pause
+                 or self.is_processing_goal_occupied_pause or self.is_processing_last_goal_occupied_pause)
+        do = (resume and st in self._OP_ACTIVE and st != 'READY' and not waits
+              and not getattr(self, '_nav_paused', False) and not self._op_busy())
+        if do:
+            self.pub_cmd_resume.publish(Bool(data=False))
+        note = ('resume 발행' if do else
+                ('resume 없음 (새 명령·명령 끝)' if not resume else
+                 f"resume 없음 (상태 {st}, 대기 {bool(waits)}, 관제 pause {getattr(self, '_nav_paused', False)}, 기동 {self._op_busy()})"))
+        self.get_logger().warn(
+            f"[V2 yield-hold] 정지 유지 끝 — {why} ({held:.0f}s, 우선 로봇 {mid}, 보류한 resume {n}회). {note}")
+        self._publish_state(f"[V2 yield-hold] HOLD end ({why})")
+
+    def _yh_on_command(self, prev: str, new: str, new_cmd: bool, goal_end: bool) -> None:
+        """[10-07 Q42] 새 명령·명령 끝 → 해제 (resume 없음). 같은 goal 의 READY→RECEIVED_GOAL 내부 출발은 유지 (BT 가 지운 pause 는
+        출발 뒤 _v2_yield_hold_tick 이 다시 건다)."""
+        if self._yh_since is None:
+            return
+        internal = (new_cmd and prev == 'READY' and new == 'RECEIVED_GOAL' and not self._yh_goal_changed())
+        if internal:
+            self._yh_assert_st = None
+            self.get_logger().info(
+                f"[V2 yield-hold] 같은 명령의 내부 출발 ({prev} -> {new}, goal 그대로) — 정지 유지 계속, 출발 뒤 pause 를 다시 건다")
+            return
+        self._yh_release(f"{'새 명령' if new_cmd else '명령 끝'} ({prev} -> {new})", resume=False)
+
+    def _v2_yield_hold_tick(self) -> None:
+        """[10-07 Q42] 0.1 s — 해제 조건 (상대 지나감·시한) 과 출발 뒤 pause 재발행. 관제 pause 중에는 쉰다 (시계는 _OP_FREEZE_ATTRS)."""
+        if not self.yield_hold_enable or self._yh_since is None:
+            return
+        if self._op_frozen():
+            return
+        now = self.get_clock().now()
+        why = None
+        a = self._cached_agents.get(self._yh_mid) if self._yh_mid is not None else None
+        if a is not None and self._yh_ref is not None:
+            p = a.current_pose.pose.position
+            d = math.hypot(p.x - self._yh_ref[0], p.y - self._yh_ref[1])
+            if d >= self.yield_hold_pass_m:
+                why = f"우선 로봇 {self._yh_mid} 가 {d:.2f} m 움직임"
+        held = (now - self._yh_since).nanoseconds * 1e-9
+        if why is None and held >= self.yield_hold_sec:
+            why = f"최대 {self.yield_hold_sec:.0f}s 경과"
+        if why is not None:
+            self._yh_release(why, resume=True)
+            return
+        st = self.current_robot_status
+        if st in self._YH_ASSERT_STATES and not self._op_busy():
+            if (self._yh_assert_st != st or self._yh_assert_t is None
+                    or (now - self._yh_assert_t).nanoseconds * 1e-9 >= 1.0):
+                changed = self._yh_assert_st != st
+                self._publish_pause()
+                self._yh_assert_t = now
+                self._yh_assert_st = st
+                if changed:
+                    self.get_logger().info(
+                        f"[V2 yield-hold] 상태 {st} — pause 다시 냄 (BT 가 goal 시작에 지운다, 우선 로봇 {self._yh_mid} 대기 {held:.0f}s)")
+        elif st not in self._YH_ASSERT_STATES:
+            self._yh_assert_st = st
+
     def _v2_cycle_tick(self) -> None:
         if self._op_frozen():
             return                                    # [OP] 관제 pause 중 — 판단 정지
         if not (self.v2_enable and self.cycle_detect_enable):
             return
         now = self.get_clock().now()
+        if self.cycle_swap_gate_enable and self._v2_swap_housekeeping(now):   # [10-06 D26-A] 맞바꿈 후진 결과·정지 유지
+            return
         # 내가 보낸 순환 해소 BackUp 의 결과 처리 (정적 대기 쪽; agent 대기 쪽은 _v2_phase1_tick 이 succeeded 를 처리)
         if self._cycle_backoff_active and self._backup_state in ("succeeded", "failed"):
             ok = (self._backup_state == "succeeded")
             self._cycle_backoff_active = False
             if self._cycle_backoff_static:
                 self._backup_state = "idle"
+                if ok and self.yield_hold_enable:           # [10-07 Q42] 기다리던 상대가 우선이면 아래 resume 을 미룬다
+                    self._yh_on_backoff_done('cycle', self._cycle_my_wait_target(now))
                 if ok:
                     self.get_logger().warn("[V2 cycle] BackUp 완료 (goal 점유 대기) → 대기 해제·재개, 상대가 지나가면 다시 간다")
                     self.pub_cmd_resume.publish(Bool(data=False))
@@ -3402,7 +4683,7 @@ class FleetDecisionNode(Node):
                     self._goal_occupied_false_start_time = None
                     self._pause_start_time = None
                 else:
-                    self.get_logger().error("[V2 cycle] BackUp 실패 (후방 막힘) → 대기 계속, 다음 순번 로봇이 시도한다")
+                    self.get_logger().error(f"[V2 cycle] BackUp 실패 ({self._backup_fail_why or '사유 미상'}) → 대기 계속, 다음 순번 로봇이 시도한다")
                     self._publish_state("[V2 cycle] BACKOFF failed → keep waiting")
             if not ok:
                 self._cycle_failed_sig = self._cycle_sig
@@ -3425,11 +4706,25 @@ class FleetDecisionNode(Node):
         sig = tuple(sorted(chain))
         if sig != self._cycle_sig:
             self._cycle_sig = sig; self._cycle_since = now
+            self._cycle_gate_retry_at = None
+            if self.cycle_swap_gate_enable:
+                self._swap_note_first(sig)       # [10-07 D26-A swap3 P2-2] 맞바꿈 기준점 = 이 쌍의 최초 순환 검출 자리
             self.get_logger().warn(
                 f"[V2 cycle] 대기 순환 검출 {'→'.join(str(m) for m in chain + [chain[0]])} "
                 f"(내 후진 순번 {self._cycle_rank(chain)}, {'agent' if waiting_agent else 'goal점유'} 대기)")
             self._publish_state(f"[V2 cycle] detected {'-'.join(str(m) for m in chain)} rank {self._cycle_rank(chain)}")
             return
+        # [10-06 D26-A] goal 맞바꿈이면 전용 규칙만 쓴다 — 예전 순환 후진 (retreat_need)·이력 후퇴 (상대 goal 쪽으로 갈 수 있다) 로 넘기지 않는다
+        if self.cycle_swap_gate_enable:
+            _partner, _verdict = self._cycle_goal_swap(chain, now, waiting_agent, waiting_static)
+            if _verdict == 'swap':
+                self._v2_swap_step_tick(now, sig, _partner)
+                return
+            if _verdict == 'hold':
+                # [10-06 D26-A 검토] 경계·goal 모름 — 움직이지 않는다 (예전 순환 후진으로도 안 넘김)
+                # [10-06 D26-A 재검토] swap gate 기억은 둔다 — 100 s STOP 뒤 두 대의 unwedge·push·standoff 동시 발동 막음
+                self._swap_note_hold(now, sig, _partner)
+                return
         dt = (now - self._cycle_since).nanoseconds * 1e-9
         rank = self._cycle_rank(chain)
         due = self.cycle_min_wait_sec + rank * self.cycle_stagger_sec
@@ -3439,6 +4734,27 @@ class FleetDecisionNode(Node):
         if dt < due:
             return
         if not self._op_may('_v2_cycle_tick'):          # [OP] 불허면 순환 해소 기록·공지 없이 다음 틱에 다시 본다
+            return
+        # [10-06 사용자 D21 P4 (나)] retreat gate 를 먼저 본다. 막히면 _cycle_done·실패 기록 없이 cycle_gate_retry_sec 뒤 다시 본다.
+        #   예전: _cycle_done 을 먼저 찍고 _backup_send 안에서 gate 에 막혀 → 60 s 재시도를 잃고, 다음 시도는 2단계 (이력 후퇴) 로 넘어갔다.
+        if self._cycle_gate_retry_at is not None and now < self._cycle_gate_retry_at:
+            return
+        if self._cycle_gate_retry_at is not None:
+            # [10-06 P4 (나) 보완] gate 거부 뒤 재확인은 모두 같은 '상호 정지 20 s' 에서 통과하므로 순번 간격이 사라진다.
+            #   다른 구성원이 움직이고 있으면 (먼저 물러나는 중) 이번 재확인은 건너뛴다 — 한 대만 물러난다.
+            _mv = [m for m in chain if int(m) != int(self.my_id) and self._cached_agents.get(m) is not None
+                   and self._agent_is_moving(self._cached_agents[m], now)]
+            if _mv:
+                self._cycle_gate_retry_at = now + Duration(seconds=self.cycle_gate_retry_sec)
+                self.get_logger().info(f"[V2 cycle] 순환 {sig} — 구성원 {_mv} 가 움직이는 중, 내 재확인은 미룬다",
+                                       throttle_duration_sec=10.0)
+                return
+        self._cycle_gate_retry_at = None
+        if not self._retreat_gate_check('_v2_cycle_tick'):
+            self._cycle_gate_retry_at = now + Duration(seconds=self.cycle_gate_retry_sec)
+            self.get_logger().info(
+                f"[V2 cycle] 순환 {sig} {dt:.0f}s, 내 순번 {rank} — retreat gate 보류, {self.cycle_gate_retry_sec:.0f}s 뒤 다시 본다 "
+                f"(시도·실패로 세지 않음)", throttle_duration_sec=10.0)
             return
         self._cycle_done[sig] = now
         self._cycle_backoff_active = True
@@ -3453,11 +4769,19 @@ class FleetDecisionNode(Node):
             if not self._retreat_along_history(now, self.push_retreat_m, away):
                 self._cycle_backoff_active = False
             return
+        # [10-06 사용자 "abnormal 은 최소 이동"] 순환 끊기 직선 BackUp 도 다른 후퇴와 같게 필요 거리(retreat_need)·상한(retreat_max_m) 적용.
+        #   예전에는 cycle_backoff_m(1.2) 을 그대로 써서 fleet 기동 중 유일하게 1.0 m 상한 밖이었다 (실측 1.22 m).
+        #   (BT 곡선 후퇴로 넘어가면 그쪽 후보가 같은 필요 거리·상한으로 줄어든다)
+        _d = min(self.cycle_backoff_m, self.retreat_max_m)
+        if self.retreat_need_enable:
+            _me = self._own_pose()
+            if _me is not None:
+                _d = min(_d, self._retreat_need(_me, -math.cos(_me[2]), -math.sin(_me[2]))[0])
         self.get_logger().warn(
-            f"[V2 cycle] 순환 {sig} 이 {dt:.0f}s 지속, 내 순번 {rank} → BackUp {self.cycle_backoff_m} m 로 고리를 끊는다")
-        self._publish_state(f"[V2 cycle] BACKOFF {self.cycle_backoff_m} m (rank {rank})")
+            f"[V2 cycle] 순환 {sig} 이 {dt:.0f}s 지속, 내 순번 {rank} → BackUp {_d:.2f} m 로 고리를 끊는다")
+        self._publish_state(f"[V2 cycle] BACKOFF {_d:.2f} m (rank {rank})")
         saved = self.yield_backoff_m
-        self.yield_backoff_m = self.cycle_backoff_m
+        self.yield_backoff_m = _d
         try:
             self._backup_send(now)
         finally:
@@ -3572,8 +4896,14 @@ class FleetDecisionNode(Node):
             return None
         cands = []
         hist = self._retreat_target(dist)
-        if hist is not None and math.hypot(hist[0] - me[0], hist[1] - me[1]) >= 0.3:
-            cands.append(("hist", hist))
+        # [10-06 D21 P6] 예전 고정 0.3 m 는 0.3 m 후퇴(경로 거리)의 직선거리가 늘 0.3 미만이라 이력 후보가 안 생겼다 (150/150).
+        #   새로 받는 짧은 이력 후보(직선거리 < 0.3)는 **바로 뒤(BackUp ±25°)** 일 때만 — 전진·제자리 회전으로 바뀌면
+        #   후진 지침(후방 감지 + stop-and-go)과 어긋나고, 교차로 탈출이 교차로 안으로 되돌아갈 수 있다 (검토 wf_fe855872).
+        if hist is not None:
+            _hc = math.hypot(hist[0] - me[0], hist[1] - me[1])
+            _hrel = self._ang_wrap(math.atan2(hist[1] - me[1], hist[0] - me[0]) - me[2])
+            if _hc >= 0.3 or (_hc >= 0.8 * dist and abs(self._ang_wrap(_hrel + math.pi)) <= math.radians(25.0)):
+                cands.append(("hist", hist))
         cands.append(("back", (me[0] - dist * math.cos(me[2]), me[1] - dist * math.sin(me[2]))))
         cands.append(("ahead", (me[0] + dist * math.cos(me[2]), me[1] + dist * math.sin(me[2]))))
         if away_from is not None:
@@ -3656,10 +4986,13 @@ class FleetDecisionNode(Node):
         else:
             self._drive_send(float(val))
             return
-        fut.add_done_callback(self._maneuver_goal_response)
+        _gen = self._man_gen
+        fut.add_done_callback(lambda f, _g=_gen: self._maneuver_goal_response(f, _g))
 
-    def _maneuver_goal_response(self, fut) -> None:
+    def _maneuver_goal_response(self, fut, gen: Optional[int] = None) -> None:
         gh = fut.result()
+        if self._stale_gen(gh, gen, "retreat 단계"):
+            return
         if gh is None or not gh.accepted:
             self.get_logger().error("[V2 retreat] 단계 목표 거부됨"); self._maneuver = None; self._backup_state = "failed"; return
         self._maneuver_goal_handle = gh               # [OP] 허가 상실 때 취소할 수 있게
@@ -3678,7 +5011,15 @@ class FleetDecisionNode(Node):
             c = self._man_ctx
             if c is not None and c["kind"] == "drive" and c["target"] - c["done"] <= 0.1:
                 self._man_ctx = None; self._maneuver_next(); return
-            self.get_logger().error(f"[V2 retreat] 단계 실패 status {status} (막힘 지속/시간 초과)")
+            if status == 5:
+                _rn = self._revoke_note
+                _why = (_rn[1] if _rn is not None and (self.get_clock().now() - _rn[0]).nanoseconds * 1e-9 < 5.0
+                        else "취소 (사유 미상)")
+                self._backup_fail_why = f"취소됨 — {_why}"
+                self.get_logger().warn(f"[V2 retreat] 단계 취소됨 status 5 — {_why}")     # [10-06 D21-②]
+            else:
+                self._backup_fail_why = f"막힘 지속/시간 초과 (status {status})"
+                self.get_logger().error(f"[V2 retreat] 단계 실패 status {status} (막힘 지속/시간 초과)")
             self._maneuver = None; self._backup_state = "failed"; self._man_ctx = None; return
         self._man_ctx = None
         self._maneuver_next()
@@ -3718,6 +5059,10 @@ class FleetDecisionNode(Node):
         now = self.get_clock().now()
         if self._push_paused and not self._yield_active and self._backup_state in ("succeeded", "failed", "idle"):
             ok = self._backup_state != "failed"
+            # [10-07 Q42] 우선 로봇 (밀어내기 대상) 에게 비켜 줬으면 아래 resume 을 미룬다 — 정지 유지 (sim ③ d38 'RUN (after retreat)').
+            #   'idle' 은 _yield_finish 가 아니라 회수·watchdog 로 끝난 경우가 섞여 있어 성공 ('succeeded') 일 때만 건다.
+            if self.yield_hold_enable and self._backup_state == "succeeded":
+                self._yh_on_backoff_done('push', self._push_last_mid)
             self._push_paused = False
             if self._backup_state != "idle":
                 self._backup_state = "idle"
@@ -3799,6 +5144,7 @@ class FleetDecisionNode(Node):
             if not self._op_may('_v2_push_tick'):        # [OP] 불허면 pause·공지·쿨다운 없이 넘긴다
                 return
             self._push_done[mid] = now
+            self._push_last_mid = mid
             src = ("관제 cross_agent_id" if reported else
                    "기하(정지한 채 나를 마주봄)" if geo else
                    "막힌 이웃 옆 최근접(V2.11, 관제 무관)")
@@ -3928,8 +5274,64 @@ class FleetDecisionNode(Node):
                 return True
         return acc >= dist * 0.6          # 경로가 짧으면 그만큼만 확인
 
+    def _jclear_speed(self, now: Time) -> float:
+        """[10-06 P7-2] 비우기 속도 = min(junction_clear_speed, 지금 걸려 있어야 할 더 낮은 상한). 낮은 상한을 올리지 않는다."""
+        v = self.junction_clear_speed
+        if self._pre_slow_active:
+            v = min(v, self._pre_slow_v)
+        if self.is_processing_agent_pause and self._v2_mode == "match":
+            sp = self._agent_speed(self._locked_target_id, now)
+            v = min(v, max(self.speed_match_min, (sp or 0.0) * self.speed_match_ratio))
+        return v
+
+    def _jclear_end(self, why: str) -> None:
+        """[10-06 P7] 교차로 비우기에서 건 속도 상한을 푼다 (이어서 정지하면 그 규칙이 다시 정한다).
+        [10-06 P7-1] 무조건 전속 복원하지 않는다. 다른 규칙이 그 뒤에 속도를 바꿨으면 그대로 두고,
+        아직 내 상한이면 지금 상태가 원하는 속도 (감속 대기·속도 맞추기·pre-slow, 없으면 복원) 로 되돌린다."""
+        if not self._jclear_limited:
+            return
+        self._jclear_limited = False
+        self._jclear_last = None
+        last, mine = self._last_speed_cmd, self._jclear_cmd
+        self._jclear_cmd = None
+        if last is None or mine is None or last[0] != mine[0] or abs(last[1] - mine[1]) > 1e-3:
+            self.get_logger().info(f"[V2 junction] 비우기 끝 — {why}. 속도는 다른 규칙이 이미 정했다 {last}")
+            return
+        if self.is_processing_agent_pause and self._v2_mode in ("slow", "match"):
+            self.get_logger().warn(f"[V2 junction] 비우기 끝 — {why}. {self._v2_mode} 대기 속도로 되돌린다")
+            self._v2_apply_speed(self.get_clock().now())
+        elif self._pre_slow_active:
+            self.get_logger().warn(f"[V2 junction] 비우기 끝 — {why}. pre-slow {self._pre_slow_v:.2f} m/s 로 되돌린다")
+            self._v2_set_speed_limit(self._pre_slow_v, self.slow_wait_angular + 0.5)
+        else:
+            self._v2_restore_speed(f"교차로 비우기 끝 — {why}")
+
+    def _jclear_watch_tick(self) -> None:
+        """[10-06 P7] 비우는 도중 정지 사유가 사라져 아무도 _junction_should_clear 를 부르지 않으면 상한이 남는다 → 1 s 뒤 푼다."""
+        if self._jclear_limited and self._jclear_last is not None and \
+                (self.get_clock().now() - self._jclear_last).nanoseconds * 1e-9 > 1.0:
+            self._junction_clear_since = None
+            self._jclear_end("정지 사유 해제")
+
     def _junction_should_clear(self, now: Time) -> bool:
         """지금 정지하려는 자리가 교차로면, 앞이 비어 있는 동안은 빠져나간 뒤 정지한다."""
+        r = self._junction_should_clear_inner(now)
+        if r and self.junction_clear_speed > 0.0:
+            self._jclear_last = now
+            # [10-06 P7] 비우는 동안 일정 속도 (최대 이동 = 속도 × 시간 상한).
+            # [10-06 P7-2] 1회 발행이 아니라 마지막 발행값과 비교한다 — 다른 규칙 (pre-slow 해제 등) 이 덮어썼으면 다시 건다.
+            v = self._jclear_speed(now)
+            last = self._last_speed_cmd
+            if (not self._jclear_limited or last is None or last[0] != int(ModifierControl.TYPE_SPEED_LIMIT)
+                    or abs(last[1] - v) > 1e-3):
+                self._jclear_limited = True
+                self._v2_set_speed_limit(v, max(self.slow_wait_angular, 0.5))
+                self._jclear_cmd = self._last_speed_cmd
+        elif not r:
+            self._jclear_end("비우기 안 함/끝")
+        return r
+
+    def _junction_should_clear_inner(self, now: Time) -> bool:
         if not (self.v2_enable and self.junction_keep_clear):
             return False
         me = self._own_pose()
@@ -4008,17 +5410,22 @@ class FleetDecisionNode(Node):
             px, py = me[0] + ux * s, me[1] + uy * s
             return min(min(math.hypot(x - px, y - py) for x, y in pts) for pts in paths)
 
-        s = self.retreat_min_m
-        while s <= self.retreat_max_m + 1e-6:
+        # [10-06] 상한을 꼭 시험한다 — 0.1 m 걸음으로만 가면 상한 0.45 는 0.3·0.4 다음 0.5 로 건너뛰어 한 번도 안 봤다 (검토 wf_3646d78a)
+        steps, s = [], self.retreat_min_m
+        while s < self.retreat_max_m - 1e-6:
+            steps.append(s)
+            s += 0.1
+        steps.append(self.retreat_max_m)
+        for s in steps:
             if worst(s) >= clear:
                 return s, len(paths)
-            s += 0.1
         # 끝내 못 빠지면(같은 차선 정면 대치 등) 겹친 이웃 **몸체**에서 멀어지는지만 본다.
         # 멀어지면 상한까지 벌려 준다(1.8 m 통로는 교행 가능 → 간격이 있어야 상대가 비켜 간다). 가까워지면(뒤따라오는 로봇) 최소만.
         def gap(s: float) -> float:
             px, py = me[0] + ux * s, me[1] + uy * s
             return min(math.hypot(bx - px, by - py) for bx, by in bodies)
-        if gap(self.retreat_max_m) > gap(0.0) + 0.3:
+        # [10-06] '멀어짐' 기준 0.3 m 는 상한 1.0 m 에 맞춘 값 — 상한 0.45 에서는 정면 ±48° 밖이면 거의 못 넘었다. 상한에 비례 (최대 0.3)
+        if gap(self.retreat_max_m) > gap(0.0) + min(0.3, 0.5 * self.retreat_max_m):
             return self.retreat_max_m, len(paths)     # stop-and-go: 상한만 가고 멈춘 뒤 다시 판단
         return self.retreat_min_m, len(paths)
 
@@ -4125,7 +5532,9 @@ class FleetDecisionNode(Node):
         '_jx_since', '_junction_clear_since', '_line_since', '_cycle_since', '_standoff_since', '_standoff_last',
         '_unwedge_last', '_unwedge_exhausted_at', '_goal_finish_last', '_recov_last', '_recov_cmd_until',
         '_planner_override_until', '_yield_start_t', '_yield_bt_fail_t', '_backup_started_at', '_man_wd_since',
-        '_static_last_release_t', '_agent_last_release_t', '_jx_escape_last', '_retreat_clear_at')
+        '_static_last_release_t', '_agent_last_release_t', '_jx_escape_last', '_retreat_clear_at',
+        '_swap_freeze_since', '_swap_hold_since', '_swap_seen_t', '_swap_retry_at',     # [10-06 D26-A]
+        '_yh_since')                                                                   # [10-07 Q42] 정지 유지 시계도 얼린다
 
     def _op_frozen(self) -> bool:
         """관제 pause 중 — fleet 판단 루프를 쉰다 (STOP·replan·goal 제거·기동을 내지 않는다)."""
@@ -4184,8 +5593,22 @@ class FleetDecisionNode(Node):
             f"관제 pause {self._nav_paused}, 도킹 {self._docking} (공지·pause 생략)", throttle_duration_sec=10.0)
         return False
 
-    def _op_revoke(self, why: str) -> None:
-        """허가가 사라졌다 — 진행 중인 fleet 기동을 즉시 거둔다. stop-and-go 재개 예약도 버린다."""
+    def _op_revoke(self, why: str, refund: bool = False) -> None:
+        """허가가 사라졌다 — 진행 중인 fleet 기동을 즉시 거둔다. stop-and-go 재개 예약도 버린다.
+        [10-06 D23-1b] refund (새 명령으로 거둘 때): 거둔 자기 구출 기동은 해 본 것이 아니므로 쿨다운·시도 횟수를 돌려준다.
+        D11 같은 자리 재명령 고리 (READY → RECEIVED_GOAL) 에서 시작 1 s 만에 거둬지고 쿨다운 (교차로 탈출 40 s 등) 만 쓰던 것."""
+        if refund:
+            back = []
+            if self._jx_escape_active:
+                self._jx_escape_last = None; back.append("교차로 탈출")
+            if self._push_paused and self._push_last_mid is not None:
+                self._push_done.pop(self._push_last_mid, None); back.append(f"밀어내기({self._push_last_mid})")
+            if self._unwedge_active:
+                self._unwedge_last = None; self._unwedge_tries = max(0, self._unwedge_tries - 1); back.append("unwedge")
+            if back:
+                self.get_logger().info(f"[OP] 거둔 기동의 쿨다운을 돌려준다: {', '.join(back)}")
+        self._revoke_note = (self.get_clock().now(), why)       # [10-06 D21-②] 취소 결과 로그에 실제 사유를 적는다
+        self._backup_fail_why = f"관제 우선 회수 — {why}"
         self._man_ctx = None                          # 먼저 지워야 결과 콜백이 stop-and-go 재개를 예약하지 않는다
         self._maneuver = None
         self._backup_cancel()
@@ -4271,6 +5694,21 @@ class FleetDecisionNode(Node):
                 self._op_revoke("관제 pause")
         elif self.operator_priority and was and not self._nav_paused:
             self._op_unfreeze(self.get_clock().now())
+            self._op_resume_release_holds()           # [10-07 Q46] 관제 resume — 양보로 건 정지 유지는 풀린다
+
+    def _op_resume_release_holds(self) -> None:
+        """[10-07 Q46] 관제 resume (/nav_pause_flag true → false: 관제 resume·FLECS 흐름제어 허가) — fleet 이 양보로 건 정지 유지를 푼다.
+        사용자 (10-07 Q46): "항상 관제 명령 절대 우선 원칙을 지켜야돼."
+          - Q42 비켜 준 뒤 정지 유지 (_yh_since): 해제 + resume (다른 대기·기동이 없을 때, _yh_release 규칙 그대로).
+          - A 맞바꿈 후진 뒤 정지 유지·시계 정지 (_swap_hold_since·_swap_freeze_since): 해제 — 대기 시계는 다시 흐르고 원래 판단으로.
+        충돌·goal 점유 같은 안전 대기 (agent·static pause) 는 풀지 않는다 — 판단을 이어 가고 상대가 비키면 곧바로 resume 한다.
+        맞바꿈 상황 (쌍·누적 후진 횟수·기준점) 은 지우지 않는다 (누적 상한 1.15 m 유지)."""
+        why = "관제 resume (관제 명령 우선, Q46)"
+        if getattr(self, 'yield_hold_enable', False) and self._yh_since is not None:
+            self._yh_release(why, resume=True)
+        if getattr(self, 'cycle_swap_gate_enable', False) and (
+                self._swap_hold_since is not None or self._swap_freeze_since is not None):
+            self._swap_release(self.get_clock().now(), why)
 
     def _retreat_gate_check(self, caller: str) -> bool:
         """[V2.34] 관문 판정 + 기록. 규칙 이름은 호출한 함수 이름에서 딴다.
@@ -4284,7 +5722,8 @@ class FleetDecisionNode(Node):
         if not self.retreat_gate_enable:
             return True
         rule = caller.replace("_v2_", "").replace("_tick", "").strip("_")
-        ok, why = self._retreat_gate()
+        _sw = self._swap_gate_note(caller) if self.cycle_swap_gate_enable else None   # [10-06 D26-A] 맞바꿈 예외
+        ok, why = _sw if _sw is not None else self._retreat_gate()
         if ok:
             self.get_logger().info(f"[V2 gate] {rule} 후진 허용 — {why}")
         else:
@@ -4306,7 +5745,7 @@ class FleetDecisionNode(Node):
                 tx, ty = me[0] + ux * need, me[1] + uy * need
                 if not self._yield_target_ok(me, tx, ty):
                     continue
-                x, y, src = tx, ty, f"{src} → 필요 {need:.1f} m(이웃 {nb})"
+                x, y, src = tx, ty, f"{src} → 필요 {need:.2f} m(이웃 {nb})"
             if any(math.hypot(x - o[0], y - o[1]) < 0.1 for o in out):
                 continue                                  # 줄이고 나면 같은 점이 되는 후보는 하나만
             out.append((x, y, yaw, src))
@@ -4327,6 +5766,18 @@ class FleetDecisionNode(Node):
         if me is None:
             return out
         d0 = math.hypot(away_from[0] - me[0], away_from[1] - me[1]) if away_from else 0.0
+        # [10-06 D21 P8] 후보별 탈락 사유를 센다 (예전 문구 "지나온 goal·이력 모두 없음" 은 필터 탈락도 그렇게 적었다)
+        why: Dict[str, int] = {}
+
+        def drop(k: str) -> None:
+            why[k] = why.get(k, 0) + 1
+
+        def away_ok(x: float, y: float, base: float) -> bool:
+            """[10-06 D21 P8] 막은 로봇에서 min(base, retreat_away_ratio × 후보 거리) 이상 멀어지는가 (J1 과 같은 기준)."""
+            if away_from is None:
+                return True
+            r = math.hypot(x - me[0], y - me[1])
+            return math.hypot(away_from[0] - x, away_from[1] - y) - d0 >= max(1e-3, min(base, self.retreat_away_ratio * r))
 
         def behind(x: float, y: float) -> bool:
             """후진 전용 플래너가 갈 수 있는 방향인가 (내 뒤쪽 부채꼴)."""
@@ -4342,42 +5793,68 @@ class FleetDecisionNode(Node):
             tried += 1
             dg = math.hypot(g[0] - me[0], g[1] - me[1])
             if dg < self.yield_goal_min_m:
+                drop('goal 너무 가까움')
                 continue                                  # 너무 가깝다 — 비켜 주는 효과가 없다
             if not behind(g[0], g[1]):
+                drop('goal 뒤쪽 아님')
                 continue                                  # 앞쪽 goal 은 후진으로 못 간다 (큐17 1판 실패 원인)
             if not self._yield_target_ok(me, g[0], g[1]):
+                drop('goal 지도상 막힘')
                 self.get_logger().info(f"[V2 yield] 지나온 goal ({g[0]:.2f},{g[1]:.2f}) 는 지도상 막혀 있다 → 다음 후보")
                 continue
             if self._goal_occupied_by_agent(g[0], g[1]):
+                drop('goal 다른 로봇 점유')
                 self.get_logger().info(f"[V2 yield] 지나온 goal ({g[0]:.2f},{g[1]:.2f}) 는 다른 로봇이 점유 → 더 앞의 goal 로")
                 continue
-            if away_from is not None and math.hypot(away_from[0] - g[0], away_from[1] - g[1]) - d0 < 0.5:
-                continue                                  # 막은 로봇에서 멀어지지 않는 방향
             if dg > self.yield_goal_max_m:
                 # [09-20] 통로망 waypoint 간격은 5 m 가 넘어 역방향 플래너가 자주 실패한다(큐17 1판).
                 # 방향(그 goal 쪽 = 왔던 차선) 은 그대로 두고 거리만 잘라 가까운 후퇴점으로 만든다.
                 r = self.yield_goal_max_m / dg
                 tx, ty = me[0] + (g[0] - me[0]) * r, me[1] + (g[1] - me[1]) * r
+                if not away_ok(tx, ty, 0.5):
+                    drop('goal 멀어짐 부족')
+                    continue                              # 막은 로봇에서 멀어지지 않는 방향 (실제로 갈 점 기준)
                 if not self._yield_target_ok(me, tx, ty):
+                    drop('goal(잘린 점) 지도상 막힘')
                     continue
                 out.append((tx, ty, me[2], f"지나온 goal({tried}번째 앞, {self.yield_goal_max_m:.1f} m)"))
                 continue
+            if not away_ok(g[0], g[1], 0.5):
+                drop('goal 멀어짐 부족')
+                continue                                  # 막은 로봇에서 멀어지지 않는 방향
             out.append((g[0], g[1], me[2], f"지나온 goal({tried}번째 앞)"))
             continue
+        self._plan_retreat_why = ""
         plan = self._plan_retreat(self.push_retreat_m, away_from)
-        if (plan is not None and behind(plan["target"][0], plan["target"][1])
-                and self._yield_target_ok(me, plan["target"][0], plan["target"][1])):
+        if plan is None:
+            drop(f"이력 후보 없음({self._plan_retreat_why or '?'})")
+        elif not behind(plan["target"][0], plan["target"][1]):
+            drop('이력 후보 뒤쪽 아님')
+        elif not self._yield_target_ok(me, plan["target"][0], plan["target"][1]):
+            drop('이력 후보 지도상 막힘')
+        else:
             t = plan["target"]
             out.append((t[0], t[1], me[2], f"주행 이력({plan.get('cand', 'hist')})"))
         for frac in (1.0, 0.7, 0.5):
             bx = me[0] - self.push_retreat_m * frac * math.cos(me[2])
             by = me[1] - self.push_retreat_m * frac * math.sin(me[2])
             if not self._yield_target_ok(me, bx, by):
+                drop('바로 뒤 지도상 막힘')
                 continue                                  # 벽 너머로 물러나라고 하면 플래너가 헤맨다 (큐18 1판)
-            if away_from is None or math.hypot(away_from[0] - bx, away_from[1] - by) - d0 >= 0.3:
-                out.append((bx, by, me[2], f"바로 뒤({self.push_retreat_m * frac:.1f} m)"))
+            # [10-06 D21 P8] 예전 고정 0.3 m 는 0.25 m 후보(0.5 × 0.5)가 늘 탈락, 0.35 m 후보도 거의 탈락
+            if away_ok(bx, by, 0.3):
+                out.append((bx, by, me[2], f"바로 뒤({self.push_retreat_m * frac:.2f} m)"))
+            else:
+                drop('바로 뒤 멀어짐 부족')
         if self.retreat_need_enable:
             out = self._shorten_retreats(me, out)
+            # [10-06] 필요 거리로 줄인 뒤에도 막은 로봇에서 멀어지는지 다시 본다 — 줄이기 전 먼 점(예: 지나온 goal 2.5 m)은
+            #   통과했어도 줄인 0.3 m 점은 상대 쪽으로 갈 수 있었다 (단위 시험 test_min045 (4), 상한 0.45 로 줄이는 일이 늘었다)
+            _kept = [c for c in out if away_ok(c[0], c[1], 0.3)]
+            if len(_kept) < len(out):
+                drop(f'줄인 뒤 멀어짐 부족 {len(out) - len(_kept)}')
+            out = _kept
+        self._yield_cands_why = ", ".join(f"{k} {v}" for k, v in why.items()) or "후보 없음"
         return out
 
     def _yield_bt_ready(self, now: Time) -> bool:
@@ -4393,9 +5870,10 @@ class FleetDecisionNode(Node):
         return (now - self._yield_bt_fail_t).nanoseconds * 1e-9 >= self.yield_fallback_backup_sec
 
     def _yield_start(self, now: Time, away_from: Optional[Tuple[float, float]] = None) -> bool:
+        self._yield_cands_why = ""
         cands = self._yield_candidates(away_from)
         if not cands:
-            self.get_logger().error("[V2 yield] 후퇴 목표를 못 정했다 (지나온 goal·이력 모두 없음)")
+            self.get_logger().error(f"[V2 yield] 후퇴 목표를 못 정했다 ({self._yield_cands_why or '자세를 모름'})")
             return False
         self._yield_cands = cands
         self._yield_idx = 0
@@ -4454,6 +5932,10 @@ class FleetDecisionNode(Node):
         else:
             self.get_logger().error(f"[V2 yield] 후퇴 실패: {why}")
         self._publish_state(f"[V2 yield] {'DONE' if ok else 'FAILED'} ({why})")
+        if ok and self.yield_hold_enable:
+            # [10-07 Q42] BT 곡선 후퇴는 후퇴 플래그가 꺼지는 순간 BT 가 평소 경로로 돌아가 바로 달린다 (sim ③ d38 on1 r2:
+            #   yield DONE 03:21:11.19 → plan 5.85 m → DRIVING 11.47). 주인 규칙의 1 Hz 마무리를 기다리지 않고 여기서 pause 를 건다.
+            self._yh_on_yield_done()
 
     def _init_latched_flags(self) -> None:
         """[V2.36d] TRANSIENT_LOCAL 로 남는 1회성 트리거(회복 명령)를 false 로 초기화한다.
@@ -4531,6 +6013,22 @@ class FleetDecisionNode(Node):
         self.get_logger().warn(f"[V2 recovery] BT 에 회복 동작 지시: {cmd} ({self.recovery_cmd_hold:.1f}s)")
         self._publish_state(f"[V2 recovery] cmd {cmd}")
 
+    def _recov_reset(self, why: str) -> None:
+        """[10-06 D21 P1] V2 recovery 단계·오류 이력·예비 플래너 hold 를 지운다 (새 상황)."""
+        if not (self._recov_step or self._bt_errs or self._planner_override_until is not None):
+            return
+        self.get_logger().info(
+            f"[V2 recovery] 단계 초기화 — {why} (단계 {self._recov_step}, 오류 이력 {len(self._bt_errs)}개"
+            f"{', 예비 플래너 hold 해제' if self._planner_override_until is not None else ''})")
+        self._recov_step = 0
+        self._recov_last = None
+        self._recov_xy = None
+        self._bt_errs.clear()
+        if self._planner_override_until is not None:
+            self._planner_override_until = None
+            self.pub_planner_sel.publish(String(data=self.default_planner))
+            self.get_logger().warn(f"[V2 recovery] 플래너를 기본값({self.default_planner}) 으로 되돌린다 (단계 초기화)")
+
     def _v2_bt_error_tick(self) -> None:
         """[V2.4] BT 오류 코드로 **노드가** 회복 조치를 고른다 (BT RECOVERY CASE 선택권 이관 1단계).
         같은 창 안에 오류가 몰리고 로봇이 제자리면 ① 코스트맵 클리어 ② 예비 플래너 A ③ 예비 플래너 B ④ 자기 구출."""
@@ -4544,6 +6042,10 @@ class FleetDecisionNode(Node):
             self._planner_override_until = None
             self.pub_planner_sel.publish(String(data=self.default_planner))
             self.get_logger().warn(f"[V2 recovery] 플래너를 기본값({self.default_planner}) 으로 되돌린다")
+        if self._recov_step and self._recov_xy is not None and self.static_same_spot_leave > 0.0:  # [10-06 D21 P1] 그 자리에서 벗어났으면 새 상황
+            _me = self._own_pose()
+            if _me is not None and math.hypot(_me[0] - self._recov_xy[0], _me[1] - self._recov_xy[1]) > self.static_same_spot_leave:
+                self._recov_reset(f"단계를 올린 자리에서 {self.static_same_spot_leave:.1f} m 넘게 벗어남")
         if self._recov_last is not None and (now - self._recov_last).nanoseconds * 1e-9 < self.bt_error_cooldown:
             return
         if self._backup_state != "idle" or self._yield_active or self._unwedge_active:
@@ -4560,6 +6062,8 @@ class FleetDecisionNode(Node):
         code, cnt = Counter(recent).most_common(1)[0]
         self._recov_step = min(self._recov_step + 1, 4)
         self._recov_last = now
+        _me = self._own_pose()
+        self._recov_xy = (_me[0], _me[1]) if _me is not None else None
         if self._recov_step == 1:
             if self.recovery_cmd_enable:
                 self._v2_send_recov_cmd("clear", now)
@@ -4593,6 +6097,8 @@ class FleetDecisionNode(Node):
         if self._unwedge_active:
             if self._backup_state in ("succeeded", "failed"):
                 ok = self._backup_state == "succeeded"
+                if ok and self.yield_hold_enable:           # [10-07 Q42] 근처에 우선 로봇이 있으면 아래 resume 을 미룬다
+                    self._yh_on_backoff_done('unwedge', None)
                 self._backup_state = "idle"
                 self._unwedge_active = False
                 self.pub_cmd_resume.publish(Bool(data=False))
@@ -4989,6 +6495,8 @@ class FleetDecisionNode(Node):
         if self._standoff_active:
             if self._backup_state in ("succeeded", "failed"):
                 ok = self._backup_state == "succeeded"
+                if ok and self.yield_hold_enable:           # [10-07 Q42] 대치 상대 (우선) 에게 비켰으면 아래 resume 을 미룬다
+                    self._yh_on_backoff_done('standoff', self._standoff_sig)
                 self._backup_state = "idle"
                 self._standoff_active = False
                 self.pub_cmd_resume.publish(Bool(data=False))
@@ -5079,8 +6587,7 @@ class FleetDecisionNode(Node):
                 f"static SM {self.is_processing_replan_pause}). 관제에 보고한다 (STOP).")
             self._publish_state(f"ABORT (no progress {dt:.0f}s)")
             self.pub_cmd_stop.publish(UInt8(data=1))
-            self.nav_stop_complete_ = False
-            self._nav_stop_wait_start = now
+            self._arm_nav_stop_wait(now, "V2 no-progress")  # [10-06 D26-D]
             if self._speed_limited:
                 self._v2_restore_speed("no progress abort")
             self._np_anchor = None

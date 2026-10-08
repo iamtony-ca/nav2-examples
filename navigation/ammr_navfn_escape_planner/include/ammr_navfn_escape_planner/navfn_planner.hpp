@@ -226,6 +226,7 @@ protected:
   double escape_margin_{0.15};        // 처음 회전 가능 지점보다 더 가는 거리
   double escape_min_straight_{0.5};   // 직선 최소 길이 (BT 절단 0.45 m 보다 길게 → alt_goal 이 직선 위)
   double escape_edge_inset_{-1.0};    // 앞장서는 변 양 끝 안쪽 여유 (음수 = 격자 1칸)
+  double escape_max_len_{-1.0};       // [10-06 사용자] 내보내는 직선 길이 상한 (0 이하 = 상한 없음). 비정상 상황은 최소 이동
   bool leadingEdgeFree(double x, double y, double yaw, double dir);
   bool canRotate(double x, double y);
   bool isRobotStart(const geometry_msgs::msg::Pose & start);
@@ -235,6 +236,21 @@ protected:
   bool tryEscapePlan(
     const geometry_msgs::msg::PoseStamped & start, const geometry_msgs::msg::PoseStamped & goal,
     nav_msgs::msg::Path & path);
+  // [10-06 S3b 회귀 수정] through-poses 는 다음 구간을 앞 경로의 끝에서 시작한다. escape 직선을 escape_max_len 으로
+  //   자르면 다음 구간이 회전 못 하는 자리 (로봇 자세 아님) 에서 시작해 NavFn 이 실패 → 전체 308 이 됐다.
+  //   잘린 나머지를 기억했다가, 바로 다음 구간이 그 끝에서 시작하면 나머지 직선을 앞에 붙인다 (이은 경로 모양 = 자르기 전).
+  //   경로를 하나만 받는 경우 (ComputeShortToAltGoal → FollowShort) 는 잘린 길이 그대로 따라간다.
+  struct EscapeRest
+  {
+    bool valid{false};
+    double x{0.0}, y{0.0}, yaw{0.0}, dir{0.0}, rest{0.0};
+    rclcpp::Time stamp;
+  };
+  EscapeRest escape_rest_;
+  void noteEscapeRest(const geometry_msgs::msg::Pose & from, double dir, double out_len, double full_len);
+  bool tryEscapeRest(
+    const geometry_msgs::msg::PoseStamped & start, const geometry_msgs::msg::PoseStamped & goal,
+    std::function<bool()> cancel_checker, nav_msgs::msg::Path & path);
   // 출발 footprint 치수 (unpadded, 직사각형 가정)
   double fp_front_{0.32}, fp_back_{-0.315}, fp_left_{0.315}, fp_right_{-0.315};
 

@@ -1,0 +1,5 @@
+<library path="ammr_smac_hybrid_planner_lattice">
+	<class type="ammr_smac_hybrid_planner::SmacPlannerLattice" base_class_type="nav2_core::GlobalPlanner">
+	  <description>State Lattice SMAC planner</description>
+	</class>
+</library>

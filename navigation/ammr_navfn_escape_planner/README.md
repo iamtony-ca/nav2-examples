@@ -8,6 +8,6 @@
   (a) goal 이 지금 방향 직선 위면 goal 까지, (b) 아니면 처음 회전 가능한 지점 + `escape_margin` (최소 `escape_min_straight`) 까지. 다음 회복 주기가 회전 가능한 자세에서 평소대로 계획한다.
   회전 가능 = padded 외접원 안에 LETHAL·unknown 없음. 직진 검사 = unpadded footprint 의 앞장서는 변(양 끝 `escape_edge_inset`, 기본 격자 1칸 안쪽)만 격자/2 간격. costmap mutex 를 잡고 검사.
   회전 가능하거나 출발이 로봇 자세가 아니면 원래 NavFn 그대로.
-- 파라미터 (모두 실행 중 변경 가능): `escape_enable` (false), `escape_max_dist` 1.5, `escape_step` 0.05, `escape_margin` 0.15, `escape_min_straight` 0.5, `escape_edge_inset` -1 (= 격자 1칸).
+- 파라미터 (모두 실행 중 변경 가능): `escape_enable` (false), `escape_max_dist` 1.5, `escape_step` 0.05, `escape_margin` 0.15, `escape_min_straight` 0.5, `escape_edge_inset` -1 (= 격자 1칸), `escape_max_len` -1 (내보내는 직선 길이 상한, 0 이하 = 없음; 10-06 사용자 '비정상 상황은 최소 이동' 으로 현장 값 0.45).
 - 로그: `[<plugin 이름> escape] start cannot rotate -> straight forward|backward ...`
 - sim 검증: `src/amr-gz-sim-example/mobile_robot_gz_sim/scripts/verify/MPPI_RECOVERY_REPRO_1003.md` (옆 5·8 cm 0/16 실패, 1대 현장 BT 105 51→9, 5대 회귀 없음).

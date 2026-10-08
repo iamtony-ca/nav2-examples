@@ -106,6 +106,10 @@ NavfnPlanner::configure(
   node->get_parameter(name + ".escape_min_straight", escape_min_straight_);
   declare_parameter_if_not_declared(node, name + ".escape_edge_inset", rclcpp::ParameterValue(-1.0));
   node->get_parameter(name + ".escape_edge_inset", escape_edge_inset_);   // 음수 = 격자 1칸
+  // [10-06 사용자] "abnormal 상황에서는 최소한의 이동으로 해결" — 내보내는 직선은 BT recovery 기동(0.45 m)과 같은 상한.
+  //   회전 가능 지점 탐색(escape_max_dist)은 그대로 두고 출력 길이만 자른다 → 남은 거리는 다음 회복 주기가 다시 판단.
+  declare_parameter_if_not_declared(node, name + ".escape_max_len", rclcpp::ParameterValue(-1.0));
+  node->get_parameter(name + ".escape_max_len", escape_max_len_);
 
   // Create a planner based on the new costmap size
   planner_ = std::make_unique<NavFn>(
@@ -203,6 +207,12 @@ nav_msgs::msg::Path NavfnPlanner::createPlan(
     path.poses.push_back(pose);
     return path;
   }
+
+  // [10-06 S3b 회귀 수정] 앞 구간에서 자른 escape 직선의 나머지 + 이 구간
+  if (escape_enable_ && tryEscapeRest(start, goal, cancel_checker, path)) {
+    return path;
+  }
+  escape_rest_.valid = false;
 
   // [10-05 D17] 회전 못 하는 출발 자세 → 지금 방향으로 먼저 빠지는 경로
   if (escape_enable_ && tryEscapePlan(start, goal, path)) {
@@ -750,6 +760,61 @@ NavfnPlanner::appendStraight(
   }
 }
 
+void
+NavfnPlanner::noteEscapeRest(
+  const geometry_msgs::msg::Pose & from, double dir, double out_len, double full_len)
+{
+  escape_rest_.valid = full_len - out_len > 1e-3;
+  if (!escape_rest_.valid) {
+    return;
+  }
+  const double yaw = quatYaw(from.orientation);
+  escape_rest_.x = from.position.x + dir * out_len * std::cos(yaw);
+  escape_rest_.y = from.position.y + dir * out_len * std::sin(yaw);
+  escape_rest_.yaw = yaw;
+  escape_rest_.dir = dir;
+  escape_rest_.rest = full_len - out_len;
+  escape_rest_.stamp = clock_->now();
+}
+
+bool
+NavfnPlanner::tryEscapeRest(
+  const geometry_msgs::msg::PoseStamped & start, const geometry_msgs::msg::PoseStamped & goal,
+  std::function<bool()> cancel_checker, nav_msgs::msg::Path & path)
+{
+  if (!escape_rest_.valid) {
+    return false;
+  }
+  // 바로 다음 구간 (같은 through-poses 계산) 만: 시작이 잘린 끝과 같고 (1 cm, 3°) 1 s 안
+  const bool same = std::hypot(start.pose.position.x - escape_rest_.x, start.pose.position.y - escape_rest_.y) < 0.01 &&
+    std::fabs(std::remainder(quatYaw(start.pose.orientation) - escape_rest_.yaw, 2.0 * M_PI)) < 0.05 &&
+    (clock_->now() - escape_rest_.stamp).seconds() < 1.0;
+  const EscapeRest r = escape_rest_;
+  escape_rest_.valid = false;
+  if (!same) {
+    return false;
+  }
+  path.poses.clear();
+  path.header.stamp = clock_->now();
+  path.header.frame_id = global_frame_;
+  appendStraight(start.pose, r.dir, r.rest, path);     // 자르기 전 직선의 끝까지
+  geometry_msgs::msg::Pose mid = path.poses.back().pose;
+  if (std::hypot(goal.pose.position.x - mid.position.x, goal.pose.position.y - mid.position.y) > 1e-3) {
+    nav_msgs::msg::Path tail;
+    if (!makePlan(mid, goal.pose, tolerance_, cancel_checker, tail)) {
+      throw nav2_core::NoValidPathCouldBeFound(
+              "Failed to create plan with tolerance of: " + std::to_string(tolerance_) + " (after escape rest)");
+    }
+    for (size_t i = tail.poses.empty() ? 0 : 1; i < tail.poses.size(); ++i) {
+      tail.poses[i].header = path.header;
+      path.poses.push_back(tail.poses[i]);
+    }
+  }
+  RCLCPP_INFO(logger_, "[%s escape] next through-poses segment: rest of capped straight %.2f m prepended",
+    name_.c_str(), r.rest);
+  return true;
+}
+
 bool
 NavfnPlanner::tryEscapePlan(
   const geometry_msgs::msg::PoseStamped & start, const geometry_msgs::msg::PoseStamped & goal,
@@ -784,16 +849,21 @@ NavfnPlanner::tryEscapePlan(
   const double gyaw_err = std::fabs(std::remainder(quatYaw(goal.pose.orientation) - yaw, 2.0 * M_PI));
   if (std::fabs(lat) <= 0.05 && gyaw_err <= 20.0 * M_PI / 180.0 && std::fabs(lon) > 1e-3) {
     const double dir = lon >= 0 ? 1.0 : -1.0;
+    // [10-06] 받아들일지는 예전처럼 goal 까지 **직선 전체**가 비었는지로 판단하고, 내보내는 길이만 자른다
+    //   (앞 0.45 m 만 보면 그 너머가 막힌 직선도 받아들여 0.45 m 씩 들어갔다 되나오게 된다 — 검토 wf_3646d78a)
+    const double len_a = escape_max_len_ > 0.0 ? std::min(std::fabs(lon), escape_max_len_) : std::fabs(lon);
     if (sweepFree(sx, sy, yaw, dir, std::fabs(lon)) >= std::fabs(lon) - 0.5 * costmap_->getResolution()) {
-      appendStraight(start.pose, dir, std::fabs(lon), path);
-      RCLCPP_INFO(logger_, "[%s escape] start cannot rotate -> straight %s %.2f m to goal",
-        name_.c_str(), dir > 0 ? "forward" : "backward", std::fabs(lon));
+      appendStraight(start.pose, dir, len_a, path);
+      noteEscapeRest(start.pose, dir, len_a, std::fabs(lon));
+      RCLCPP_INFO(logger_, "[%s escape] start cannot rotate -> straight %s %.2f m to goal%s",
+        name_.c_str(), dir > 0 ? "forward" : "backward", len_a,
+        len_a < std::fabs(lon) - 1e-6 ? " (capped, goal further)" : "");
       return true;
     }
   }
 
   // (b) 앞/뒤로 처음 회전 가능한 지점 + margin
-  double best_len = -1.0, best_d = -1.0, best_dir = 0.0;
+  double best_len = -1.0, best_d = -1.0, best_dir = 0.0, best_full = -1.0;
   for (double dir : {1.0, -1.0}) {
     const double free_d = sweepFree(sx, sy, yaw, dir, escape_max_dist_ + escape_margin_);
     double d_rot = -1.0;
@@ -806,13 +876,18 @@ NavfnPlanner::tryEscapePlan(
     if (d_rot < 0) {
       continue;
     }
-    const double len = std::min(free_d, std::max(d_rot + escape_margin_, escape_min_straight_));
+    double len = std::min(free_d, std::max(d_rot + escape_margin_, escape_min_straight_));
+    const double len_full = len;
+    if (escape_max_len_ > 0.0) {
+      len = std::min(len, escape_max_len_);       // [10-06] 출력 상한 — 회전 가능 지점이 더 멀면 다음 주기에 이어서
+    }
     const bool better = best_d < 0 || d_rot < best_d - 1e-6 ||
       (std::fabs(d_rot - best_d) < 1e-6 && dir * lon > best_dir * lon);
     if (better) {
       best_d = d_rot;
       best_len = len;
       best_dir = dir;
+      best_full = len_full;
     }
   }
   if (best_d < 0) {
@@ -821,6 +896,7 @@ NavfnPlanner::tryEscapePlan(
     return false;
   }
   appendStraight(start.pose, best_dir, best_len, path);
+  noteEscapeRest(start.pose, best_dir, best_len, best_full);
   RCLCPP_INFO(logger_, "[%s escape] start cannot rotate -> straight %s %.2f m (rotatable at %.2f m), goal after next replan",
     name_.c_str(), best_dir > 0 ? "forward" : "backward", best_len, best_d);
   return true;
@@ -847,6 +923,8 @@ NavfnPlanner::dynamicParametersCallback(std::vector<rclcpp::Parameter> parameter
         escape_min_straight_ = std::max(0.0, parameter.as_double());
       } else if (name == name_ + ".escape_edge_inset") {
         escape_edge_inset_ = parameter.as_double();
+      } else if (name == name_ + ".escape_max_len") {
+        escape_max_len_ = parameter.as_double();
       }
     } else if (type == ParameterType::PARAMETER_BOOL) {
       if (name == name_ + ".use_astar") {

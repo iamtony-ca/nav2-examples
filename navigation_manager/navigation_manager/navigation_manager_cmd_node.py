@@ -311,6 +311,9 @@ class NavigationManagerNode(Node):
         # 관제 pause 동안에는 하위 레이어의 내부 정지(/stop_command: BT 405 경보·fleet·nav_stuck)가
         # goal 을 취소하지 못하게 _nav_stop_callback 이 이 값을 본다.
         self._nav_pause_latched: bool = False
+        # [10-07 Q51 (다)] 관제 pause 중에는 Windows 로 올리는 pause·장애물 비트를 0 으로 둔다 (_timer_callback 참고).
+        self.declare_parameter('mask_bits_during_operator_pause', True)
+        self._mask_bits_in_op_pause: bool = bool(self.get_parameter('mask_bits_during_operator_pause').value)
         # self._pause_resume_publisher = self.create_publisher(
         #     Bool, '/controller_pause_flag', qos_pause)
 
@@ -362,18 +365,21 @@ class NavigationManagerNode(Node):
         with self._state_lock:
             self._update_nav2_status(self._goal_status)
 
-            if self._controller_pause_flag or self._path_agent_collision:
-                self._nav2_monitoring_data.ros_nav_pause = True
-            else:
-                self._nav2_monitoring_data.ros_nav_pause = False
-
-            if self._path_static_collision:
-                self._nav2_monitoring_data.ros_nav_obstacle_detected = True
-            else:
-                self._nav2_monitoring_data.ros_nav_obstacle_detected = False
+            # [10-07 Q51 (다)] 관제 pause (/nav_pause_flag 래치) 중에는 정지 원인이 관제다 — 하위 레이어의 pause·장애물 비트를 0 으로 올린다.
+            #   현장 Windows (DrivingControl.cpp executeGoTarget 972-1001) 는 TP resume 뒤 ros_nav_pause·ros_nav_obstacle_detected 가
+            #   둘 다 꺼져야 8018 (resume) 을 보낸다. 관제 pause 중에는 fleet 판단·BT replan 이 멈춰 이 비트를 스스로 끌 수 없어,
+            #   장애물 앞에서 관제 pause → resume 하면 영구 교착 (sim op_q45b_obs_then_pause_field 10-07: 장애물을 치워도 fleet pause 가 남아 안 풀림).
+            #   0 으로 올리면 관제 resume 즉시 8018 → ROS 관제 pause 해제 → fleet·BT 가 다시 판단 (장애물이 남아 있으면 비트는 다시 켜진다).
+            #   관제 pause 중 Windows 상태는 DrivingPause (15) 가 비트보다 먼저라 표시는 그대로다. 흐름제어 대기 (17) 는 비트를 보지 않는다.
+            op_hold = self._mask_bits_in_op_pause and self._nav_pause_latched
+            pause_bit = bool(self._controller_pause_flag or self._path_agent_collision)
+            obs_bit = bool(self._path_static_collision)
+            self._nav2_monitoring_data.ros_nav_pause = pause_bit and not op_hold
+            self._nav2_monitoring_data.ros_nav_obstacle_detected = obs_bit and not op_hold
 
             self.get_logger().info(
-                f"int(self._controller_pause_flag)/int(self._path_agent_collision)/int(self._path_static_collision): {int(self._controller_pause_flag)}/{int(self._path_agent_collision)}/{int(self._path_static_collision)}",
+                f"int(self._controller_pause_flag)/int(self._path_agent_collision)/int(self._path_static_collision): {int(self._controller_pause_flag)}/{int(self._path_agent_collision)}/{int(self._path_static_collision)}"
+                + (" (관제 pause 중 — Windows 로는 0/0 으로 올림, Q51)" if op_hold and (pause_bit or obs_bit) else ""),
                 throttle_duration_sec=3.0
             )
             snapshot = copy.deepcopy(self._nav2_monitoring_data)

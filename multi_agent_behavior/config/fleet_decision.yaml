@@ -112,7 +112,7 @@ fleet_decision_node:
     # (1) 정지 대신 감속 대기. 충돌점이 slow_wait_min_dist_m 보다 가까우면 정지로 넘어간다.
     slow_wait_speed_mps: 0.1
     slow_wait_angular_rps: 0.3
-    slow_wait_min_dist_m: 0.9
+    slow_wait_min_dist_m: 1.8  # [10-06 D25] 0.9 → 1.8 (충돌 예상 지점까지, 로봇 중심 기준). 멈춘 자리에서 정상 replan 으로 자연스럽게 우회 (SLOWWAIT_DETOUR_DISTANCE_1006.md)
     slow_wait_max_sec: 30.0          # 우선 측이 주행 중인 상대를 감속 대기하는 상한 → 정지+replan
     moving_target_pause_sec: 10.0    # 가까운(정지 모드) 주행 상대를 기다리는 상한
     slow_clear_sec: 1.5
@@ -154,8 +154,9 @@ fleet_decision_node:
     topic_velocity_control: "/velocity_modifier/control"
     # [S8 v2 1차 반영] 우선 로봇이 내 옆(1.5 m)에서 정지·회복만 반복하면 나 때문에 막힌 것으로 보고 비켜준다 (M-8)
     mutual_block_near_m: 1.5
+    mutual_block_m8_near_m: 2.3  # [10-06 D25] M-8 전용 (우선 로봇이 감속 대기 정지 2.2 m 에서 서므로). goal 점유 후진의 작동 거리는 위 1.5 그대로 (후진 거리 yield_backoff_m 0.4)
     # 상대 몸체 중심이 이보다 가까우면 감속 대기 대신 정지 (1차에서 0.79 m 까지 붙었다)
-    slow_wait_min_body_m: 1.2
+    slow_wait_min_body_m: 2.2  # [10-06 D25] 1.2 → 2.2 (로봇 중심 사이). 30° 차선 변경·차체 간격 약 0.15 m 가 나오는 거리 (최소 1.9)
     # [S8 v2 2차 반영] 교차 예측 감속: 두 로봇이 horizon 안에 같은 지점(0.8 m)에 gap 안 시차로 닿으면 낮은 쪽이 HIT 전에 감속
     predict_enable: true
     predict_horizon_sec: 8.0
@@ -171,9 +172,10 @@ fleet_decision_node:
     agent_replan_enable: true
     # [V2.1 09-20] 대기 순환 검출 → 최하위 우선순위부터 BackUp 으로 고리 끊기 (S18 D1 사례)
     cycle_detect_enable: true
-    cycle_backoff_m: 1.2
+    cycle_backoff_m: 0.45  # [10-06 사용자 "abnormal 은 최소 이동"] 1.2 → 0.45 (BT recovery 기동 0.45 m 와 통일, 필요 거리만)
     cycle_stagger_sec: 8.0
     cycle_min_wait_sec: 5.0
+    cycle_gate_retry_sec: 5.0  # [10-06 사용자 D21 P4 (나)] retreat gate 에 막히면 시도로 치지 않고 5 s 뒤 다시 본다 (예전: 60 s 재시도 손실 + 2단계로 넘어감)
     # [V2.1] 밀어내기 양보: 우선 로봇이 나 때문에 막힘 + 나는 10 s 무진전 → 내 이력 따라 2 m 후퇴 (Spin+DriveOnHeading/BackUp)
     push_yield_enable: true
     push_min_sec: 10.0
@@ -187,7 +189,7 @@ fleet_decision_node:
     # [V2.33 09-25 사용자] 필요한 만큼만 후진 (상한 1.0 m, 넘으면 멈췄다가 다시 — stop-and-go)
     retreat_need_enable: true
     retreat_min_m: 0.3
-    retreat_max_m: 1.0
+    retreat_max_m: 0.45  # [10-06 사용자 "abnormal 은 최소 이동"] 1.0 → 0.45 (곡선 후퇴·교차로 탈출·unwedge·push 공통 상한)
     # [V2.34 09-26] 후진 공통 관문: 정적 끼임 / 내가 이웃 앞길을 막음 / 내가 점유한 구역을 누가 기다림 — 이 셋일 때만 후진
     retreat_gate_enable: true
     retreat_gate_free_m: 1.5
@@ -217,17 +219,18 @@ fleet_decision_node:
     standoff_face_deg: 110.0
     standoff_retreat_m: 0.3    # [V2.21] BackUp 충돌 검사 통과용 단축
     standoff_cooldown_sec: 25.0
-    push_retreat_m: 0.5    # [V2.21] BackUp 충돌 검사 통과용 단축
+    push_retreat_m: 0.45  # [10-06 사용자 "abnormal 은 최소 이동"] 0.5 → 0.45 (상한과 같게)
     retreat_away_ratio: 0.5    # [10-05 D20 J1] 후퇴 후보가 상대에서 멀어져야 하는 최소 = min(0.5, 비율 × 후퇴 거리). 0.3 m 후퇴 → 0.15 m
     # [V2.2] 교차로를 막고 서지 않는다 (5·6대 붕괴의 시작점)
     junction_keep_clear_enable: true
     junction_probe_m: 1.2
     junction_clear_ahead_m: 1.5
-    junction_clear_max_sec: 6.0
+    junction_clear_max_sec: 10.0  # [10-06 사용자 D21 P7] 6 → 10 s
+    junction_clear_speed_mps: 0.2  # [10-06 사용자 D21 P7] 비우는 동안 0.2 m/s (최대 2.0 m)
     # [V2.3] 회복 루프로 끼인 로봇이 스스로 빠져나온다
     unwedge_enable: true
     unwedge_after_sec: 75.0
-    unwedge_dist_m: 0.7
+    unwedge_dist_m: 0.45  # [10-06 사용자 "abnormal 은 최소 이동"] 0.7 → 0.45 (상한과 같게)
     # [V2.4] recovery 선택권을 노드로 (BT 오류 코드 기반). 후퇴는 **직선 BackUp** (플래너 후퇴는 별도 변수로 비교)
     bt_error_react_enable: true
     bt_error_burst_n: 4
@@ -248,10 +251,38 @@ fleet_decision_node:
     #   기다림의 사슬을 만드는 것으로 의심된다(G1: 30 s 상한에 22회 걸림). 넣은 판(v228)과 비교한다.
     junction_escape_enable: true
     junction_escape_after_sec: 20.0
-    junction_escape_m: 1.2
+    junction_escape_m: 0.45  # [10-06 사용자 "abnormal 은 최소 이동"] 1.2 → 0.45 (상한과 같게 — 후방 사전 점검도 실제 이동 거리로)
     junction_escape_cooldown_sec: 40.0
 
     # [OP 09-28] 관제 명령 우선·자기 기동 허가 (verify/FLEET_V2_FIELD_ISSUE_0928.md).
     # 관제 pause·도킹·종료 상태에서 fleet 기동 금지·즉시 회수, 무진전 시계는 이번 명령의 활성 시간만, 관제 pause 중 판단 정지.
     operator_priority_enable: true
     dock_monitoring_topic: "ros2_dock_monitoring_data"
+
+    # ------------------------------------------------------------------
+    # [10-07 D26 A·B·Q37·Q42·Q35] goal 맞바꿈·비켜 준 뒤 정지 유지 — **현장 기본 꺼짐** (코드 기본값과 같은 동작).
+    #   켜는 법: 아래 '켬' 값으로 바꾼다 (sim 2대 swap5 검증 설정 = verify/amhs_tests/fleet_decision_ab7_on.yaml). v2_enable·cycle_detect_enable true 필요.
+    #   5대 밀집 검증·결정 대기 (PENDING Q48~Q50) 전. Q35 길이 판정은 현장 이웃 경로가 4 m 전체인지 확인 (Q35) 전에는 0 유지.
+    #   Q46 (관제 resume 에 양보 정지 유지 해제) 은 별도 키 없음 — A·Q42 가 켜져 있을 때만 일한다.
+    # A: 서로 goal 을 점유한 2대 — 우선 아닌 쪽이 직진 후진으로 비켜 줌 (1회 ≤ step, 첫 1회 Q37, 누적 상한 first + (max-1)·step + 0.05)
+    cycle_swap_gate_enable: false          # 켬 true
+    cycle_swap_step_m: 0.45
+    cycle_swap_max_steps: 2
+    cycle_swap_first_step_m: -1.0          # 켬 0.65 (Q37: 첫 1회만 0.65 m → 누적 상한 1.15 m), -1 = step 과 같음
+    cycle_swap_mutual_sec: 20.0
+    cycle_swap_hold_sec: 30.0              # 후진 뒤 정지 유지 시한 (상대 pass_m 지나가면 먼저 풂)
+    cycle_swap_pass_m: 1.0
+    cycle_swap_partner_goal_m: 0.8
+    cycle_swap_ready_assume_goal: false    # 켬 true (경로 없는 MOVING 상대 = READY 대기 → 상대 goal = 내 자리)
+    cycle_swap_junction_margin_m: 0.05
+    cycle_swap_start_block_m: 0.0          # P2-3 출발 보류 — BT InitSequence 가 pause 를 지워 효과 없음, 0 유지 (A 켰을 때만 쓰임)
+    cycle_swap_start_block_sec: 100.0
+    cycle_swap_path_goal_len_m: 0.0        # Q35: sim 3.0 (이웃 경로 4 m 기준). 현장 nDrivingPathIndexGap 확인 전 0
+    # B: READY 중 goal 점유를 pause 로 (순환 검출에 들게), 막은 로봇 반경
+    ready_goal_occ_as_pause: false         # 켬 true
+    cycle_blocker_swap_m: 0.0              # 켬 3.2
+    # Q42: 우선 로봇에게 비켜 준 후퇴 끝 → 그 로봇이 pass_m 움직이거나 sec 까지 정지 유지 (같은 명령 안, 새 명령·관제 명령 우선)
+    yield_hold_enable: false               # 켬 true
+    yield_hold_sec: 30.0
+    yield_hold_pass_m: 1.0
+    yield_hold_near_m: 4.0

@@ -1,0 +1,256 @@
+# [amhs 이관 09-27] sim 최종 조합 v229i (amr-gz-sim-example/fleet_policy_v2/multi_agent_behavior_v2/config/fleet_decision_v229i.yaml) 그대로.
+# 현장 v1 파라미터 38개는 값이 같고 v2_enable 만 true. 이관 전 원본: fleet_decision_bk260927.yaml
+fleet_decision_node:
+  ros__parameters:
+    # --- Robot Identity ---
+    my_machine_id: 1
+    use_reroute: true
+
+    # --- Wait Timeouts (Seconds) ---
+    wait_detect_amr_sec: 2.0        # TYPE 1, 6, 7, 10, 12
+    wait_other_amr_long_sec: 150.0 #450.0  # TYPE 5 (Reroute ON)
+    wait_other_amr_short_sec: 30.0  # TYPE 5 (Reroute OFF)
+    wait_abnormal_long_sec: 100.0 #300.0   # TYPE 2 (Reroute ON)
+    wait_abnormal_short_sec: 30.0   # TYPE 2 (Reroute OFF)
+    wait_obstacle_sec: 15.0         # TYPE 11 (General Obstacle)
+
+    simple_mode: false #true #false  # [수정] Simple Mode 활성화 여부 (true/false)
+    wait_simple_mode_sec: 10.0  # [수정] Simple Mode에서 대기하는 시간 (초)
+
+
+    # --- Thresholds ---
+    replan_ignore_sec_after_agent: 0.5
+    collision_msg_timeout_sec: 3.0  # [수정] 충돌 메시지 타임아웃 설정
+    reroute_cooldown_sec: 5.0       # [수정] Reroute 요청 쿨다운 시간 설정
+
+    replan_flag_wait_sec: 3.0 #2.0 #0.0 #7.0
+
+    # --- Input Topics ---
+    topic_collision: "/path_agent_collision_info"
+    topic_agents: "/multi_agent_infos"
+    # topic_replan_flag: "/replan_flag"
+    topic_path_block_status: "/path_block_status"  # [NEW] 추가됨
+    wall_hugging_wait_sec: 2.0  # [NEW] Wall hugging 감지 시 대기하는 시간 (초)
+    direct_obs_clear_sec: 3.0   # [NEW] Direct Obstacle Clear 요구 시간 (초)
+    direct_obs_timeout_sec: 15.0 # [NEW] Direct Obstacle 타임아웃 시간 (초)    
+
+
+    # --- Output Topics ---
+    topic_decision_state: "/decision_state"
+    topic_request_replan: "/request_replan"
+    topic_request_reroute: "/request_reroute" # [NEW] 추가됨    
+    topic_cmd_run: "/cmd/run"
+    topic_cmd_resume: "/controller_pause_flag"   # <--- [NEW] 추가됨
+    topic_cmd_pause: "/controller_pause_flag"
+    topic_cmd_stop: "stop_command"
+
+
+    # [FIX] 스스로는 영영 움직일 수 없는 상대의 AgentStatus.phase 목록.
+    # 여기 든 상태는 ID 우선순위 비교를 건너뛰고 일반 장애물(TYPE_11)로 격하해
+    # wait_obstacle_sec 뒤 우회한다. 기다려도 비켜주지 않는 상대들이다.
+    #    0 INIT / 14 ERROR / 18 WAITING_FOR_ROS_STATUS
+    #   19 CHARGING / 20 CHARGE_DONE / 21 UNKNOWN
+    #
+    # [주의] 이적재(5 MARKING, 6 UNLOADING, 7 UNLOADED, 8 LOADING, 9 LOADED)는
+    # 일부러 뺐다. 현장 실측 50초 내외로 끝나는 유한 정지라 우회할 이유가 없고,
+    # 좁은 통로에서 돌아가면 오히려 병목을 만든다. 기존 우선순위 분기로 두면
+    # Early Exit(agent_wait_before_resume 3초)가 작업이 끝나는 즉시 원경로로
+    # 출발시킨다 - 대기 시간들은 고정 정지가 아니라 상한이다.
+    #
+    # 그 밖에 뺀 것: 15 PAUSE, 16 WAITING_FOR_SAFETY, 17 WAITING_FOR_FLOWCONTROL,
+    #   2 WAITING_FOR_OBS, 4 ARRIVED (곧 다시 움직임 - ID tie-break 유지 필요)
+    #   10 AUTORECOVERY, 11 RECOVERING (회복 중 움직일 수 있음)
+    #   12/13 MANUAL (앞단에서 TYPE_1 로 처리)
+    # phase 값은 Windows 관제가 정한다. 현장 매핑 확인 후 재빌드 없이 조정할 것.
+    immobile_agent_phases: [0, 14, 18, 19, 20, 21]
+
+    # [FIX] 정적 장애물 진동(pause <-> resume 반복) 방어.
+    # 맵에 없는 장애물에 경로가 아슬아슬하게 걸치면 차단 판정이 깜빡이고, 그때마다
+    # SM 이 새로 진입하며 타이머가 0 으로 돌아가 replan(15초)에 영영 도달하지 못했다.
+    # 짧은 간격으로 재차단되면 같은 상황으로 보고 경과 시간을 이어받는다.
+    # 0 이면 누적이 꺼져 기존 동작 그대로.
+    static_rejoin_window_sec: 5.0
+    # 같은 상황에서 replan 을 이 횟수만큼 시도하고도 계속 막히면 자력 우회 실패로
+    # 보고 관제에 알린다 (내부 정지 -> driving_abort -> 관제는 reroute 요청으로 읽는다).
+    # '진동 횟수' 가 아니라 **replan 시도 횟수** 다. 진동 횟수로 세면 빠른 진동에서
+    # replan 을 한 번도 안 해보고 관제에 넘기게 된다(즉시 replan 배제 원칙 위반).
+    # 카운터는 (1) 재차단 간격이 위 창을 넘으면 = 다른 상황, (2) goal 종료,
+    # (3) 관제 보고 직후 에 0 으로 초기화된다. 따라서 서로 다른 장소에서 생긴
+    # 진동이 누적되지 않는다. 0 이면 에스컬레이션을 끈다.
+    static_max_replan_retry: 10
+
+    # [FIX B-7] agent(다른 로봇) 쪽에도 같은 장치. 지금까지는 상대에게 막혀 replan 을 쏘고
+    # 재개한 뒤 다시 같은 상대에 걸리면 타이머가 0 부터 돌고 횟수를 세지 않아, 끝은
+    # 조정 로직이 아니라 Nav2 goal abort 가 냈다 (롱런 3차: 좁은 통로에서 시간당 102회).
+    # agent_rejoin_window_sec: 해제 뒤 이 시간 안에 **같은 상대**에게 다시 걸리면 같은 상황.
+    #   Early Exit 뒤면 경과를 이어받고, replan 뒤면 경과 0 + 재시도 횟수 유지.
+    #   상대가 바뀌거나 창을 넘기면 초기화. 0 이면 끔.
+    agent_rejoin_window_sec: 5.0
+    # agent_max_replan_retry: 같은 상대에게 replan 을 이 횟수만큼 해도 막히면 관제에 넘긴다
+    #   (내부 정지 -> driving_abort, static 쪽과 동일). 0 이면 끔.
+    #   [보수적 기본값] 현장 사이드 이펙트를 아직 모르므로 30 — 사실상 안 걸린다.
+    #   현장에서 재빌드 없이 이 값만 낮춰 활성화한다 (예: 5 면 TYPE_10 기준 약 30초 뒤 보고).
+    agent_max_replan_retry: 30
+
+    # [FIX] goal 점유 처리 활성화 (10초 remove_passed / 15·20초 remove_first / 25초 replan).
+    # 예전에는 코드에 False 로 하드코딩되어 블록 전체가 돌지 않았다. 원인은 BT 쪽이었고
+    # (pause 중 경로 계산 실패가 /controller_pause_flag=false 를 유발) moduler32 에서
+    # 고쳤다. 현장에서 문제가 생기면 여기서 false 로 끄면 된다 (재빌드 불필요).
+    enable_goal_occupied_handling: true
+
+    agent_cache_ttl_sec: 5.0       # [FIX] 이웃 캐시 보존 시간 (소식 끊기면 제거)
+    nav_stop_complete_timeout_sec: 10.0  # [FIX] /nav_stop_complete 유실 watchdog
+
+    replan_clear_timeout_sec: 2.0  # [NEW] Replan Flag가 False로 연속 유지되어야 하는 시간 (초)
+    goal_occupied_timeout_sec: 100.0  # [NEW] Goal 점유 상태에서 대기할 최대 시간 (초)
+
+    # =====================================================================
+    # [V2] 정책 v2 (sim 실험군, FLEET_DECISION_POLICY_PROPOSAL.md 8장). amhs 원본에는 없다.
+    # v2_enable: false 면 위 v1 로직 그대로 (대조군과 같은 동작인지 확인용).
+    # =====================================================================
+    v2_enable: true
+    # (1) 정지 대신 감속 대기. 충돌점이 slow_wait_min_dist_m 보다 가까우면 정지로 넘어간다.
+    slow_wait_speed_mps: 0.1
+    slow_wait_angular_rps: 0.3
+    slow_wait_min_dist_m: 0.9
+    slow_wait_max_sec: 30.0          # 우선 측이 주행 중인 상대를 감속 대기하는 상한 → 정지+replan
+    moving_target_pause_sec: 10.0    # 가까운(정지 모드) 주행 상대를 기다리는 상한
+    slow_clear_sec: 1.5
+    # 같은 방향 주행 상대에게 속도 맞추기 (TYPE_2)
+    speed_match_enable: true
+    speed_match_ratio: 0.9
+    speed_match_min_mps: 0.1
+    # 이웃 속도는 자세 이력으로 추정 (현장 bridge 는 twist 를 0 으로 채운다)
+    agent_speed_window_sec: 1.0
+    agent_moving_mps: 0.05
+    # 정지 상대 분류 (3장). 기본은 보수적(늦게 회피)
+    stopped_yielding_wait_sec: 60.0
+    stopped_working_wait_sec: 60.0
+    yielding_phases: [15, 2, 1, 16, 17]
+    working_phases: [4, 5, 6, 7, 8, 9, 10, 11]
+    # 우선 로봇이 PAUSE 이고 그 경로가 내 발자국을 지나면 나를 기다리는 것 → 내가 비켜준다
+    mutual_block_replan_sec: 10.0
+    mutual_block_radius_m: 0.5
+    # 같은 경로 판정 (M-10): 내 경로점 중 상대 튜브 안·같은 방향 비율
+    same_path_overlap_ratio: 0.5
+    same_path_tube_m: 0.6
+    same_path_heading_deg: 60.0
+    # 동적 우선순위 (aging)
+    dynamic_priority_enable: true
+    aging_step_sec: 60.0
+    aging_max_level: 2
+    # 위치 무진전 보고 (관제 goal_timeout 600 s 보다 먼저)
+    no_progress_report_sec: 0.0   # [OP 09-28] 끔 — 무진전 abort 는 nav_stuck_manager(480 s)에 맡긴다 (사용자 결정)
+    no_progress_dist_m: 0.3
+    # 정적 상한 추적: 같은 자리 재발은 같은 상황 (M-11)
+    static_same_spot_m: 0.3
+    # [09-28 현장 이상 2] 해제 지점에서 이만큼 벗어난 적이 있으면 같은 자리 재차단도 새 상황 (replan 재시도 0 부터, 사용자 결정 2.0 m)
+    static_same_spot_leave_m: 2.0
+    # 자기 정보 토픽 (M-9)
+    own_path_topic: "/plan_truncated_short"
+    own_twist_topic: "/cmd_vel"
+    global_frame: "map"
+    base_frame: "base_link"
+    topic_velocity_control: "/velocity_modifier/control"
+    # [S8 v2 1차 반영] 우선 로봇이 내 옆(1.5 m)에서 정지·회복만 반복하면 나 때문에 막힌 것으로 보고 비켜준다 (M-8)
+    mutual_block_near_m: 1.5
+    # 상대 몸체 중심이 이보다 가까우면 감속 대기 대신 정지 (1차에서 0.79 m 까지 붙었다)
+    slow_wait_min_body_m: 1.2
+    # [S8 v2 2차 반영] 교차 예측 감속: 두 로봇이 horizon 안에 같은 지점(0.8 m)에 gap 안 시차로 닿으면 낮은 쪽이 HIT 전에 감속
+    predict_enable: true
+    predict_horizon_sec: 8.0
+    predict_gap_sec: 3.0
+    predict_conflict_dist_m: 0.8
+    predict_debug: true
+    # [S8 v2 3차 반영] 대면 교착: 낮은 쪽이 1 m 후진 (sim 실험군에서만 켬, 현장은 안전 검토 뒤)
+    yield_backoff_enable: true
+    yield_backoff_m: 0.4    # [V2.21] BackUp 충돌 검사 통과용 단축
+    yield_backoff_speed_mps: 0.1
+    yield_backoff_body_m: 1.0
+    topic_cmd_vel_out: "/cmd_vel_adjusted"
+    agent_replan_enable: true
+    # [V2.1 09-20] 대기 순환 검출 → 최하위 우선순위부터 BackUp 으로 고리 끊기 (S18 D1 사례)
+    cycle_detect_enable: true
+    cycle_backoff_m: 1.2
+    cycle_stagger_sec: 8.0
+    cycle_min_wait_sec: 5.0
+    # [V2.1] 밀어내기 양보: 우선 로봇이 나 때문에 막힘 + 나는 10 s 무진전 → 내 이력 따라 2 m 후퇴 (Spin+DriveOnHeading/BackUp)
+    push_yield_enable: true
+    push_min_sec: 10.0
+    # [V2.20 09-22 사용자] 후퇴 추종을 RPP → **MPPI** 로. 사용자: "RPP 기반은 충돌에 조금 취약할 수 있다".
+    # 현장 BT recovery 가 쓰는 `RecoveryFollowPath1` 이 곧 `regulated_mppi_controller::MPPIController` 이고
+    # `vx_min: -0.35`, `motion_model: DiffDrive` 라 **후진·제자리 선회 모두 가능**하다. 같은 컨트롤러를 후퇴에도 쓴다.
+    # [V2.32 09-25 사용자] 후퇴는 sim 전용 별도 인스턴스 `YieldFollowPath` 로 따라간다.
+    # 현장 recovery 용 RecoveryFollowPath1 은 건드리지 않고, 후퇴용 MPPI critic 임계만 따로 조정하기 위해서다.
+    # 이 인스턴스는 field_stack 이 환경변수 YIELD_MPPI_THRESH 가 있을 때만 싣는다 → 이 설정은 반드시 그 변수와 함께 쓴다.
+    yield_reverse_controller: "YieldFollowPath"
+    # [V2.33 09-25 사용자] 필요한 만큼만 후진 (상한 1.0 m, 넘으면 멈췄다가 다시 — stop-and-go)
+    retreat_need_enable: true
+    retreat_min_m: 0.3
+    retreat_max_m: 1.0
+    # [V2.34 09-26] 후진 공통 관문: 정적 끼임 / 내가 이웃 앞길을 막음 / 내가 점유한 구역을 누가 기다림 — 이 셋일 때만 후진
+    retreat_gate_enable: true
+    retreat_gate_free_m: 1.5
+    # [V2.34b 09-26] 관문 보완: 조정 대기 중이면 '정적 끼임' 아님 + 가까운 이웃과 둘 다 20 s 넘게 멈췄으면 허용(상호 정지)
+    retreat_gate_mutual_sec: 20.0
+    # [V2.35 09-26] 후퇴 도달 판정을 목표 거리에 비례하게 (0.3 m 후퇴가 출발하자마자 '도달' 로 끝나던 버그)
+    yield_reach_frac: 0.3
+    # [V2.37 09-27] 곡선 후진 실패 분석 반영: 종료 상태(SUCCEEDED 등)에서는 BT 곡선 후진 대신 직접 기동,
+    # 관제 정지(/nav_pause_flag) 중에는 어떤 후진도 하지 않는다(제자리 유지 존중).
+    yield_bt_active_only: true
+    respect_nav_pause: true
+    # [V2.14 09-21 사용자 지적] "후퇴는 BT recovery 기반으로 하기로 했잖아" — 맞다. 그런데 채택 설정에
+    # yield_bt_enable 을 넣지 않아 **코드 기본값 false 로 꺼진 채** 돌았다(내 누락). 켜고 다시 잰다.
+    # 주행 계열 상태에서는 플래너 기반 곡선 후진(ReverseReedsShepp → ReverseAStar 폴백 + 1.2 m truncate),
+    # READY/IDLE 처럼 BT 가 안 도는 상태에서만 behavior_server 직접 기동으로 내려간다.
+    yield_bt_enable: true
+    yield_timeout_sec: 45.0
+    yield_try_sec: 8.0
+    yield_goal_max_m: 2.5
+    yield_fallback_backup_sec: 90.0
+    # [V2.13 09-21] 2대 정면 대치 규칙 재활성화. 09-20 에 기각했지만 그 판은 노드가 죽은 오염 판이었고,
+    # 완주 직전 보호(V2.10)·막힌 이웃 양보(V2.11) 도 없었다. 격자+교차로 정원2 에서 40분 교착이 나와 재검토한다.
+    standoff_enable: true
+    standoff_after_sec: 25.0
+    standoff_dist_m: 1.4
+    standoff_cone_deg: 70.0
+    standoff_face_deg: 110.0
+    standoff_retreat_m: 0.3    # [V2.21] BackUp 충돌 검사 통과용 단축
+    standoff_cooldown_sec: 25.0
+    push_retreat_m: 0.5    # [V2.21] BackUp 충돌 검사 통과용 단축
+    # [V2.2] 교차로를 막고 서지 않는다 (5·6대 붕괴의 시작점)
+    junction_keep_clear_enable: true
+    junction_probe_m: 1.2
+    junction_clear_ahead_m: 1.5
+    junction_clear_max_sec: 6.0
+    # [V2.3] 회복 루프로 끼인 로봇이 스스로 빠져나온다
+    unwedge_enable: true
+    unwedge_after_sec: 75.0
+    unwedge_dist_m: 0.7
+    # [V2.4] recovery 선택권을 노드로 (BT 오류 코드 기반). 후퇴는 **직선 BackUp** (플래너 후퇴는 별도 변수로 비교)
+    bt_error_react_enable: true
+    bt_error_burst_n: 4
+    bt_error_stuck_sec: 12.0
+    # [10-05 D17] 3단계 예비 planner (본 주행을 20 s 바꿈) 는 escape 없는 인스턴스로 — RecoveryGridBased2 는 escape 켬 (nav2_params.yaml)
+    recovery_planner_b: "RecoveryGridBased2Plain"
+    # [V2.25 09-23] 줄 해소의 교착을 없앤다 — 합의 없이 각자 자기 후방만 보고 판단한다.
+    #   후방이 막힌 로봇은 차례로 치지 않고, 줄이 45 s 이상 지속되면 순서를 무시한다.
+    #   (S1 실측: "순서가 아니다" 752회 대 실제 기동 4회, 로봇마다 순서가 달랐다)
+    rear_check_enable: true          # line_rear_first 가 _rear_blocked 를 쓴다
+    rear_check_margin_m: 0.05
+    rear_check_max_age_sec: 3.0
+    line_rear_first: true
+    line_escape_sec: 45.0
+    line_rear_probe_m: 0.4
+    # [V2.29 09-24] = V2.25 + V2.26b (교차로 안에서 멈췄으면 빠져나오기). **V2.26(진입 보류) 은 뺀다.**
+    #   근거: 몰린 배치에서 V2.26 3판 모두 엉킴·회복 0 (G 묶음). "출구가 막혔으면 앞에서 기다린다" 가
+    #   기다림의 사슬을 만드는 것으로 의심된다(G1: 30 s 상한에 22회 걸림). 넣은 판(v228)과 비교한다.
+    junction_escape_enable: true
+    junction_escape_after_sec: 20.0
+    junction_escape_m: 1.2
+    junction_escape_cooldown_sec: 40.0
+
+    # [OP 09-28] 관제 명령 우선·자기 기동 허가 (verify/FLEET_V2_FIELD_ISSUE_0928.md).
+    # 관제 pause·도킹·종료 상태에서 fleet 기동 금지·즉시 회수, 무진전 시계는 이번 명령의 활성 시간만, 관제 pause 중 판단 정지.
+    operator_priority_enable: true
+    dock_monitoring_topic: "ros2_dock_monitoring_data"
