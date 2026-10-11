@@ -23,6 +23,9 @@
 
   <exec_depend>robot_interfaces</exec_depend>
 
+  <!-- [10-10 W1] CostmapMirror 단위 테스트 -->
+  <test_depend>ament_cmake_gtest</test_depend>
+
 
   <export>
     <build_type>ament_cmake</build_type>

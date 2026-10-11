@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>   // [10-10 W1-2][리뷰]
+#include <chrono>   // [10-10 W1-3]
 #include <mutex>
 #include <vector>
 #include <string>
@@ -16,6 +18,7 @@
 #include <nav2_costmap_2d/layered_costmap.hpp>
 #include <nav2_costmap_2d/costmap_2d.hpp>
 #include <nav2_costmap_2d/costmap_2d_publisher.hpp> 
+#include "multi_agent_nav2/agent_mask_canvas.hpp"   // [10-10 W1-2]
 
 #include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/polygon_stamped.hpp>
@@ -57,7 +60,11 @@ public:
   void updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
                    int min_i, int min_j, int max_i, int max_j) override;
 
-  bool isClearable() override { return true; }
+  // [10-10 W1-2][리뷰] true → false. ClearCostmapExceptRegion / ClearCostmapAroundRobot 은 isClearable() 이 true 인
+  //   layer 를 std::static_pointer_cast<CostmapLayer> 해 clearArea 를 부르는데 (fork clear_costmap_service.cpp:116-118),
+  //   AgentLayer 는 CostmapLayer 가 아니라 Layer 라서 엉뚱한 메모리(viz_costmap_·mask_canvas_ 등)를 덮어쓰는 UB 였다.
+  //   agent layer 는 매 사이클 다시 칠하므로 지울 것도 없다. ClearEntireCostmap(resetLayers → reset()) 은 영향 없다.
+  bool isClearable() override { return false; }
 
 private:
   // ====== [NEW] Dynamic parameter 지원 ======
@@ -81,7 +88,29 @@ private:
 
   // 시각화 전용
   nav2_costmap_2d::Costmap2D viz_costmap_;
+  // [10-10 W1-2] viz_costmap_ 의 칠한 사각형 관리 (직전 사각형만 지우고, 바뀐 사각형만 publish).
+  //   viz_costmap_ 뒤에 선언해야 한다 (참조로 받는다).
+  AgentMaskCanvas mask_canvas_{viz_costmap_};
   std::unique_ptr<nav2_costmap_2d::Costmap2DPublisher> costmap_pub_;
+  // [10-10 W1-2] true = 예전 동작 (매 사이클 viz 전체 memset + always_send_full publisher + bounds 전체). A/B 용.
+  //   publisher 의 always_send_full 은 생성자 인자라 onInitialize 에서 한 번만 읽는다 (dynamic 변경은 무시).
+  // [10-10 W1-3] S2-OPS-1/W2-1: 기본값 false → true (예전 소비자와 호환). update 방식은 params 에서 false 로 명시해 켠다.
+  bool full_mask_publish_{true};
+  // [10-10 W1-3] 배포 guard timer (activate 뒤, callback_group_ 에서 돈다): 예전 full-only 소비자 감지 WARN.
+  rclcpp::TimerBase::SharedPtr legacy_listener_timer_;
+  std::chrono::steady_clock::time_point activated_at_{};
+  bool legacy_listener_warned_{false};
+  void checkLegacyMaskListener();
+  // [10-10 W1-2] update 사각형에 넣을 직전 사이클 수 (1 = 직전 사각형 ∪ 이번 사각형). N 이면 연속 N-1 개 유실을 다음
+  //   update 가 메운다. onInitialize 에서 한 번만 읽는다.
+  int mask_update_history_{1};
+  // [10-10 W1-2][리뷰] refresh 주기 (사이클 수, 0 = 끔). 이 주기마다 최근에 보낸 사각형 전체를 한 번 더 보내,
+  //   DDS 가 알리지 않은 update 유실(특히 떠난 이웃의 마지막 지우기)로 구독자에 남은 유령 셀을 덮는다. onInitialize 에서만 읽는다.
+  int mask_refresh_cycles_{10};
+  // [10-10 W1-2][리뷰] activate() 가 세우고 다음 updateCosts 가 내린다 (lifecycle thread → map update thread).
+  //   그 사이클은 grid 전체 사각형을 update 로 보낸다: deactivate 중 inactive publisher 에 버려진 update 와
+  //   fork Costmap2DPublisher 의 초기화 안 된 geometry 멤버(첫 full 이 빠질 수 있음)를 덮는다.
+  std::atomic<bool> force_full_rect_{false};
 
   // [FIX AL-1] 이웃 캐시 — machine_id 별 누적.
   //
@@ -189,8 +218,9 @@ private:
   bool isSelf(const robot_interfaces::msg::MultiAgentInfo & a) const;
   bool stale(const rclcpp::Time & stamp) const;
 
+  // [10-10 W1-2] grid 대신 canvas 를 받는다 (쓰기는 canvas.paintMax 로만 — 칠한 사각형 추적).
   void rasterizeAgentPath(const robot_interfaces::msg::MultiAgentInfo & a,
-                          nav2_costmap_2d::Costmap2D * grid,
+                          AgentMaskCanvas & canvas,
                           std::vector<std::pair<unsigned int,unsigned int>> & meta_hits);
 
   void fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
@@ -198,7 +228,7 @@ private:
                        double extra_dilation_m,
                        double forward_len_m,
                        double rear_len_m,                  // [NEW]
-                       nav2_costmap_2d::Costmap2D * grid,
+                       AgentMaskCanvas & canvas,           // [10-10 W1-2] grid → canvas
                        unsigned char cost,
                        std::vector<std::pair<unsigned int,unsigned int>> * meta_hits = nullptr);
 

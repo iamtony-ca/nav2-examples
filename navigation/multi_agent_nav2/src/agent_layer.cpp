@@ -153,6 +153,16 @@ void AgentLayer::onInitialize()
   declareParameter("tube_max_m", rclcpp::ParameterValue(4.0));
   declareParameter("agent_moving_mps", rclcpp::ParameterValue(0.05));
   declareParameter("paint_stopped_agent_path", rclcpp::ParameterValue(false));
+  // [10-10 W1-2] mask publish 방식. false = 칠한 사각형만 지우고 CostmapUpdate 로 바뀐 사각형만 보냄,
+  //   true = 예전 그대로 (매 사이클 viz 전체 memset + 전체 full publish).
+  // [10-10 W1-3] S2-OPS-1/W2-1: code 기본값 false → **true**. 새 .so 를 params 변경 없이 넣어도 예전 path_validator
+  //   (full topic 만 구독) 의 mask 가 얼지 않게 한다. update 방식은 두 agent_layer block 에 full_mask_publish: false 를 명시해
+  //   켠다 (W1-3 path_validator 가 들어간 뒤에만 — W1_STEP3.md 배포 순서).
+  declareParameter("full_mask_publish", rclcpp::ParameterValue(true));
+  // [10-10 W1-2] update 사각형에 넣을 직전 사이클 수 (1 = 직전 ∪ 이번). 2 이상이면 연속 유실 N-1 개를 다음 update 가 메운다.
+  declareParameter("mask_update_history", rclcpp::ParameterValue(1));
+  // [10-10 W1-2][리뷰] 이 사이클 수마다 최근 두 구간에 보낸 사각형 전체를 한 번 더 보낸다 (0 = 끔). global 5 Hz 면 10 = 2 s.
+  declareParameter("mask_refresh_cycles", rclcpp::ParameterValue(10));
 
 
   node_shared_->get_parameter(name_ + "." + "enabled", enabled_);
@@ -195,6 +205,11 @@ void AgentLayer::onInitialize()
   RCLCPP_INFO(logger_, "[AgentLayer V2] time-aware tube: horizon %.1f s, %.1f~%.1f m, moving > %.2f m/s, stopped path %s",
               tube_horizon_sec_, tube_min_m_, tube_max_m_, agent_moving_mps_, paint_stopped_agent_path_ ? "painted" : "body only");
   node_shared_->get_parameter(name_ + "." + "load_rear_smear_m", load_rear_smear_m_);
+  node_shared_->get_parameter(name_ + "." + "full_mask_publish", full_mask_publish_);      // [10-10 W1-2]
+  node_shared_->get_parameter(name_ + "." + "mask_update_history", mask_update_history_);  // [10-10 W1-2]
+  mask_update_history_ = std::max(1, mask_update_history_);
+  node_shared_->get_parameter(name_ + "." + "mask_refresh_cycles", mask_refresh_cycles_);  // [10-10 W1-2][리뷰]
+  mask_refresh_cycles_ = std::max(0, mask_refresh_cycles_);
 
 
 
@@ -245,9 +260,22 @@ void AgentLayer::onInitialize()
   RCLCPP_INFO(logger_, "AgentLayer initialized. Body dilation: %.2f, Path dilation: %.2f", dilation_m_, path_dilation_m_);
 
   viz_costmap_.setDefaultValue(0); 
+  // [10-10 W1-2] 예전: always_send_full=true 하드코딩 → 사이클마다 master 크기 full (2e8 cells 지도면 200 MB).
+  //   이제 기본은 false: full 은 첫 publish·크기/원점 변경 때만 (구독자가 있을 때), 그 밖에는 updateCosts 가 넘긴
+  //   사각형만 <topic>_raw_updates (nav2_msgs/CostmapUpdate) 로 보낸다. service 이름은 그대로
+  //   "get_" + name_ + "/raw_costmap" (global costmap 노드 기준 /global_costmap/get_agent_layer/raw_costmap).
+  mask_canvas_.setLegacyFullClear(full_mask_publish_);
+  mask_canvas_.setPublishHistory(static_cast<size_t>(mask_update_history_));
+  mask_canvas_.setRefreshCycles(mask_refresh_cycles_);   // [10-10 W1-2][리뷰]
   costmap_pub_ = std::make_unique<nav2_costmap_2d::Costmap2DPublisher>(
       node_shared_, &viz_costmap_, layered_costmap_->getGlobalFrameID(), 
-      name_ + "/raw_costmap", true);
+      name_ + "/raw_costmap", full_mask_publish_);
+  RCLCPP_INFO(logger_,
+    "[10-10 W1-2] AgentLayer mask publish: %s (update history %d, refresh %d cycles) [10-10 W1-3 code 기본값 true]",
+    full_mask_publish_ ? "full_mask_publish=true — 예전 방식 (매 사이클 전체 memset + full)"
+                       : "full_mask_publish=false — 칠한 사각형만 지우고 CostmapUpdate 로 바뀐 사각형만 보냄 "
+                         "(W1-3 path_validator 필요)",
+    mask_update_history_, mask_refresh_cycles_);
 
   // ====== [NEW] Dynamic parameter callback 등록 ======
   dyn_params_handler_ = node_shared_->add_on_set_parameters_callback(
@@ -260,11 +288,39 @@ void AgentLayer::onInitialize()
 
 void AgentLayer::activate()
 {
+  // [10-10 W1-b] 사용자 결정 (권장대로): deactivate() 가 dynamic parameter callback 을 지우므로
+  //   Nav2 lifecycle pause → resume (RViz Navigation2 panel Pause/Resume) 뒤에는 다시 등록해야 한다.
+  //   예전 (amhs 원본 포함) 에는 다시 등록하지 않아 roi_range_manager 의 agent_layer.roi_range_m set 이
+  //   성공으로 돌아오지만 적용되지 않았고, full_mask_publish 등 read-only guard 도 사라졌다.
+  //   첫 activate (onInitialize 직후) 는 이미 등록돼 있으므로 건너뛴다.
+  if (!dyn_params_handler_ && node_shared_) {
+    dyn_params_handler_ = node_shared_->add_on_set_parameters_callback(
+        std::bind(&AgentLayer::dynamicParametersCallback, this, std::placeholders::_1));
+    RCLCPP_INFO(logger_, "[10-10 W1-b] AgentLayer 재활성화: dynamic parameter callback 다시 등록");
+  }
+
   auto qos = rclcpp::QoS(rclcpp::KeepLast(10));
   if (qos_reliable_) qos.reliable(); else qos.best_effort();
 
+  // [10-10 W1-3] W2-N1: 구독을 layer 의 callback_group_ 에 둔다 (fork ObstacleLayer 와 같은 방식, obstacle_layer.cpp:131-132).
+  //   예전에는 costmap 노드의 default group 이라 planner_server 의 costmap_thread_ (NodeThread, planner_server.cpp:97) 가
+  //   GetCostmap(200 MB 응답)·clear_entirely·parameter service 와 한 SingleThreadedExecutor 로 돌렸다 → 200 MB 응답을 만드는
+  //   동안 /multi_agent_infos 를 받지 못하고, 800 ms 를 넘기면 updateBounds 가 이웃을 cache 에서 지웠다.
+  //   callback_group_ 은 Costmap2DROS::on_configure 가 automatically_add_to_executor_with_node=false 로 만들어
+  //   (costmap_2d_ros.cpp:155-156) 전용 executor_ 에 넣고 executor_thread_ 가 돌린다 (:268-270). plugin initialize 가 넘겨
+  //   준다 (:189-190). activate() 는 그 executor 가 이미 돌 때 불리지만, ObstacleLayer::activate 도 같은 group 에 구독을 다시
+  //   만든다 (obstacle_layer.cpp:717-726 → message_filters subscribe(sub_opt)). rclcpp(Jazzy 28.x) 는 group 에 entity 를
+  //   더하면 group 의 notify guard condition 을 올려 executor 가 다시 모은다 (callback_group.hpp:259-264).
+  //   순서상 결과: infosCallback 은 이제 그 전용 executor thread 에서 돌고 (MutuallyExclusive), 같은 group 의 다른 layer
+  //   (obstacle/zed/denoise 의 point cloud·scan 콜백, tf CreateTimerROS timer) 와 줄을 선다. map update thread 와는 예전처럼
+  //   data_mtx_ 로만 만난다. dynamic parameter callback·GetCostmap·clear service 는 default group 에 그대로 남는다.
+  //   callback_group_ 이 비어 있으면 (initialize 를 group 없이 부른 경우) 예전처럼 default group 이다.
+  rclcpp::SubscriptionOptions sub_opt;
+  sub_opt.callback_group = callback_group_;
   sub_ = node_shared_->create_subscription<robot_interfaces::msg::MultiAgentInfoArray>(
-      topic_, qos, std::bind(&AgentLayer::infosCallback, this, std::placeholders::_1));
+      topic_, qos, std::bind(&AgentLayer::infosCallback, this, std::placeholders::_1), sub_opt);
+  RCLCPP_INFO(logger_, "[10-10 W1-3] AgentLayer %s 구독: %s",
+    topic_.c_str(), callback_group_ ? "layer callback_group (Costmap2DROS 전용 executor)" : "default group (callback_group 없음)");
 
   if (publish_meta_) {
     meta_pub_ = node_shared_->create_publisher<robot_interfaces::msg::AgentLayerMetaArray>(
@@ -272,6 +328,52 @@ void AgentLayer::activate()
   }
 
   if (costmap_pub_) costmap_pub_->on_activate();
+  // [10-10 W1-2][리뷰] 다음 updateCosts 는 grid 전체 사각형을 update 로 보낸다 (layer 헤더의 force_full_rect_ 주석).
+  //   reactivate 전 deactivate 가 publish 도중에 들어와 버려진 update 가 있어도 구독자 mask 가 여기서 다시 맞는다.
+  force_full_rect_.store(true);
+
+  // [10-10 W1-3] S2-OPS-1/W2-1 배포 guard: update 방식인데 full-only 소비자만 듣고 있으면 WARN (checkLegacyMaskListener).
+  activated_at_ = std::chrono::steady_clock::now();
+  legacy_listener_warned_ = false;
+  if (!full_mask_publish_) {
+    legacy_listener_timer_ = node_shared_->create_wall_timer(
+      std::chrono::seconds(30), std::bind(&AgentLayer::checkLegacyMaskListener, this), callback_group_);
+  }
+}
+
+// [10-10 W1-3] activation 120 s 뒤부터 30 s 마다: <name>/raw_costmap_raw 구독자는 있는데 _raw_updates 구독자가 없으면 WARN.
+//   예전 path_validator (amhs·pv_w1) 와 IsGoalsOccupiedAgentCondition 은 full topic 만 구독한다. full 은 첫 publish·geometry
+//   변경 때만 나가므로 그 소비자의 mask 는 얼어붙는다 (현장 순서면 처음부터 비어 있다). 동작은 바꾸지 않고 알리기만 한다.
+void AgentLayer::checkLegacyMaskListener()
+{
+  if (!node_shared_ || full_mask_publish_) {
+    return;
+  }
+  const double since = std::chrono::duration<double>(std::chrono::steady_clock::now() - activated_at_).count();
+  const std::string base = name_ + "/raw_costmap";
+  size_t raw_subs = 0, upd_subs = 0;
+  try {
+    raw_subs = node_shared_->count_subscribers(base + "_raw");
+    upd_subs = node_shared_->count_subscribers(base + "_raw_updates");
+  } catch (const std::exception & e) {
+    RCLCPP_DEBUG(logger_, "[10-10 W1-3] 구독자 수 조회 실패: %s", e.what());
+    return;
+  }
+  if (legacyMaskListenerSuspected(full_mask_publish_, since, 120.0, raw_subs, upd_subs)) {
+    if (!legacy_listener_warned_) {
+      legacy_listener_warned_ = true;
+      RCLCPP_WARN(logger_,
+        "[10-10 W1-3] full_mask_publish=false 인데 %s_raw 구독자 %zu, %s_raw_updates 구독자 0 — full topic 만 받는 예전 소비자"
+        "(amhs/pv_w1 path_validator 등) 가 듣고 있다. 그 mask 는 갱신되지 않는다. W1-3 path_validator 를 넣거나 "
+        "full_mask_publish: true 로 되돌리고 Nav2 재기동", base.c_str(), raw_subs, base.c_str());
+    } else {
+      RCLCPP_WARN_THROTTLE(logger_, *node_shared_->get_clock(), 300000,
+        "[10-10 W1-3] (계속) %s_raw 구독자 %zu, _raw_updates 구독자 0 — full-only 소비자", base.c_str(), raw_subs);
+    }
+  } else if (legacy_listener_warned_ && upd_subs > 0) {
+    legacy_listener_warned_ = false;
+    RCLCPP_INFO(logger_, "[10-10 W1-3] %s_raw_updates 구독자 %zu — full-only 소비자 경고 해제", base.c_str(), upd_subs);
+  }
 }
 
 void AgentLayer::deactivate()
@@ -287,6 +389,10 @@ void AgentLayer::deactivate()
 
   sub_.reset();
   meta_pub_.reset();
+  if (legacy_listener_timer_) {   // [10-10 W1-3]
+    legacy_listener_timer_->cancel();
+    legacy_listener_timer_.reset();
+  }
   if (costmap_pub_) costmap_pub_->on_deactivate();
 }
 
@@ -515,127 +621,23 @@ void AgentLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw
   }
 }
 
-// ========================================================================
-// 다각형 꼬임(Bow-tie) 방지를 위한 안전한 음수 팽창 로직
-// ========================================================================
-static inline std::vector<geometry_msgs::msg::Point>
-dilateFootprintDirectional(const std::vector<geometry_msgs::msg::Point32> & in,
-                           double iso_dilate_m,
-                           double forward_len_m,
-                           double rear_len_m,            // [NEW] rear(-x) 확장
-                           rclcpp::Logger logger,
-                           rclcpp::Clock::SharedPtr clock)
-{
-  std::vector<geometry_msgs::msg::Point> out; out.reserve(in.size());
-  if (in.empty()) return out;
-
-  double cx=0, cy=0;
-  for (auto & p : in) { cx += p.x; cy += p.y; }
-  cx /= static_cast<double>(in.size());
-  cy /= static_cast<double>(in.size());
-
-  // 다각형 중심에서 가장 가까운 변(또는 꼭짓점)까지의 거리 계산
-  double min_dist = 1e9;
-  for (const auto & p : in) {
-      min_dist = std::min(min_dist, std::hypot(p.x - cx, p.y - cy));
-  }
-
-  // 사용자의 파라미터 에러 방어 (너무 큰 음수값 제한)
-  double applied_dilate = iso_dilate_m;
-  if (applied_dilate < 0.0 && std::abs(applied_dilate) >= min_dist) {
-      RCLCPP_WARN_THROTTLE(logger, *clock, 2000,
-          "[AgentLayer] Negative dilation (%.2f) exceeds min radius (%.2f). Clamping to safe boundary to prevent bow-tie effect.",
-          iso_dilate_m, min_dist);
-      // 최소 1cm(0.01m) 형체는 남겨두도록 강제 제한
-      applied_dilate = -min_dist + 0.01; 
-  }
-
-  for (auto & p : in) {
-    double vx = p.x - cx, vy = p.y - cy;
-    double n = std::hypot(vx, vy); if (n < 1e-6) n = 1.0;
-
-    double x_local = p.x + applied_dilate * (vx / n);
-    double y_local = p.y + applied_dilate * (vy / n);
-
-    // forward: 중심보다 앞쪽(+x) 정점만 앞으로
-    if (forward_len_m > 1e-6 && (p.x - cx) >= 0.0) {
-      x_local += forward_len_m;
-    }
-    // [NEW] rear: 중심보다 뒤쪽(-x) 정점만 뒤로
-    if (rear_len_m > 1e-6 && (p.x - cx) < 0.0) {
-      x_local -= rear_len_m;
-    }
-
-    geometry_msgs::msg::Point q;
-    q.x = x_local; q.y = y_local; q.z = 0.0;
-    out.push_back(q);
-  }
-  return out;
-}
+// [10-10 W1-2] dilateFootprintDirectional 은 agent_mask_canvas.cpp 로 옮겼다 (내용 동일, 시험에서 같은 코드를 쓰려고).
 
 void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
                                  const geometry_msgs::msg::Pose & pose,
                                  double extra_dilation_m,
                                  double forward_len_m,
                                  double rear_len_m,            // [NEW]
-                                 nav2_costmap_2d::Costmap2D * grid,
+                                 AgentMaskCanvas & canvas,     // [10-10 W1-2]
                                  unsigned char cost,
                                  std::vector<std::pair<unsigned int,unsigned int>> * meta_hits)
 {
-  auto poly = dilateFootprintDirectional(
-      fp.polygon.points, extra_dilation_m, forward_len_m, rear_len_m,  // [NEW]
-      logger_, node_shared_->get_clock());
-
-  const double yaw = tf2::getYaw(pose.orientation);
-  const double c = std::cos(yaw), s = std::sin(yaw);
-  for (auto & p : poly) {
-    const double x = p.x, y = p.y;
-    p.x = pose.position.x + c * x - s * y;
-    p.y = pose.position.y + s * x + c * y;
-  }
-
-  double minx=1e9, miny=1e9, maxx=-1e9, maxy=-1e9;
-  for (auto & p : poly) {
-    minx = std::min(minx, p.x);
-    miny = std::min(miny, p.y);
-    maxx = std::max(maxx, p.x);
-    maxy = std::max(maxy, p.y);
-  }
-
-  int min_i, min_j, max_i, max_j;
-  grid->worldToMapEnforceBounds(minx, miny, min_i, min_j);
-  grid->worldToMapEnforceBounds(maxx, maxy, max_i, max_j);
-
-  for (int j = min_j; j <= max_j; ++j) {
-    for (int i = min_i; i <= max_i; ++i) {
-      double wx, wy; grid->mapToWorld(i, j, wx, wy);
-
-      bool inside = false;
-      const size_t n = poly.size();
-      for (size_t k=0, h=n-1; k<n; h=k++) {
-        const double xi = poly[k].x, yi = poly[k].y;
-        const double xh = poly[h].x, yh = poly[h].y;
-
-        const bool hit = ((yi > wy) != (yh > wy)) &&
-                         (wx < (xh - xi) * (wy - yi) / (yh - yi) + xi);
-        if (hit) {
-            inside = !inside;
-        }
-      }
-
-      if (inside) {
-        const unsigned char old_raw = grid->getCost(i, j);
-        const int old = (old_raw == nav2_costmap_2d::NO_INFORMATION) ? 0 : static_cast<int>(old_raw);
-        const int cand = static_cast<int>(cost);
-        if (cand > old) {        
-          grid->setCost(static_cast<unsigned int>(i),
-                        static_cast<unsigned int>(j), cand);
-        }
-        if (meta_hits) meta_hits->emplace_back(
-            static_cast<unsigned int>(i), static_cast<unsigned int>(j));
-      }
-    }
-  }
+  // [10-10 W1-2] 래스터화 본문은 rasterizeFootprint (agent_mask_canvas.cpp) 로 옮겼다. 계산은 그대로이고
+  //   grid 쓰기만 canvas.paintMax 로 바꿔 실제로 쓴 셀의 사각형을 기록한다.
+  const WorldBox box = rasterizeFootprint(
+      fp.polygon.points, pose, extra_dilation_m, forward_len_m, rear_len_m,
+      canvas, cost, meta_hits, logger_, node_shared_->get_clock());
+  const double minx = box.minx, miny = box.miny, maxx = box.maxx, maxy = box.maxy;
 
   if (!touched_) {
     touch_min_x_ = minx; touch_min_y_ = miny;
@@ -654,7 +656,7 @@ void AgentLayer::fillFootprintAt(const geometry_msgs::msg::PolygonStamped & fp,
 // ========================================================================
 void AgentLayer::rasterizeAgentPath(
   const robot_interfaces::msg::MultiAgentInfo & a,
-  nav2_costmap_2d::Costmap2D * grid,
+  AgentMaskCanvas & canvas,   // [10-10 W1-2]
   std::vector<std::pair<unsigned int,unsigned int>> & meta_hits)
 {
   geometry_msgs::msg::PolygonStamped fp = getFootprintForAgent(a);
@@ -670,7 +672,7 @@ void AgentLayer::rasterizeAgentPath(
   // 1. 본체: current_pose가 ROI 안일 때만 그리기
   if (inRoi(a.current_pose.pose.position.x, a.current_pose.pose.position.y)) {
     fillFootprintAt(fp, a.current_pose.pose, body_iso_extra, forward_len,
-                    rear_len, grid, cost_now, &meta_hits);
+                    rear_len, canvas, cost_now, &meta_hits);   // [10-10 W1-2]
   }
 
   // 우선순위(ID 비교) 기반 경로 반영 로직
@@ -722,7 +724,7 @@ void AgentLayer::rasterizeAgentPath(
 
     if (decay_cost == 0) continue;
 
-    fillFootprintAt(fp, ps, path_dilation_m_, 0.0, 0.0, grid, decay_cost, &meta_hits);
+    fillFootprintAt(fp, ps, path_dilation_m_, 0.0, 0.0, canvas, decay_cost, &meta_hits);   // [10-10 W1-2]
   }
 }
 
@@ -738,62 +740,55 @@ void AgentLayer::updateCosts(nav2_costmap_2d::Costmap2D & master_grid,
   //   transformed_agents_.size(), min_i, min_j, max_i, max_j);
   // std::lock_guard<std::mutex> param_lock(param_mtx_);
 
-  // 1) viz_costmap 크기/원점 동기화 + 매 사이클 0으로 리셋 (기존 그대로)
-  {
-    std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(viz_costmap_.getMutex()));
-
-    if (viz_costmap_.getSizeInCellsX() != master_grid.getSizeInCellsX() ||
-        viz_costmap_.getSizeInCellsY() != master_grid.getSizeInCellsY() ||
-        viz_costmap_.getResolution()   != master_grid.getResolution()   ||
-        viz_costmap_.getOriginX()      != master_grid.getOriginX()      ||
-        viz_costmap_.getOriginY()      != master_grid.getOriginY())
-    {
-      viz_costmap_.resizeMap(master_grid.getSizeInCellsX(),
-                             master_grid.getSizeInCellsY(),
-                             master_grid.getResolution(),
-                             master_grid.getOriginX(),
-                             master_grid.getOriginY());
-    }
-
-    unsigned char * char_map = viz_costmap_.getCharMap();
-    const unsigned int n = viz_costmap_.getSizeInCellsX() * viz_costmap_.getSizeInCellsY();
-    std::memset(char_map, 0, n * sizeof(unsigned char));
-  }
+  // 1) viz_costmap 크기/원점 동기화 + 직전 그림 지우기
+  //    [10-10 W1-2] 예전: 매 사이클 viz 전체 memset (master 크기, 2e8 cells 지도면 200 MB).
+  //    이제: 직전 사이클에 실제로 칠한 사각형만 지운다 (크기/원점이 바뀌면 resizeMap 이 전체를 0 으로 채움).
+  //    full_mask_publish=true 이면 예전 그대로 전체 memset.
+  mask_canvas_.beginCycle(master_grid);
 
   // 2) 우리 cost는 viz_costmap_에만 그린다 (master_grid에는 직접 안 씀)
   std::vector<std::pair<unsigned int,unsigned int>> meta_hits;
   meta_hits.reserve(256);
 
   for (const auto & a : transformed_agents_) {
-    rasterizeAgentPath(a, &viz_costmap_, meta_hits);
+    rasterizeAgentPath(a, mask_canvas_, meta_hits);   // [10-10 W1-2]
   }
 
   // 3) bounds 영역만큼 viz_costmap_ -> master_grid로 OR 합성
   //    (max() 방식으로 합성: 하위 레이어가 얹은 cost를 보존하면서 우리 cost 추가)
-  const int gx_min = std::max(0, min_i);
-  const int gy_min = std::max(0, min_j);
-  const int gx_max = std::min<int>(master_grid.getSizeInCellsX(), max_i);
-  const int gy_max = std::min<int>(master_grid.getSizeInCellsY(), max_j);
+  //    [10-10 W1-2] bounds ∩ 이번에 칠한 사각형만 본다 (밖은 모두 0 이라 예전에도 건너뛰던 셀). legacy 면 bounds 전체.
+  mask_canvas_.mergeInto(master_grid, min_i, min_j, max_i, max_j);
 
-  for (int j = gy_min; j < gy_max; ++j) {
-    for (int i = gx_min; i < gx_max; ++i) {
-      const unsigned char our = viz_costmap_.getCost(i, j);
-      if (our == 0) continue;  // 우리가 안 그린 셀은 master 그대로 둠
-
-      const unsigned char master_raw = master_grid.getCost(i, j);
-      const int master_val = (master_raw == nav2_costmap_2d::NO_INFORMATION)
-                                ? 0 : static_cast<int>(master_raw);
-      if (static_cast<int>(our) > master_val) {
-        master_grid.setCost(i, j, our);
-      }
+  // 4) 시각화 publish
+  //    [10-10 W1-2] 예전: updateBounds(0..size) + always_send_full publisher → 매 사이클 full.
+  //    이제: 직전 ∪ 이번 사각형만 bounds 로 넘긴다 → publisher 가 그 사각형만 CostmapUpdate 로 보낸다 (O(칠한 면적)).
+  //    사각형이 비면 updateBounds 를 부르지 않는다. 그러면 publishCostmap 은 x0_ < xn_ 이 거짓이라 아무것도 보내지
+  //    않는다 (크기/원점이 바뀐 사이클이면 bounds 와 무관하게 full 을 보낸다).
+  //    [10-10 W1-2][리뷰] 사각형은 canvas.finishCycle() 이 정한다 (legacy = grid 전체, 평소 = 직전 ∪ 이번,
+  //    refresh 사이클 = + 최근 두 구간, activate 뒤 첫 사이클 = grid 전체). 접착 코드는 시험과 같은 publishCycle().
+  if (force_full_rect_.exchange(false) && !full_mask_publish_) {
+    mask_canvas_.requestFullRect();
+    // [10-10 W1-3] W2-N2: 로그를 실제 동작에 맞춘다. 새 instance (bringup·respawn·bond reset) 의 첫 사이클은 beginCycle 이
+    //   resize 한 사이클이고, publisher 는 geometry 변경으로 full 경로를 탄다 (_raw 구독자가 있을 때만 full 하나). 그때 이
+    //   사각형은 쓰이지 않는다 (fork publisher 의 초기화 안 된 geometry 멤버가 우연히 같을 때만 update 로 나간다 — 그 경우를
+    //   덮으려고 요청은 그대로 둔다, 비용 없음). 같은 instance 의 deactivate→activate (resize 없음) 만 grid 전체 update 를
+    //   만든다 (update 구독자가 있을 때만, 2e8 cells 면 master lock 안에서 약 1 s).
+    if (mask_canvas_.lastStats().resized) {
+      RCLCPP_INFO(logger_,
+        "[10-10 W1-3] activate 뒤 첫 사이클이 resize 사이클 (%ux%u) — publisher 가 full 경로를 타므로 강제 update 는 생략된다 "
+        "(full 은 _raw 구독자가 있을 때만)",
+        viz_costmap_.getSizeInCellsX(), viz_costmap_.getSizeInCellsY());
+    } else {
+      RCLCPP_INFO(logger_,
+        "[10-10 W1-2][리뷰] activate 뒤 첫 사이클 (재활성화): mask grid 전체(%ux%u)를 update 로 한 번 보낸다 "
+        "(update 구독자가 있을 때만 만든다)",
+        viz_costmap_.getSizeInCellsX(), viz_costmap_.getSizeInCellsY());
     }
   }
-
-  // 4) 시각화 publish (기존 그대로)
   if (costmap_pub_) {
-    costmap_pub_->updateBounds(0, viz_costmap_.getSizeInCellsX(),
-                               0, viz_costmap_.getSizeInCellsY());
-    costmap_pub_->publishCostmap();
+    publishCycle(mask_canvas_, *costmap_pub_);
+  } else {
+    mask_canvas_.finishCycle();
   }
 
   // 5) meta publish (기존 그대로) — meta_hits는 viz_costmap_ 기준으로 채워졌으므로 좌표는 동일
@@ -828,6 +823,34 @@ AgentLayer::dynamicParametersCallback(std::vector<rclcpp::Parameter> parameters)
   // updateBounds / updateCosts 와의 race 방지
   std::lock_guard<std::mutex> lock(param_mtx_);
 
+  // [10-10 W1-2][리뷰] 재시작해야 적용되는 key 는 값을 바꾸려 하면 거절한다 (예전: WARN 만 남기고 successful=true 라
+  //   parameter server 에는 새 값이 저장돼 `ros2 param get` 이 실제와 다른 방식을 보여 줬다). 같은 값은 받아 준다.
+  //   다른 key 를 하나도 적용하기 전에 먼저 검사한다 (거절된 묶음의 일부만 멤버에 반영되지 않도록).
+  {
+    const std::string prefix = name_ + ".";
+    for (const auto & param : parameters) {
+      const auto & full_name = param.get_name();
+      if (full_name.rfind(prefix, 0) != 0) {
+        continue;
+      }
+      const std::string key = full_name.substr(prefix.size());
+      bool same = true;
+      if (key == "full_mask_publish" && param.get_type() == rclcpp::ParameterType::PARAMETER_BOOL) {
+        same = (param.as_bool() == full_mask_publish_);
+      } else if (key == "mask_update_history" && param.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER) {
+        same = (std::max<int64_t>(1, param.as_int()) == mask_update_history_);
+      } else if (key == "mask_refresh_cycles" && param.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER) {
+        same = (std::max<int64_t>(0, param.as_int()) == mask_refresh_cycles_);
+      }
+      if (!same) {
+        result.successful = false;
+        result.reason = key + " 는 재시작해야 적용 (read-only)";
+        RCLCPP_WARN(logger_, "[10-10 W1-2][리뷰] %s 변경 거절: 재시작해야 적용된다 (read-only)", full_name.c_str());
+        return result;
+      }
+    }
+  }
+
   for (const auto & param : parameters) {
     const auto & full_name = param.get_name();
     const auto type = param.get_type();
@@ -856,6 +879,7 @@ AgentLayer::dynamicParametersCallback(std::vector<rclcpp::Parameter> parameters)
         } else if (key == "ignore_higher_machine_id_path") {
           ignore_higher_machine_id_path_ = param.as_bool();
         }
+        // [10-10 W1-2][리뷰] full_mask_publish 는 위에서 같은 값만 통과한다 (publisher 생성자 인자라 실행 중 변경 불가).
       }
       else if (type == rclcpp::ParameterType::PARAMETER_DOUBLE) {
         if (key == "roi_range_m") {
@@ -908,6 +932,8 @@ AgentLayer::dynamicParametersCallback(std::vector<rclcpp::Parameter> parameters)
         } else if (key == "max_poses") {
           max_poses_ = std::max(0, v);
         }
+        // [10-10 W1-2][리뷰] mask_update_history / mask_refresh_cycles 는 위에서 같은 값만 통과한다
+        //   (updateCosts 는 param_mtx_ 를 쥐지 않으므로 실행 중에는 canvas 설정을 바꾸지 않는다).
       }
       else if (type == rclcpp::ParameterType::PARAMETER_STRING) {
         if (key == "self_type_id") {

@@ -79,6 +79,7 @@ ament_target_dependencies(replan_monitor_main
 add_executable(path_validator_node
   src/path_validator_node.cpp
   src/path_validator_main.cpp
+  src/costmap_mirror.cpp          # [10-10 W1] global costmap mirror (full + CostmapUpdate 병합)
 )
 
 ament_target_dependencies(path_validator_node
@@ -120,6 +121,34 @@ install(DIRECTORY launch
 install(DIRECTORY config
   DESTINATION share/${PROJECT_NAME}
 )
+
+# [10-10 W1] CostmapMirror 단위 테스트 (노드 target 과 분리, colcon test 로 실행)
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_costmap_mirror
+    test/test_costmap_mirror.cpp
+    src/costmap_mirror.cpp
+    TIMEOUT 120
+  )
+  if(TARGET test_costmap_mirror)
+    ament_target_dependencies(test_costmap_mirror
+      nav2_msgs
+      nav2_costmap_2d
+    )
+  endif()
+  # [10-10 W1-3] mirror_sync_policy.hpp (resync 일정·mask 모름 판정·watchdog) + CostmapMirror::seedZero 시험
+  ament_add_gtest(test_mirror_sync_policy
+    test/test_mirror_sync_policy.cpp
+    src/costmap_mirror.cpp
+    TIMEOUT 120
+  )
+  if(TARGET test_mirror_sync_policy)
+    ament_target_dependencies(test_mirror_sync_policy
+      nav2_msgs
+      nav2_costmap_2d
+    )
+  endif()
+endif()
 
 # ament 패키지 선언
 ament_package()

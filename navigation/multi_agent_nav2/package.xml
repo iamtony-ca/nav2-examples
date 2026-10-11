@@ -21,6 +21,10 @@
   <depend>robot_interfaces</depend>
   <depend>rclcpp_lifecycle</depend>
 
+  <!-- [10-10 W1-2] AgentMaskCanvas 동등성 시험 -->
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>nav2_msgs</test_depend>  <!-- [10-10 W1-2][리뷰] publish 끝단 시험 -->
+
 
   <!-- pluginlib export -->
   <export>

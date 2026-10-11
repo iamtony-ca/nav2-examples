@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ammr_costmap_diff_publisher</name>
+  <version>0.1.0</version>
+  <description>
+    [10-10 W1-D] global costmap 의 마지막 layer 로 붙어, 값이 바뀐 셀만 nav2_msgs/CostmapUpdate 로 보내는
+    publisher layer (master 는 건드리지 않는다). 큰 지도(2e8 cells)에서 Costmap2DPublisher 의 full 전송을 대체한다.
+    [10-10 W1-5] FastClearLayer: clearable layer 만 reset 하고 값이 있던 범위만 다시 계산하게 하는 빠른 전체 clear 서비스 layer.
+  </description>
+  <maintainer email="iamtony.ca@gmail.com">tony</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>nav2_costmap_2d</depend>
+  <depend>nav2_msgs</depend>
+  <depend>nav2_util</depend>
+  <depend>pluginlib</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>nav_msgs</test_depend>
+  <test_depend>sensor_msgs</test_depend>
+  <test_depend>geometry_msgs</test_depend>
+  <test_depend>tf2_ros</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <costmap_2d plugin="${prefix}/diff_publisher_layer.xml" />
+  </export>
+</package>

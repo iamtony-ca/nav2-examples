@@ -30,6 +30,45 @@ from nav2_msgs.action import BackUp, Spin, DriveOnHeading
 from enum import IntEnum
 from typing import Optional, Dict, Tuple, List
 import time
+# [10-10 W1-7] _on_map 자유공간 mask 를 numpy 로 만든다. numpy 는 이미 메시지 import 로 올라와 있다
+#   (geometry_msgs/PoseWithCovariance ← nav_msgs/Odometry 의 생성 코드가 import numpy, rosidl_generator_py 가 python3-numpy 의존).
+#   만약 없으면 _np = None → 예전 Python 루프 그대로 (결과 동일, 느릴 뿐).
+try:
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
+
+def _map_free_mask_py(data) -> bytearray:
+    """[10-10 W1-7] 원본 그대로 (09-20 CPU) — 기준·대체 경로. 0 <= v < 50 이면 1, 아니면 0."""
+    return bytearray(1 if (0 <= v < 50) else 0 for v in data)
+
+
+def _build_map_free_mask(data):
+    """[10-10 W1-7] OccupancyGrid.data → 자유공간 mask (bytearray, 셀당 0/1). (mask, 'numpy'|'python') 를 돌려준다.
+
+    원본 generator `bytearray(1 if (0 <= v < 50) else 0 for v in data)` 와 바이트 단위로 같다:
+      int8 을 uint8 로 다시 읽으면 음수 -128..-1 (unknown -1 포함) 은 128..255 가 되므로
+      'u8 < 50' 하나가 '0 <= v < 50' 과 같다. 결과는 미리 잡은 bytearray 에 bool view 로 바로 쓴다
+      (bool 은 1 바이트 0/1) — 2 억 셀에서도 추가 사본·중간 배열 없음 (입력은 msg.data 를 zero-copy 로 본다).
+    mask 는 예전처럼 bytearray 라 _map_free 의 mask[idx] 는 그대로 int 0/1.
+    data 가 1 바이트 정수 buffer (rclpy 의 array.array('b')) 가 아니거나 numpy 가 없으면 원본 경로로 만든다."""
+    if _np is not None:
+        try:
+            with memoryview(data) as mv:
+                ok = mv.ndim == 1 and mv.itemsize == 1 and mv.format in ('b', 'B') and mv.c_contiguous
+        except TypeError:
+            ok = False                                  # list 등 buffer 아님 → 원본 경로
+        if ok:
+            n = len(data)
+            mask = bytearray(n)
+            if n:
+                src = _np.frombuffer(data, dtype=_np.uint8)      # zero-copy 읽기 view
+                dst = _np.frombuffer(mask, dtype=_np.bool_)      # zero-copy 쓰기 view
+                _np.less(src, 50, out=dst)
+                del dst, src                                      # bytearray·msg buffer export 해제
+            return mask, 'numpy'
+    return _map_free_mask_py(data), 'python'
+
 
 # ----------------------------------------------------------------------
 # 1) Enums & Constants
@@ -405,6 +444,10 @@ class FleetDecisionNode(Node):
         self.declare_parameter("predict_gap_sec", 3.0)
         self.declare_parameter("predict_conflict_dist_m", 0.8)
         self.declare_parameter("predict_debug", True)
+        # [10-08 Q58 A 사용자 "4 m 보다 짧은 경로는 늘리지 않습니다"] 이웃 경로 (nav2 /plan_truncated_short, 보통 4 m) 를 본체에서
+        #   표본을 따라 잰 길이가 이 값보다 짧으면 진짜 경로 끝 (상대가 거기서 선다) → 직선 연장하지 않는다.
+        #   0 = 끔 (예전처럼 늘 sp·horizon 까지 연장). 경로 없음·이 값 이상 (시야 끝) 은 예전과 같다.
+        self.declare_parameter("agent_path_ended_m", 0.0)
         # [S18 통로망] agent 대기 만료 시 replan 을 쏘면 고리형 통로망에서 동적 플래너가 다른 통로로 크게 돌아가는 경로를 내고
         # 정적 기준 경로와 1.6 m 이상 벗어나 403 → abort → 관제 DETOUR 가 반복된다. false 면 agent 대기 만료에 replan 대신
         # 대기를 이어간다(상대가 비켜주거나 내가 후진 양보). 정적 장애물 replan·goal 점유 처리는 그대로.
@@ -762,6 +805,7 @@ class FleetDecisionNode(Node):
         self.predict_horizon = float(gp("predict_horizon_sec"))
         self.predict_gap = float(gp("predict_gap_sec"))
         self.predict_conflict_dist = float(gp("predict_conflict_dist_m"))
+        self.agent_path_ended_m = float(gp("agent_path_ended_m"))          # [10-08 Q58 A]
         self._pre_slow_active: bool = False
         self._pre_slow_v: float = 0.0
         self._pre_slow_target: int = 0
@@ -1356,6 +1400,7 @@ class FleetDecisionNode(Node):
         self.get_logger().info(f" - [V2] speed_match        : {self.speed_match_enable} x{self.speed_match_ratio} (min {self.speed_match_min})")
         self.get_logger().info(f" - [V2] stopped wait       : yielding {self.stopped_yielding_wait} s / working {self.stopped_working_wait} s")
         self.get_logger().info(f" - [V2] mutual_block       : {self.mutual_block_replan_sec} s / {self.mutual_block_radius} m")
+        self.get_logger().info(f" - [V2] agent_path_ended_m : {self.agent_path_ended_m} m (Q58 A, 0 = 끔)")
         self.get_logger().info(f" - [V2] same_path          : ratio {self.same_path_overlap_ratio}, tube {self.same_path_tube} m")
         self.get_logger().info(f" - [V2] dynamic_priority   : {self.dynamic_priority_enable}, aging {self.aging_step_sec} s x{self.aging_max_level}")
         self.get_logger().info(f" - [V2] no_progress        : {self.no_progress_report_sec} s / {self.no_progress_dist} m")
@@ -2882,7 +2927,9 @@ class FleetDecisionNode(Node):
         # 상대 경로를 진행 방향으로 최소 4 m 까지 연장한 뒤 비교한다.
         now = self.get_clock().now()
         sp = self._agent_speed(agent.machine_id, now) or 0.0
-        other = self._agent_future_points(agent, max(sp, 4.0 / max(self.predict_horizon, 1.0)), now)
+        # [10-08 Q58 A] 같은 경로 판정은 '어디에 있을까' 가 아니라 '같은 차선·같은 방향인가' 라서 끝난 경로도 예전처럼 연장한다
+        #   (비율의 분모가 내 4 m 경로 전체 — 연장을 빼면 goal 에 다가가는 선두가 교차로로 분류되는 S11B 문제가 되살아난다).
+        other = self._agent_future_points(agent, max(sp, 4.0 / max(self.predict_horizon, 1.0)), now, extend_ended=True)
         if len(mine) < 2 or len(other) < 2:
             return self._check_vehicle_path(agent)          # 자료 부족 → v1 판정
         step = max(1, len(mine) // 30)
@@ -3280,12 +3327,18 @@ class FleetDecisionNode(Node):
             out.append(out[-1] + math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]))
         return out
 
-    def _agent_future_points(self, a: MultiAgentInfo, sp: float, now: Time) -> List[Tuple[float, float]]:
-        """상대의 앞으로 horizon 동안의 위치. 관제가 주는 경로는 짧다 (현장 프로토콜 궤적 10점 = 릴레이도 10점,
-        4 m 경로의 앞 0.8 m 만) → 마지막 점에서 진행 방향으로 sp·horizon 까지 직선 연장한다. 경로가 없으면 자세에서."""
+    def _agent_future_points(self, a: MultiAgentInfo, sp: float, now: Time,
+                             extend_ended: bool = False) -> List[Tuple[float, float]]:
+        """상대의 앞으로 horizon 동안의 위치. 관제가 주는 경로는 nav2 /plan_truncated_short (4 m 이하) 의 10점 표본이다
+        (현장 프로토콜 궤적 10점 = 릴레이도 10점). 시야 끝까지 온 경로 (agent_path_ended_m 이상) 와 경로 없음은
+        마지막 점 (없으면 자세) 에서 진행 방향으로 sp·horizon 까지 직선 연장한다.
+        [10-08 Q58 A] 받은 경로가 agent_path_ended_m 보다 짧으면 진짜 끝 (상대는 거기서 선다) → 받은 점만 돌려준다.
+        extend_ended=True 는 끝난 경로도 예전처럼 연장 (같은 경로 판정 전용)."""
         pts = [(p.pose.position.x, p.pose.position.y) for p in a.truncated_path.poses]
         pts = [(x, y) for (x, y) in pts if math.isfinite(x) and math.isfinite(y)]
         px, py = a.current_pose.pose.position.x, a.current_pose.pose.position.y
+        if not extend_ended and self._agent_path_ended(a, pts, px, py, now):
+            return pts
         if not pts:
             pts = [(px, py)]
         # 진행 방향: 경로 마지막 구간 → 없으면 자세 이력 변위 → 없으면 yaw
@@ -3304,6 +3357,59 @@ class FleetDecisionNode(Node):
         for k in range(1, n + 1):
             pts.append((x + 0.25 * k * math.cos(d), y + 0.25 * k * math.sin(d)))
         return pts
+
+    # [10-08 Q58 A] 받은 점들 사이 길이가 이보다 짧으면 본체 자리로 채운 빈 경로 (relay legacy 채움·격자 반올림) — 경로 없음과 같게 본다
+    _Q58_MIN_SPAN_M = 0.1
+    _q58_log = None                      # mid -> (마지막으로 로그한 '끝남' 여부, 그 시각 s). 처음 쓸 때 만든다
+    # [10-08 Q58 A 검토 #1] 문턱과 표본 방식이 안 맞는지 알리는 1회 경고. 받은 점 사이 길이가 이 이상인 (움직이는 이웃의) 경로를
+    #   이만큼 보았는데 문턱 이상인 것이 하나도 없으면 → 모든 이웃 경로가 '끝남' 으로 분류되어 연장이 다 꺼져 있다.
+    _Q58_DIAG_SPAN_M = 1.0
+    _Q58_DIAG_N = 600                    # 이웃 1대·0.5 s 예측 타이머면 약 5 분
+    _q58_diag = None                     # [본 횟수, 가장 긴 길이 m, 경고했는가]. 처음 쓸 때 만든다
+
+    def _agent_path_ended(self, a: MultiAgentInfo, pts: List[Tuple[float, float]], px: float, py: float,
+                          now: Time) -> bool:
+        """[10-08 Q58 A 사용자 "4 m 보다 짧은 경로는 늘리지 않습니다"] 이웃 경로가 진짜 끝났는가.
+        현장 이웃 경로 = nav2 /plan_truncated_short (BT TruncatePathLocal distance_forward 4.0, backward 0) 그대로 →
+        goal 이 멀면 4 m 이하 (TruncatePathLocal 은 4 m 를 처음 넘는 점을 빼므로 4.0 을 넘지 않는다, 0.078 m 간격이면 약 3.98 m),
+        goal 이 4 m 안이면 그만큼 짧다. 길이 = 본체 → 첫 점 + 받은 점들을 따라 잰 합.
+        끔 (0)·받은 점 2개 미만·점들이 본체 자리에 뭉침 (빈 경로) 이면 False (예전처럼 연장).
+        주의: 문턱은 표본 방식에 달렸다 — 10점 표본의 마지막 점이 진짜 끝이어야 3.8 이 맞다 (relay 비례 솎기는 4 m 를 약 3.6 m 로 보임).
+        Q35 `_swap_path_end` (점 수 < 10 또는 cycle_swap_path_goal_len_m) 와는 다른 기준이다 — 두 문턱은 따로 맞춘다."""
+        th = float(getattr(self, 'agent_path_ended_m', 0.0) or 0.0)
+        if th <= 0.0 or len(pts) < 2:
+            return False
+        span = self._cum_dist(pts)[-1]
+        if span < self._Q58_MIN_SPAN_M:
+            return False
+        ln = math.hypot(pts[0][0] - px, pts[0][1] - py) + span
+        ended = ln < th                                  # 본체 좌표가 NaN 이면 False (예전처럼 연장)
+        if span >= self._Q58_DIAG_SPAN_M and math.isfinite(ln):
+            if self._q58_diag is None:
+                self._q58_diag = [0, 0.0, False]
+            dg = self._q58_diag
+            dg[0] += 1
+            dg[1] = max(dg[1], ln)
+            if not dg[2] and dg[0] >= self._Q58_DIAG_N and dg[1] < th:
+                dg[2] = True
+                # 이 줄은 warn 하나만 쓴다 (rclpy 로거 심각도 함정 — 같은 줄에서 심각도를 바꾸지 않는다)
+                self.get_logger().warn(
+                    f"[V2] Q58 A 확인 필요: 이웃 경로 {dg[0]}회 중 가장 긴 것 {dg[1]:.2f} m < 문턱 {th:.2f} m "
+                    f"→ 모든 이웃 경로가 '끝남' 으로 연장이 꺼져 있다. 표본 방식 (relay 끝점·현장 gap) 과 agent_path_ended_m 을 확인할 것")
+        # 이웃마다 바뀔 때만 한 번 (같은 상태 2 s 안 재기록 없음). 심각도는 info 하나만 쓴다 (rclpy 로거 심각도 함정).
+        if self._q58_log is None:
+            self._q58_log = {}
+        mid = int(a.machine_id)
+        t = now.nanoseconds * 1e-9
+        last = self._q58_log.get(mid, (False, None))
+        if ended != last[0] and (last[1] is None or t - last[1] >= 2.0):
+            self._q58_log[mid] = (ended, t)
+            if ended:
+                msg = f"[V2] 이웃 {mid} 경로 {ln:.2f} m < {th:.2f} → 끝난 경로, 연장 안 함 (Q58 A)"
+            else:
+                msg = f"[V2] 이웃 {mid} 경로 {ln:.2f} m ≥ {th:.2f} → 시야 끝, 예전처럼 연장 (Q58 A)"
+            self.get_logger().info(msg)
+        return ended
 
     def _check_predicted_conflicts(self) -> None:
         """[V2] 내 경로와 이웃 경로가 conflict_dist 안에서 만나고, 둘 다 horizon 안에 그 지점에 닿으며 도착 시각
@@ -3420,7 +3526,10 @@ class FleetDecisionNode(Node):
     # ---- [V2.23] 후방 여유 실측 (local costmap) ----
     def _on_local_costmap(self, msg: OccupancyGrid) -> None:
         self._lc_grid = msg
-        self._lc_data = list(msg.data)
+        # [10-10 W1-7] list(msg.data) (500x500 = 25 만 int, 2 Hz) 복사 대신 msg.data (array.array 'b') 를 그대로 쓴다.
+        #   쓰는 곳은 _footprint_max_cost 의 'data is None' 과 data[j * W + i] (0 <= 색인 < W*H) 뿐 — 색인 결과는
+        #   list 와 같은 int (-128..127). msg 는 콜백마다 새로 만들어지고 아무도 고치지 않으며 _lc_grid 로 이미 붙들고 있다.
+        self._lc_data = msg.data
         self._lc_at = self.get_clock().now()
 
     def _on_local_footprint(self, msg: PolygonStamped) -> None:
@@ -5181,10 +5290,15 @@ class FleetDecisionNode(Node):
     def _on_map(self, msg: OccupancyGrid) -> None:
         self._map_msg = msg
         # [09-20 CPU] 매 호출마다 원본 data 를 훑으면 비싸다(실측 노드 CPU 21 %). 자유공간 여부를 1바이트 배열로 미리 만든다.
-        self._map_free_mask = bytearray(1 if (0 <= v < 50) else 0 for v in msg.data)
+        # [10-10 W1-7] 원본 generator 는 2 억 셀(600x300 m @0.03)에서 Python 루프라 기동 때 수십 초 동안 cb_group 을 막았다
+        #   (S3 실측 CPU 83 %, RSS 724 MB). 같은 결과를 numpy 로 만든다 — _build_map_free_mask 참고.
+        _t0 = time.monotonic()
+        self._map_free_mask, _how = _build_map_free_mask(msg.data)
+        _ms = (time.monotonic() - _t0) * 1000.0
         self._junc_cache = None
         self.get_logger().info(
-            f"[V2 yield] 지도 수신 {msg.info.width}x{msg.info.height} @ {msg.info.resolution:.3f} m — 후퇴 목표 검사에 쓴다")
+            f"[V2 yield] 지도 수신 {msg.info.width}x{msg.info.height} @ {msg.info.resolution:.3f} m — 후퇴 목표 검사에 쓴다"
+            f" [10-10 W1-7] mask {_ms:.0f} ms ({_how})")
 
     def _map_free(self, x: float, y: float, clearance: Optional[float] = None) -> bool:
         """지도에서 (x,y) 둘레 clearance 가 자유 공간인가. 지도가 없으면 판단을 보류하고 True."""

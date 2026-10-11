@@ -177,3 +177,40 @@ path_validator_node:
     self_footprint_margin_m: 0.05
     # [V2.30] READY 출발 점검: 로봇→남은 목표 누적 노선 거리가 이 값을 넘는 목표는 출발 판단에서 뺀다 (0=무제한, amhs 이관 09-27)
     ready_goal_horizon_m: 3.0
+
+    # [10-10 W1] global costmap mirror (full + CostmapUpdate 병합). 기본값 = 예전과 같은 토픽.
+    #   always_send_full_costmap: False 이면 Nav2 는 full 을 시작·크기/origin 변경 때만 보내고 나머지는
+    #   <global_costmap_topic>_updates 로 보낸다. get_costmap 으로 시작 때 한 번 full 을 다시 받는다.
+    # [10-10 W1-4] 기본 source = global costmap 의 DiffPublisherLayer (layer 이름 diff_publisher, 값이 바뀐 셀만 update 로 보낸다).
+    #   layer 가 없는 설정이면 아래 fallback (stock Costmap2DPublisher) 으로 한 번 바꾸고, 나중에 diff publisher 가 생기면 한 번 돌아간다.
+    global_costmap_topic: "/global_costmap/diff_publisher/costmap_raw"
+    global_costmap_service: "/global_costmap/diff_publisher/get_costmap"
+    global_costmap_fallback_topic: "/global_costmap/costmap_raw"      # [10-10 W1-4] stock full topic (update = + "_updates"). 비우면 fallback 끔
+    global_costmap_fallback_service: "/global_costmap/get_costmap"    # [10-10 W1-4] stock get_costmap
+    global_costmap_fallback_sec: 15.0    # (double, 15.0 처럼 소수점) [10-10 W1-4] diff topic publisher 0 개 && stock publisher ≥ 1 개 가 이만큼 이어지면 stock 으로 (0.0 = 끔)
+    global_costmap_event_driven: true    # (bool) [10-10 W1-4] global_costmap_topic 이 값이 바뀔 때만 보낸다 (diff layer) → watchdog 은 publisher 유무 + 아래 heartbeat 로 본다. stock 으로 바꾸면 false
+    global_costmap_heartbeat_sec: 20.0   # (double, 20.0 처럼 소수점) [10-10 W1-4][리뷰] event_driven source 무갱신 한도. diff layer 는 update 구독자가 있으면 sweep_tick_sec (1 s) 마다 band 하나를 보낸다. 20 = FULL ack 대기 상한 10 s + 여유. layer sweep_period_sec 0 이면 0.0 (끔)
+    costmap_resync_on_start: true        # 시작 resync. [10-10 W1][리뷰] update 수신·오래된 latched full·grace 경과 때 건다
+    costmap_resync_start_grace_sec: 5.0  # (double, 5.0 처럼 소수점) [10-10 W1][리뷰] 첫 topic full 뒤 이 안에 또 오면(True) 시작 resync 생략. full 이 없으면 ×4 뒤에 건다
+    costmap_resync_period_sec: 0.0       # (double, 60.0 처럼 소수점 — 60 으로 쓰면 기동 때 InvalidParameterTypeException 으로 respawn 반복, R14) 주기 resync (0 = 끔). 마지막 full 이후 이만큼 지나면 다시 받는다
+    costmap_resync_min_interval_sec: 5.0 # (double, 소수점) get_costmap 요청 최소 간격
+    costmap_resync_timeout_sec: 30.0     # (double, 소수점) [10-10 W1-3][리뷰] 응답이 이만큼 안 오면 "늦음" WARN 만 한다 (요청은 버리지 않고 늦은 응답도 쓴다). 포기는 costmap_resync_abandon_sec
+    costmap_updates_qos_depth: 100       # [10-10 W1][리뷰] 10 → 100. reader 쪽 KeepLast 덮어쓰기는 DDS 가 유실로 알리지 않는다
+    costmap_keep_spare_buffer: true      # 같은 geometry full 이 10 s 간격 안으로 3 번 이상 오면 직전 grid 메모리 재사용 (그동안 grid 2 장, full 이 끊기면 해제)
+    costmap_replay_max_msgs: 256         # [10-10 W1-2][리뷰] 64 → 256. get_costmap 스냅샷 뒤 도착까지 이보다 많은 update 가 오면 다시 받는다 (바이트 상한 64 MB 는 그대로)
+
+    # [10-10 W1-2] agent mask mirror (full + CostmapUpdate 병합). AgentLayer 의 full_mask_publish: false(기본) 이면
+    #   full 은 첫 publish·크기/원점 변경 때만 오고 나머지는 <agent_mask_topic>_updates 로 온다.
+    #   min_interval / timeout / start_grace / updates_qos_depth / keep_spare_buffer 는 위 costmap_* 값을 같이 쓴다.
+    agent_mask_service: "/global_costmap/get_agent_layer/raw_costmap"   # AgentLayer Costmap2DPublisher: "get_" + "agent_layer/raw_costmap"
+    agent_mask_resync_on_start: true     # 시작 resync (global 과 같은 조건: update 수신·오래된 latched full·grace 경과). [10-10 W1-2][리뷰] self-contained 면 grid 가 없을 때(grace×4)만
+    agent_mask_resync_period_sec: 0.0    # (double, 소수점) 주기 resync (0 = 끔). [10-10 W1-2][리뷰] self-contained 면 유실은 다음 update·AgentLayer refresh 가 메우므로 켤 필요 없다 (켜면 매번 200 MB)
+    agent_mask_self_contained_updates: true  # [10-10 W1-2][리뷰] update 하나 = mask 전체 (W1-2 AgentLayer 의 불변식). 유실·오래된 latched full 에 유령 셀이 남지 않는다. mask topic 을 일반 costmap 으로 바꾸면 false
+
+    # [10-10 W1-3] mask seed·resync backoff·global watchdog (verify/bigmap_1009/W1_SIDE_EFFECTS_{A,B}_1010.md 의 W2PV-1/2/3, R3, R4)
+    agent_mask_seed_from_global: true    # (bool) W2PV-1: mask 를 global mirror geometry 의 0 grid 로 시작하고 첫 update 를 바로 적용 (mask get_costmap 생략). namespace 가 다르면 자동으로 안 씀
+    costmap_resync_backoff_base_sec: 30.0  # (double, 30.0 처럼 소수점) R3: get_costmap timeout·실패 뒤 다음 요청까지 대기. 연속 실패마다 2 배
+    costmap_resync_backoff_max_sec: 120.0  # (double, 120.0 처럼 소수점) R3: backoff 상한
+    costmap_stale_watchdog_sec: 10.0     # (double, 10.0 처럼 소수점) R4: global costmap full/update 를 이만큼 못 받으면 throttled ERROR (0.0 = 끔). agent mask 에는 쓰지 않는다. [10-10 W1-4] diff source 는 publisher 가 사라진 뒤 이만큼 (본 적 없으면 시작 뒤 50 s), 무갱신은 global_costmap_heartbeat_sec ([리뷰])
+    costmap_resync_abandon_sec: 120.0    # (double, 120.0 처럼 소수점) [10-11 W1-g 결정: 300 → 120, 2e8 셀 (190.7 MB) resync 실측 16–24 s 의 약 5 배] [10-10 W1-3][리뷰] R3: 응답이 이만큼 없으면 (또는 timeout 뒤 service 가 사라지면) 요청을 버리고 backoff 뒤 다시. timeout 보다 작으면 timeout (예전 동작)
+    ready_hold_without_global_grid: true # (bool) [10-10 W1-3][리뷰] READY 인데 global grid 가 아직 없으면 SAFE 대신 is_status_ready=false 로 출발 보류 (false = 예전: SAFE)

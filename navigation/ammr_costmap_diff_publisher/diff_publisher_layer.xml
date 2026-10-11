@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<library path="ammr_costmap_diff_publisher">
+  <class
+    type="ammr_costmap_diff_publisher::DiffPublisherLayer"
+    base_class_type="nav2_costmap_2d::Layer">
+    <description>[10-10 W1-D] master 를 바꾸지 않고, 값이 바뀐 셀만 CostmapUpdate 로 보내는 publisher layer (plugins 목록 마지막)</description>
+  </class>
+</library>

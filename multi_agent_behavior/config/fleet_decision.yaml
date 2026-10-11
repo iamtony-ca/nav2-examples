@@ -131,6 +131,10 @@ fleet_decision_node:
     # 우선 로봇이 PAUSE 이고 그 경로가 내 발자국을 지나면 나를 기다리는 것 → 내가 비켜준다
     mutual_block_replan_sec: 10.0
     mutual_block_radius_m: 0.5
+    # [10-08 Q58 A] 이웃 경로를 본체에서 잰 길이가 이보다 짧으면 연장하지 않는다 (PIBT 발자국 검사·교차 예측 감속, 같은 경로 판정은 예전대로)
+    #   3.8 은 10점 표본의 마지막 점이 진짜 끝일 때 값이다 (4 m 경로가 본체에서 3.89~4.07 m 로 보임). relay 비례 솎기 (TRAJ_GAP 0) 는
+    #   4 m 를 3.5~3.7 m 로 보여 모든 경로가 '끝남' 이 된다 → sim 은 relay 끝점 수정 뒤에 이 값을 쓴다 (그 전엔 3.35 이하 또는 0).
+    agent_path_ended_m: 3.8   # nav2 상위 경로는 보통 4 m — 이보다 짧으면 진짜 끝 (Q58 A), 0 = 예전처럼 늘 연장
     # 같은 경로 판정 (M-10): 내 경로점 중 상대 튜브 안·같은 방향 비율
     same_path_overlap_ratio: 0.5
     same_path_tube_m: 0.6

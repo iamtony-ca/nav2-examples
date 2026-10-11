@@ -17,6 +17,7 @@
   <depend>std_srvs</depend>
   <depend>tf2_ros</depend>
   <depend>docking_monitoring_msgs</depend>   <!-- [OP 09-28] 도킹 중 fleet 기동 금지 -->
+  <exec_depend>python3-numpy</exec_depend>   <!-- [10-11 W1 결정] fleet_decision_node _on_map numpy (없으면 원래 경로로 돌아가지만 의존성을 명시) -->
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

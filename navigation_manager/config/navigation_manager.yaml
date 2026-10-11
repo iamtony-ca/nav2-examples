@@ -8,3 +8,6 @@ navigation_manager_node:
     # [10-07 Q51 (다)] 관제 pause (/nav_pause_flag) 중에는 Windows 로 올리는 ros_nav_pause·ros_nav_obstacle_detected 를 0 으로 둔다
     #   (관제 resume 즉시 8018 이 오게 — 장애물 앞 관제 pause → resume 영구 교착 방지). false = 예전 동작 (원복용). cmd 노드만 해당.
     mask_bits_during_operator_pause: true
+    # [10-10 W1-5] 명령 시작 때 global costmap clear 를 FastClearLayer 서비스로 (cmd 노드·토픽 노드 둘 다 읽는다).
+    #   nav2_params.yaml global_costmap plugins 의 fast_clear 와 짝. 되돌리기 = 이 줄을 지운다 (기본 /global_costmap/clear_entirely_global_costmap).
+    global_costmap_clear_service: "/global_costmap/fast_clear/clear_entirely"

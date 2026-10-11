@@ -240,9 +240,18 @@ class NavigationManagerNode(Node):
             '/local_costmap/clear_entirely_local_costmap',
             callback_group=self._srv_cb_group  # <--- 추가
         )
+        # [10-10 W1-5] global clear 서비스 이름을 param 으로 (기본 = 표준 서비스, 예전과 같음).
+        #   sim 은 FastClearLayer 의 '/global_costmap/fast_clear/clear_entirely' 로 시험한다.
+        #   local 은 그대로.
+        self.declare_parameter(
+            'global_costmap_clear_service', '/global_costmap/clear_entirely_global_costmap')
+        self._global_clear_service: str = str(
+            self.get_parameter('global_costmap_clear_service').value)
+        self.get_logger().info(
+            f'[10-10 W1-5] global costmap clear 서비스: {self._global_clear_service}')
         self.client_global = self.create_client(
             ClearEntireCostmap, 
-            '/global_costmap/clear_entirely_global_costmap',
+            self._global_clear_service,
             callback_group=self._srv_cb_group  # <--- 추가
         )
 
@@ -1601,7 +1610,7 @@ class NavigationManagerNode(Node):
         deadline = self.get_clock().now().nanoseconds / 1e9 + self.COSTMAP_SERVICE_WAIT_TIMEOUT
 
         for client, name in ((self.client_local, '/local_costmap/clear_entirely_local_costmap'),
-                             (self.client_global, '/global_costmap/clear_entirely_global_costmap')):
+                             (self.client_global, self._global_clear_service)):  # W1-5
             while not client.wait_for_service(timeout_sec=1.0):
                 if not rclpy.ok():
                     self.get_logger().error(f'Interrupted while waiting for {name}.')

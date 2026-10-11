@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<library path="ammr_costmap_fast_clear">
+  <class
+    type="ammr_costmap_diff_publisher::FastClearLayer"
+    base_class_type="nav2_costmap_2d::Layer">
+    <description>[10-10 W1-5] 빠른 전체 clear: clearable layer 만 reset 하고 값이 있던 범위(+inflation 반경)만 다시 계산하게 하는 서비스 layer (master 는 건드리지 않음, inflation layer 앞에 둔다)</description>
+  </class>
+</library>

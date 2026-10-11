@@ -890,6 +890,7 @@ controller_server:
 
 planner_server:
   ros__parameters:
+    costmap_update_timeout: 3.0   # [10-11] 명시 (기본 1.0 s). 큰 지도에서 clear 뒤 재계산·lock 대기로 waitForCostmap 이 1 s 를 넘을 수 있다 (CLEAR_TIMING_AUDIT_1011.md)
     planner_plugins: ["GridBased", "RecoveryGridBased1", "RecoveryGridBased2", "ReverseReedsShepp", "StraightLine", "ReverseAStar", "RecoveryGridBased2Plain"]  # [amhs 이관 09-27] ReverseAStar 추가, [10-05 D17] RecoveryGridBased2Plain 추가
     # use_sim_time: false
 
@@ -1451,6 +1452,9 @@ local_costmap:
       agent_layer:
         plugin: "multi_agent_nav2::AgentLayer"
         enabled: true
+        # [10-10 W1-3] mask 를 갱신분 전송으로 (full 은 첫 publish·크기/원점 변경 때만, 그 밖에는 agent_layer/raw_costmap_raw_updates).
+        #   새 path_validator (replan_monitor W1) 와만 쓴다. 되돌리기 = true (예전 방식, code 기본값). bool 이다 — "false" 문자열 금지.
+        full_mask_publish: false
 
         # 구독 토픽 (다중로봇 상태)
         topic: "/multi_agent_infos"
@@ -1686,10 +1690,14 @@ global_costmap:
       height: 50
       resolution: 0.03 #0.03 #0.05 testing...
       track_unknown_space: false #true       # If false, treats unknown space as free space, else as unknown space.
+      # [10-10 W1] True 그대로 둔다. 큰 지도 global costmap 은 아래 diff_publisher 가 바뀐 칸만 보내고,
+      #   Nav2 원래 토픽 (/global_costmap/costmap_raw) 은 구독자가 0 이면 full 을 만들지 않는다 (RViz Global Costmap 은 끌 것).
       always_send_full_costmap: True
 
       # plugins: ['static_layer', 'lane_filter', 'nvblox_layer', 'zed_front_object', 'zed_front_layer', 'zed_rear_layer', 'zed_right_layer', 'zed_left_layer', 'denoise_layer', 'obstacle_layer', 'stvl_layer', 'agent_layer', 'inflation_layer']
-      plugins: ['static_layer', 'lane_filter', 'nvblox_layer', 'zed_front_object', 'zed_front_layer', 'zed_rear_layer', 'zed_right_layer', 'zed_left_layer', 'denoise_layer', 'obstacle_layer', 'agent_layer', 'inflation_layer']
+      # plugins: ['static_layer', 'lane_filter', 'nvblox_layer', 'zed_front_object', 'zed_front_layer', 'zed_rear_layer', 'zed_right_layer', 'zed_left_layer', 'denoise_layer', 'obstacle_layer', 'agent_layer', 'inflation_layer']  # [10-10 W1] 반영 전
+      # [10-10 W1] fast_clear 는 inflation_layer 바로 앞, diff_publisher 는 맨 끝 (최종값 비교). 둘 다 ammr_costmap_diff_publisher 패키지.
+      plugins: ['static_layer', 'lane_filter', 'nvblox_layer', 'zed_front_object', 'zed_front_layer', 'zed_rear_layer', 'zed_right_layer', 'zed_left_layer', 'denoise_layer', 'obstacle_layer', 'agent_layer', 'fast_clear', 'inflation_layer', 'diff_publisher']
 
       # plugins: ['static_layer', 'obstacle_layer', 'inflation_layer']
 
@@ -1706,6 +1714,42 @@ global_costmap:
         enabled: True
         cost_scaling_factor: 10.0 #7.0 #10.0
         inflation_radius: 0.61 #0.45
+
+      # [10-10 W1-5] 빠른 전체 clear 서비스: /global_costmap/fast_clear/clear_entirely (nav2_msgs/srv/ClearEntireCostmap, 표준과 같은 type).
+      #   BT ClearGlobal_Pair 와 navigation_manager (global_costmap_clear_service) 가 이 서비스를 부른다. 표준 서비스도 그대로 남는다.
+      fast_clear:
+        plugin: "ammr_costmap_diff_publisher::FastClearLayer"
+        enabled: True          # False = 서비스는 그대로, 동작은 표준 clearEntirely (master 전체 reset + 모든 layer reset) — 원복 스위치
+        extra_margin_m: 0.0    # inflation 올림 반경과 별도로 더 넓힐 여유 (m)
+
+      # [10-10 W1-D] 값이 바뀐 칸만 CostmapUpdate 로 보내는 publisher layer (plugins 맨 끝).
+      #   토픽 /global_costmap/diff_publisher/costmap_raw (+ _updates), 서비스 /global_costmap/diff_publisher/get_costmap.
+      #   구독: path_validator (replan_monitor), smoother_server (아래 costmap_topic).
+      diff_publisher:
+        plugin: "ammr_costmap_diff_publisher::DiffPublisherLayer"
+        enabled: True
+        tile_size: 64                     # 비교·병합 단위 (셀). 보내는 사각형은 tile 안 실제 변경 셀의 tight box
+        max_rects: 256                    # cycle 당 CostmapUpdate 개수 상한 (넘으면 Morton 이웃끼리 면적 증가가 작은 쌍부터 병합)
+        max_queue_mb: 64.0                # 못 보낸 update 가 이만큼 쌓이면 전부 버리고 FULL 하나로 (backlog guard)
+        updates_qos_depth: 10             # <name>/costmap_raw_updates 의 transient_local depth (늦은 구독자 재생·catch-up history 길이)
+        publish_full_on_new_subscriber: True
+        log_stats_period_sec: 10.0
+        full_ack_timeout_sec: 10.0        # FULL publish 뒤 모든 reader ack 를 기다리는 상한 (그 뒤부터 catch-up 시각을 잰다)
+        catchup_delays_sec: [2.0, 10.0]   # ack 뒤 이 시각들에 FULL 전후 update 사각형을 현재 값으로 다시 보냄
+        refresh_period_sec: 5.0           # 5 s 마다 직전 2 주기에 보낸 update 사각형을 다시 (smoother KeepLast(10) 손실 복구)
+        refresh_rounds: 2
+        refresh_max_rects: 32
+        sweep_period_sec: 300.0           # 지도 전체를 300 s 에 한 바퀴 (1 s 마다 band) — 어떤 손실도 한 바퀴 안에 메움
+        sweep_tick_sec: 1.0
+        max_msg_mb: 2.0                   # update 메시지 하나 상한 (넘는 사각형은 행 band 로)
+        max_update_cycle_mb: 16.0         # 한 cycle 분량이 넘으면 update 대신 FULL
+        copy_chunk_mb: 2.0                # FULL·get_costmap 사본을 2 MB 묶음으로 (map thread 를 오래 막지 않게)
+        full_fallback_ratio: 0.5          # 한 cycle 의 사각형 면적이 지도의 50 % 를 넘으면 update 대신 FULL (lock 밖에서 생성)
+        publish_burst_msgs: 8             # CostmapSubscriber(smoother) 의 update reader 는 KeepLast(10) 고정 → 8 개마다
+        publish_burst_pause_ms: 2.0       #   2 ms 쉰다
+        repair_burst_msgs: 4              # repair(catch-up/refresh/sweep) 는 4 개마다 50 ms 쉰다
+        repair_burst_pause_ms: 50.0
+        audit_period_cycles: 0            # 현장 0 (끔). sim 검증 때만 25 (25 cycle 마다 지도 전체 비교 → bounds 밖 변경 수 통계)
 
 
       # stvl_layer:
@@ -1913,6 +1957,9 @@ global_costmap:
       agent_layer:
         plugin: "multi_agent_nav2::AgentLayer"
         enabled: true
+        # [10-10 W1-3] mask 를 갱신분 전송으로 (full 은 첫 publish·크기/원점 변경 때만, 그 밖에는 agent_layer/raw_costmap_raw_updates).
+        #   새 path_validator (replan_monitor W1) 와만 쓴다. 되돌리기 = true (예전 방식, code 기본값). bool 이다 — "false" 문자열 금지.
+        full_mask_publish: false
 
         # 구독 토픽 (다중로봇 상태)
         topic: "/multi_agent_infos"
@@ -2252,6 +2299,9 @@ map_saver:
 ### lmr annotation here
 smoother_server:
   ros__parameters:
+    # [10-10 W1-D] global costmap 을 diff_publisher 토픽으로 받는다 (CostmapSubscriber 가 + "_updates" 도 구독).
+    #   되돌리기 = 이 줄을 지운다 (기본값 global_costmap/costmap_raw). global_costmap plugins 의 diff_publisher 와 짝.
+    costmap_topic: "global_costmap/diff_publisher/costmap_raw"
     smoother_plugins: ["simple_smoother"]
     # smoother_plugins: ["simple_smoother", "savitzky_golay_smoother", "constrained_smoother"]
     simple_smoother:
