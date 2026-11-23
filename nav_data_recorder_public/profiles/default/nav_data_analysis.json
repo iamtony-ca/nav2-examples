@@ -1,0 +1,239 @@
+{
+  "configById": {
+    "3D!nav": {
+      "cameraState": {
+        "perspective": false,
+        "distance": 25,
+        "phi": 0.01,
+        "thetaOffset": 90,
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-position",
+      "followTf": "base_link",
+      "scene": {
+        "transforms": {
+          "showLabel": false,
+          "axisScale": 0.5,
+          "enablePreloading": true
+        }
+      },
+      "transforms": {},
+      "topics": {
+        "/map": {
+          "visible": true,
+          "colorMode": "map",
+          "alpha": 1.0,
+          "frameLocked": true
+        },
+        "/global_costmap/costmap": {
+          "visible": true,
+          "colorMode": "costmap",
+          "alpha": 0.35,
+          "frameLocked": true
+        },
+        "/local_costmap/costmap": {
+          "visible": true,
+          "colorMode": "costmap",
+          "alpha": 0.6,
+          "frameLocked": true
+        },
+        "/scan": {
+          "visible": true,
+          "colorMode": "colormap",
+          "colorField": "range",
+          "colorMap": "turbo",
+          "pointSize": 3,
+          "pointShape": "circle",
+          "decayTime": 0
+        },
+        "/plan": {
+          "visible": true,
+          "type": "line",
+          "lineWidth": 0.04,
+          "gradient": [
+            "#34c759ff",
+            "#34c759ff"
+          ]
+        },
+        "/local_plan": {
+          "visible": true,
+          "type": "line",
+          "lineWidth": 0.05,
+          "gradient": [
+            "#0a84ffff",
+            "#0a84ffff"
+          ]
+        },
+        "/transformed_global_plan": {
+          "visible": false
+        },
+        "/received_global_plan": {
+          "visible": false
+        },
+        "/local_costmap/published_footprint": {
+          "visible": true,
+          "color": "#00c7beff"
+        },
+        "/global_costmap/published_footprint": {
+          "visible": false
+        }
+      },
+      "layers": {
+        "grid": {
+          "visible": false,
+          "frameLocked": true,
+          "label": "Grid",
+          "instanceId": "grid",
+          "layerId": "foxglove.Grid",
+          "frameId": "map",
+          "size": 50,
+          "divisions": 50,
+          "lineWidth": 1,
+          "color": "#248eff40",
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "order": 1
+        }
+      },
+      "publish": {
+        "type": "point",
+        "poseTopic": "/goal_pose",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "imageMode": {},
+      "foxglovePanelTitle": "map / costmap / scan"
+    },
+    "Plot!speed": {
+      "paths": [
+        {
+          "value": "/odom.twist.twist.linear.x",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "odom v",
+          "color": "#0a84ff"
+        },
+        {
+          "value": "/cmd_vel_nav.linear.x",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "cmd_vel_nav",
+          "color": "#af52de"
+        },
+        {
+          "value": "/cmd_vel_smoothed.linear.x",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "cmd_vel_smoothed",
+          "color": "#34c759"
+        },
+        {
+          "value": "/cmd_vel.linear.x",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "cmd_vel",
+          "color": "#ff3b30"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240,
+      "foxglovePanelTitle": "speed (m/s)"
+    },
+    "StateTransitions!state": {
+      "paths": [
+        {
+          "value": "/navigate_to_pose/_action/status.status_list[0].status",
+          "timestampMethod": "receiveTime",
+          "label": "navigate_to_pose"
+        },
+        {
+          "value": "/navigate_through_poses/_action/status.status_list[0].status",
+          "timestampMethod": "receiveTime",
+          "label": "navigate_through_poses"
+        },
+        {
+          "value": "/collision_monitor_state.action_type",
+          "timestampMethod": "receiveTime",
+          "label": "collision_monitor"
+        }
+      ],
+      "isSynced": true,
+      "foxglovePanelTitle": "state"
+    },
+    "RosOut!log": {
+      "searchTerms": [],
+      "minLogLevel": 2,
+      "topicToRender": "/rosout",
+      "foxglovePanelTitle": "rosout"
+    },
+    "RawMessages!result": {
+      "topicPath": "/nav_data/action_result",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false,
+      "foxglovePanelTitle": "action result"
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": {
+    "speed": 1
+  },
+  "layout": {
+    "direction": "row",
+    "splitPercentage": 58,
+    "first": "3D!nav",
+    "second": {
+      "direction": "column",
+      "splitPercentage": 30,
+      "first": "Plot!speed",
+      "second": {
+        "direction": "column",
+        "splitPercentage": 50,
+        "first": "StateTransitions!state",
+        "second": {
+          "direction": "row",
+          "splitPercentage": 60,
+          "first": "RosOut!log",
+          "second": "RawMessages!result"
+        }
+      }
+    }
+  }
+}

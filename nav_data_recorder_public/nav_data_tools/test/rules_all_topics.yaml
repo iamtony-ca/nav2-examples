@@ -1,0 +1,65 @@
+# Test fixture: the default rules with every optional topic set (test_nightly.py).
+# Test copy of the default rules with every optional topic set (used by test_nightly.py).
+# Tune after about a week of data: start with the rules that produce the most false positives.
+# A topic that is not set (or commented out) simply disables the rules that need it.
+
+# "The robot should be moving" (R1 stop, R6 off path):
+#   - without topics.robot_status: a goal of one of topics.nav_actions is EXECUTING
+#   - with topics.robot_status (std_msgs/String): its value is one of active_states
+# The nightly job waits (30 min steps, at most --max-wait-h) while the robot is busy: a nav goal
+# executing, or robot_status in driving_states.
+active_states: [DRIVING, RECOVERY]
+recovery_states: [RECOVERY]
+driving_states: [DRIVING, PAUSED]
+
+frames: {map: map, base: base_link}
+
+topics:
+  odom: /odom
+  tf: /tf
+  plan: /plan
+  cmd_smoothed: /cmd_vel_smoothed            # R2: requested speed (velocity_smoother output)
+  cmd_adjusted: /cmd_vel                     # R2: speed sent to the base (collision_monitor output)
+  mark: /nav_data/mark
+  action_result: /nav_data/action_result     # recorder get_result (see topics.yaml events)
+  # R4 from goal status ABORTED
+  nav_actions: [/navigate_to_pose/_action/status, /navigate_through_poses/_action/status]
+  # R4 from a result field instead (an action server that ends non-failures as ABORTED too,
+  # with fail_field/fail_values in topics.yaml):
+  result_actions: [/my_task]
+  behavior_actions: [/spin/_action/status, /backup/_action/status, /drive_on_heading/_action/status,
+                     /assisted_teleop/_action/status, /wait/_action/status]
+  # --- optional, your robot's topics:
+  robot_status: /robot_state
+  bt_error_code: /bt_error_code
+  replan_request: /request_replan
+  current_planner: /current_planner
+  stop_command: /stop_command
+  is_stuck: [/progress_checker/is_stuck, /progress_checker_alt/is_stuck]
+  safety: /safety_status
+  monitoring: /diagnostic_summary
+
+merge_gap_s: 5.0      # same-rule hits closer than this become one interval
+report_top: 20
+
+rules:
+  R1: {name: stop, enabled: true, weight: 3, speed_below: 0.02, min_s: 10.0}
+  R2: {name: speed_limited, enabled: true, weight: 1, ratio_below: 0.5, min_cmd: 0.05, min_s: 2.0}
+  R3: {name: recovery, enabled: true, weight: 2}
+  R4: {name: failure, enabled: true, weight: 5}
+  # R5: /plan counts every planner call. Nav2's default navigate_to_pose BT replans at 1 Hz
+  #     (60/min), so set plan_per_min above your BT's normal rate.
+  R5: {name: replan_burst, enabled: true, weight: 1, plan_per_min: 30, compute_per_min: 20,
+       replan_per_min: 10}
+  R6: {name: off_path, enabled: true, weight: 2, dist_m: 0.3, min_s: 3.0, sample_hz: 5.0}
+  R7: {name: stop_command, enabled: true, weight: 3, stop_values: [2, 3]}
+  R8:
+    name: safety
+    enabled: true
+    weight: 5
+    # bool fields of topics.safety; '!name' = active-low (true while OK), the hit is when it goes false
+    fields: ['!estop_ok', bumper_pressed, protective_stop]
+  # R9: one of flag_fields goes true, or one of code_fields becomes non-zero (topics.monitoring)
+  R9: {name: monitoring_error, enabled: true, weight: 4, flag_fields: [localization_lost],
+       code_fields: [error_code]}
+  R10: {name: mark, enabled: true, weight: 10, pin_before_s: 300, pin_after_s: 300}

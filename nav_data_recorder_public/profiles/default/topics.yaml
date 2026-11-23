@@ -1,0 +1,114 @@
+# nav_data_recorder topic list. Defaults: a standard Nav2 (ROS 2 Jazzy) stack.
+# Part of the 'default' profile. For your robot copy the whole profile (profiles/README.md), add
+# the robot's own topics here and start with  ros2 launch ... profile:=<your profile>
+# Topics that do not exist on a robot are reported once ("missing_topic" event) and ignored.
+#
+# passthrough: recorded serialized, as is.
+#   rate: keep at most this many messages per second (0/absent = all)
+#   latched: keep the last message per publisher and re-write it at the start of every file
+#   tf: true  -> per-child-frame rate gate (several publishers share /tf)
+#   qos: {reliability: reliable|best_effort, durability: volatile|transient_local, depth: N}
+#        default = adapt to the publishers (like ros2 bag record)
+#   type: subscribe at start without waiting for the topic to appear (for short-lived publishers)
+#   record: false -> only watched by events
+# scan: sensor_msgs/LaserScan -> CompactScan on /nav_data/compact<topic>
+#   decimation: keep every N-th beam, keyframe_s: absolute keyframe interval (default 1 s)
+# grid: nav2_msgs/Costmap -> CompactGrid on /nav_data/compact<topic> (keyframe_s default 10 s)
+
+passthrough:
+  # --- paths
+  - {topic: /plan}
+  - {topic: /local_plan, rate: 5.0}
+  - {topic: /transformed_global_plan, rate: 1.0}
+  - {topic: /received_global_plan, rate: 5.0}       # regulated pure pursuit
+  - {topic: /lookahead_point, rate: 5.0}            # regulated pure pursuit
+  # --- footprints (collision monitor polygons: add their topics, e.g. /polygon_stop, rate 1.0)
+  - {topic: /local_costmap/published_footprint, rate: 1.0}
+  - {topic: /global_costmap/published_footprint, rate: 1.0}
+  # --- pose and velocity
+  - {topic: /tf, tf: true, rate: 50.0, qos: {depth: 100}}
+  - {topic: /odom, rate: 20.0}
+  - {topic: /cmd_vel_nav}                           # controller / behaviors output
+  - {topic: /cmd_vel_smoothed}                      # velocity_smoother output
+  - {topic: /cmd_vel}                               # collision_monitor output (sent to the base)
+  # --- latched
+  - {topic: /tf_static, latched: true}
+  - {topic: /map, latched: true}
+  - {topic: /costmap_filter_info, latched: true}    # only with costmap filters
+  # --- state
+  - {topic: /behavior_tree_log}
+  - {topic: /collision_monitor_state}
+  - {topic: /navigate_to_pose/_action/status}
+  - {topic: /navigate_through_poses/_action/status}
+  - {topic: /follow_waypoints/_action/status}
+  - {topic: /spin/_action/status}
+  - {topic: /backup/_action/status}
+  - {topic: /drive_on_heading/_action/status}
+  - {topic: /assisted_teleop/_action/status}
+  - {topic: /wait/_action/status}
+  # --- logs and marks
+  - {topic: /rosout}
+  - {topic: /nav_data/mark, type: std_msgs/msg/String}
+  # --- add your robot's topics here, for example:
+  # - {topic: /robot_state, latched: true}
+  # - {topic: /safety_status}
+  # - {topic: /diagnostics, rate: 1.0}
+
+scan:
+  # decimation: 1 keeps every beam; use 2..4 for dense lidars (> 2000 beams)
+  - {topic: /scan, rate: 10.0, decimation: 1}
+
+grid:
+  # Both costmaps as CompactGrid (XOR against the previous frame, keyframe every 10 s).
+  # Works with Nav2's default always_send_full_costmap: true.
+  - {topic: /local_costmap/costmap_raw, rate: 2.0, keyframe_s: 10.0}
+  - {topic: /global_costmap/costmap_raw, rate: 0.5, keyframe_s: 10.0}
+
+# Alternative for a large global costmap: record its diff stream instead of the grid above.
+# Needs always_send_full_costmap: false on the global costmap (Nav2 then publishes
+# costmap_raw once and costmap_raw_updates afterwards). The recorder asks get_costmap for a
+# full keyframe at the start of every file so each file can be read alone.
+#   1. remove /global_costmap/costmap_raw from grid:
+#   2. add to passthrough:
+#        - {topic: /global_costmap/costmap_raw, latched: true}
+#        - {topic: /global_costmap/costmap_raw_updates}
+#   3. uncomment:
+# global_keyframe:
+#   service: /global_costmap/get_costmap
+#   output: /nav_data/global_costmap_key
+#   timeout_s: 5.0
+
+# Online event log -> <root>/events/YYYYMMDD.jsonl
+#   when: change (default) | nonzero (changed to a non-zero value) | rising (false->true)
+#         | any (every message) | action_status (goal status transitions; ABORTED -> kind error)
+#   fields: '!name' = active-low bit (true while OK): the rule sees the inverted value
+#   result (action_status only): when a goal ends, call <action>/_action/get_result and log the
+#         fields (also written to /nav_data/action_result). fail_field/fail_values decide kind
+#         error; without them a goal that ended ABORTED is the error.
+events:
+  - topic: /navigate_to_pose/_action/status
+    kind: state
+    when: action_status
+    result: {type: nav2_msgs/action/NavigateToPose, fields: [result.error_code, result.error_msg]}
+  - topic: /navigate_through_poses/_action/status
+    kind: state
+    when: action_status
+    result: {type: nav2_msgs/action/NavigateThroughPoses, fields: [result.error_code, result.error_msg]}
+  - {topic: /follow_waypoints/_action/status, kind: state, when: action_status}
+  - {topic: /spin/_action/status, kind: state, when: action_status}
+  - {topic: /backup/_action/status, kind: state, when: action_status}
+  - {topic: /drive_on_heading/_action/status, kind: state, when: action_status}
+  - {topic: /wait/_action/status, kind: state, when: action_status}
+  - {topic: /nav_data/mark, kind: mark, field: data, when: any}
+  # --- examples for your robot's own messages (any type; fields are read at run time):
+  # - {topic: /robot_state, kind: state, field: data}                       # std_msgs/String
+  # - {topic: /error_code, kind: error, field: data, when: nonzero}
+  # - topic: /safety_status                                                  # custom message
+  #   kind: safety
+  #   when: rising
+  #   fields: ['!estop_ok', bumper_pressed, protective_stop]                 # '!' = true while OK
+  # - topic: /my_task/_action/status                                         # custom action
+  #   kind: state
+  #   when: action_status
+  #   result: {type: my_msgs/action/MyTask, fields: [result.code, result.message],
+  #            fail_field: result.code, fail_values: [3, 4]}

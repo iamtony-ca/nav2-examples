@@ -1,0 +1,5 @@
+# mcap writer options, overlaid on storage_preset (zstd_fast). See rosbag2_storage_mcap.
+# Data reaches the disk one chunk at a time: a chunk still being filled is lost when the power
+# goes. The mcap default (768 KiB uncompressed) takes minutes to fill at this recorder's rate;
+# 128 KiB keeps the window to seconds at a small cost in compression.
+chunkSize: 131072

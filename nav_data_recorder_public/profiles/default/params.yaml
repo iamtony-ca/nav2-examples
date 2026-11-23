@@ -1,0 +1,29 @@
+nav_data_recorder:
+  ros__parameters:
+    root_dir: ~/nav_data
+    # topics_file is filled in by the launch file (topics.yaml of the same profile)
+    split_period_s: 600.0          # one mcap per 10 min
+    max_cache_size: 1048576        # rosbag2 writer cache, bytes (also delays writes: keep small)
+    fsync_period_s: 5.0            # force data to disk this often: a power cut loses at most ~this
+    storage_preset: zstd_fast
+    discovery_period_s: 2.0
+    missing_timeout_s: 30.0        # report a configured topic that never appeared
+    map_frame: map
+    base_frame: base_link
+
+# Retention and nightly report, run by nav_data_maintenance (started by the same launch file).
+nav_data_maintenance:
+  ros__parameters:
+    keep_days: 7.0                 # delete recordings older than this (per 10-min file)
+    cap_gb: 60.0                   # ... and the oldest beyond this total size of rec/
+    min_free: 0.15                 # ... and the oldest while free disk is below this fraction
+    target_free: 0.20              #     (until free disk is back at this fraction)
+    pinned_days: 90.0              # marked moments (pinned/): age limit
+    pinned_cap_gb: 10.0            #   and size limit
+    meta_days: 90.0                # events/, index/, sessions/
+    prune_period_min: 15.0
+    nightly_time: "02:30"          # local time of the nightly report; "" = off
+    catch_up_days: 3               # also index days missed while the robot was off
+    nightly_max_wait_h: 6.0        # the report waits while the robot drives, at most this long
+    nightly_retry_min: 60.0
+    start_delay_s: 60.0
