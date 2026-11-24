@@ -1,23 +1,25 @@
 zed_watchdog:
   ros__parameters:
     # 실행할 런치 커맨드 (리스트 형식)
-    launch_cmd: ["ros2", "launch", "zed_multi_camera", "zed_multi_camera.launch.py"]
+    launch_cmd: ["ros2", "launch", "zed_multi_camera", "zed_multi_camera_delay_separate_three_cams.launch.py"]
 
-    cam_serials: "[1234,2345,3456]"
+    cam_serials: "[11111,111111,111111,111111]"  
 
     # [NEW] /tf 대기 타임아웃 (분 단위 설정)
-    tf_timeout_mins: 5.0
+    tf_timeout_mins: 999999.0
 
     # 감시할 토픽 목록
     check_topics:
-      - "/zed_node_0/left/camera_info"
-      - "/zed_node_1/left/camera_info"
-      - "/zed_node_2/left/camera_info"
-      - "/zed_node_3/left/camera_info"
+      - "/zed_multi/zed_front/point_cloud/cloud_registered"
+      - "/zed_multi/zed_rear/point_cloud/cloud_registered"
+      - "/zed_multi/zed_right/point_cloud/cloud_registered"  # [E5] was "/zed_multi/zed_right/left/gray/rect/image"
+      - "/zed_multi/zed_left/point_cloud/cloud_registered"  # [E5] added (left camera, watchdog_4cam.patch)
     
     # 타임아웃 설정 (초)
     boot_timeout: 60.0        # 부팅 허용 시간
-    stability_duration: 5.0   # 안정화 검사 시간
-    msg_timeout: 1.0          # 데이터 끊김 허용 시간
+    stability_duration: 7.0   # 안정화 검사 시간
+    msg_timeout: 3.0          # 데이터 끊김 허용 시간
     cooldown_sec: 10.0        # 재시작 대기 시간
-    max_attempts: 5           # 최대 재시도 횟수
+    max_attempts: 10 # [E5] was 50
+    attempt_reset_sec: 600.0  # [E5] added: RUNNING this long without a stall resets the attempt counter
+    fatal_retry_sec: 300.0  # [E5] added: after max_attempts: one more launch every N s (0 = stay FATAL)
