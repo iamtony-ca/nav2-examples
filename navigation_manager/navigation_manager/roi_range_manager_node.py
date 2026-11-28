@@ -142,6 +142,7 @@ class RoiRangeManagerNode(Node):
     def set_local_padding(self, value: float, reason: str) -> None:
         if not self.padding_cli_.wait_for_service(timeout_sec=1.0):
             self.get_logger().warn('local_costmap set_parameters not available yet.')
+            self.last_padding_ = None        # ← 추가: 못 보냈으니 캐시를 지운다
             return
 
         param = Parameter(
